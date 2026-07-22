@@ -201,53 +201,57 @@ export async function runCli(
 
   try {
     const catalog = closeOnce(await dependencies.createCatalog(config));
-    let resolveInterrupted!: (outcome: { readonly kind: "interrupted" }) => void;
-    const interrupted = new Promise<{ readonly kind: "interrupted" }>((resolve) => {
-      resolveInterrupted = resolve;
-    });
-    const onInterrupt = (): void => {
-      void catalog
-        .close()
-        .catch(() => undefined)
-        .then(() => resolveInterrupted({ kind: "interrupted" }));
-    };
-    dependencies.signal.once("SIGINT", onInterrupt);
-
     try {
-      const analysis = dependencies
-        .runImpactAnalysis({
-          request: arguments_.request,
-          catalog,
-          clock: dependencies.clock,
-          runId: createRunId(dependencies.clock()),
-          runsRoot: arguments_.runsRoot ?? config.runsRoot,
-        })
-        .then(
-          (run) => ({ kind: "completed" as const, run }),
-          (error: unknown) => ({ kind: "failed" as const, error }),
-        );
-      const outcome = await Promise.race([analysis, interrupted]);
+      let interruptedByUser = false;
+      let resolveInterrupted!: (outcome: { readonly kind: "interrupted" }) => void;
+      const interrupted = new Promise<{ readonly kind: "interrupted" }>((resolve) => {
+        resolveInterrupted = resolve;
+      });
+      const onInterrupt = (): void => {
+        interruptedByUser = true;
+        resolveInterrupted({ kind: "interrupted" });
+        void catalog.close().catch(() => undefined);
+      };
+      dependencies.signal.once("SIGINT", onInterrupt);
 
-      if (outcome.kind === "interrupted") {
-        dependencies.stderr.write("Interrupted by the user.\n");
-        return 130;
-      }
-      if (outcome.kind === "failed") {
-        if (outcome.error instanceof AppError) {
-          return writeAppError(outcome.error, dependencies.stderr);
+      try {
+        const analysis = dependencies
+          .runImpactAnalysis({
+            request: arguments_.request,
+            catalog,
+            clock: dependencies.clock,
+            runId: createRunId(dependencies.clock()),
+            runsRoot: arguments_.runsRoot ?? config.runsRoot,
+          })
+          .then(
+            (run) => ({ kind: "completed" as const, run }),
+            (error: unknown) => ({ kind: "failed" as const, error }),
+          );
+        const outcome = await Promise.race([analysis, interrupted]);
+
+        if (interruptedByUser || outcome.kind === "interrupted") {
+          dependencies.stderr.write("Interrupted by the user.\n");
+          return 130;
         }
-        dependencies.stderr.write(
-          "Status: MCP_UNAVAILABLE\nThe analysis failed at an external integration boundary.\n",
-        );
-        return 3;
-      }
+        if (outcome.kind === "failed") {
+          if (outcome.error instanceof AppError) {
+            return writeAppError(outcome.error, dependencies.stderr);
+          }
+          dependencies.stderr.write(
+            "Status: MCP_UNAVAILABLE\nThe analysis failed at an external integration boundary.\n",
+          );
+          return 3;
+        }
 
-      dependencies.stdout.write(
-        `Status: ${outcome.run.status}\nRun ID: ${outcome.run.runId}\nReport: ${outcome.run.artifactPath}\n`,
-      );
-      return 0;
+        dependencies.stdout.write(
+          `Status: ${outcome.run.status}\nRun ID: ${outcome.run.runId}\nReport: ${outcome.run.artifactPath}\n`,
+        );
+        return 0;
+      } finally {
+        dependencies.signal.off("SIGINT", onInterrupt);
+      }
     } finally {
-      dependencies.signal.off("SIGINT", onInterrupt);
+      await catalog.close().catch(() => undefined);
     }
   } catch (error) {
     if (error instanceof AppError) {

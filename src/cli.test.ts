@@ -1,6 +1,9 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
-import type { RunImpactAnalysisDependencies } from "./app/run-impact-analysis.js";
+import {
+  runImpactAnalysis as runImpactAnalysisReal,
+  type RunImpactAnalysisDependencies,
+} from "./app/run-impact-analysis.js";
 import type { RuntimeConfig } from "./config/runtime-config.js";
 import type { DataHubCatalog } from "./datahub/catalog.js";
 import type { LineageAsset, SchemaField, ToolTraceEntry } from "./domain/evidence.js";
@@ -16,6 +19,8 @@ const ENVIRONMENT = {
 
 class TestCatalog implements DataHubCatalog {
   closeCount = 0;
+
+  constructor(private readonly closeImplementation: () => Promise<void> = async () => undefined) {}
 
   async searchDatasets(): Promise<readonly DatasetCandidate[]> {
     return [];
@@ -35,6 +40,7 @@ class TestCatalog implements DataHubCatalog {
 
   async close(): Promise<void> {
     this.closeCount += 1;
+    await this.closeImplementation();
   }
 }
 
@@ -56,8 +62,8 @@ function harness(
     runId: input.runId,
     artifactPath: `${input.runsRoot}/${input.runId}/impact-report.md`,
   }),
+  catalog = new TestCatalog(),
 ): CliHarness {
-  const catalog = new TestCatalog();
   const signal = new EventEmitter();
   const stdout: string[] = [];
   const stderr: string[] = [];
@@ -254,6 +260,21 @@ describe("runCli", () => {
     expect(test.received.config).toBeUndefined();
   });
 
+  it("closes the catalog once when real analysis rejects a malformed request", async () => {
+    const test = harness(runImpactAnalysisReal);
+
+    const exitCode = await runCli(
+      ["--request", "Drop column customer_id from dataset snowflake:orders"],
+      test.dependencies,
+    );
+
+    expect(exitCode).toBe(2);
+    expect(test.catalog.closeCount).toBe(1);
+    expect(test.stderr.join("")).toBe(
+      "Status: INVALID_REQUEST\nSupported format: Rename column <source> to <target> in dataset <dataset hint>.\n",
+    );
+  });
+
   it("closes the active catalog and exits 130 after SIGINT", async () => {
     let analysisStarted!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -264,6 +285,35 @@ describe("runCli", () => {
         new Promise(() => {
           analysisStarted();
         }),
+    );
+
+    const exitCodePromise = runCli(["--request", REQUEST], test.dependencies);
+    await started;
+    test.signal.emit("SIGINT");
+
+    await expect(exitCodePromise).resolves.toBe(130);
+    expect(test.catalog.closeCount).toBe(1);
+    expect(test.stderr.join("")).toBe("Interrupted by the user.\n");
+    expect(test.signal.listenerCount("SIGINT")).toBe(0);
+  });
+
+  it("keeps exit 130 when SIGINT teardown rejects analysis before close settles", async () => {
+    let analysisStarted!: () => void;
+    let rejectAnalysis!: (error: AppError) => void;
+    const started = new Promise<void>((resolve) => {
+      analysisStarted = resolve;
+    });
+    const catalog = new TestCatalog(async () => {
+      rejectAnalysis(new AppError("MCP_UNAVAILABLE", "Shutdown rejected the pending analysis."));
+      throw new AppError("MCP_UNAVAILABLE", "Shutdown failed after rejecting analysis.");
+    });
+    const test = harness(
+      () =>
+        new Promise((_, reject) => {
+          rejectAnalysis = reject;
+          analysisStarted();
+        }),
+      catalog,
     );
 
     const exitCodePromise = runCli(["--request", REQUEST], test.dependencies);
