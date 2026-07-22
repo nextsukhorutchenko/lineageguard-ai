@@ -50,6 +50,10 @@ interface SdkToolClient {
   close(): Promise<void>;
 }
 
+interface OwnedSdkToolClient extends SdkToolClient {
+  connect: Client["connect"];
+}
+
 export const REQUIRED_DATAHUB_READ_TOOLS = [
   "search",
   "list_schema_fields",
@@ -175,21 +179,20 @@ export function toDataHubMcpToolClient(
   };
 }
 
-export async function connectDataHubMcp(
-  config: RuntimeConfig,
+export async function connectOwnedDataHubMcpClient(
+  client: OwnedSdkToolClient,
+  transport: Parameters<Client["connect"]>[0],
+  secrets: readonly string[],
   signal?: AbortSignal,
 ): Promise<McpToolClient> {
   signal?.throwIfAborted();
-  const client = new Client({ name: "lineageguard-ai", version: "0.1.0" });
-  const transport = new StdioClientTransport(dataHubMcpServerParameters(config));
-  transport.stderr?.on("data", boundedStderrCollector([config.datahubGmsToken]));
+  const deadline = AbortSignal.timeout(15_000);
+  const connectionSignal = signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
 
   try {
-    const deadline = AbortSignal.timeout(15_000);
-    const connectionSignal = signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
     await client.connect(transport, { signal: connectionSignal });
     await listAndAssertRequiredReadOnlyTools(client, connectionSignal);
-    return toDataHubMcpToolClient(client, [config.datahubGmsToken]);
+    return toDataHubMcpToolClient(client, secrets);
   } catch {
     try {
       await client.close();
@@ -199,4 +202,15 @@ export async function connectDataHubMcp(
     if (signal?.aborted) signal.throwIfAborted();
     throw new AppError("MCP_UNAVAILABLE", "The DataHub MCP subprocess could not be started.");
   }
+}
+
+export async function connectDataHubMcp(
+  config: RuntimeConfig,
+  signal?: AbortSignal,
+): Promise<McpToolClient> {
+  signal?.throwIfAborted();
+  const client = new Client({ name: "lineageguard-ai", version: "0.1.0" });
+  const transport = new StdioClientTransport(dataHubMcpServerParameters(config));
+  transport.stderr?.on("data", boundedStderrCollector([config.datahubGmsToken]));
+  return connectOwnedDataHubMcpClient(client, transport, [config.datahubGmsToken], signal);
 }

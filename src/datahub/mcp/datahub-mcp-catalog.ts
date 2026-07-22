@@ -157,17 +157,27 @@ export class DataHubMcpCatalog implements DataHubCatalog {
         );
       }
       const hasMore = parsed.start + parsed.count < parsed.total;
-      if (!hasMore) break;
+      let mustStop = false;
       if (candidates.size >= MAX_SEARCH_ITEMS || parsed.total > MAX_SEARCH_ITEMS) {
         reasons.add("ITEM_LIMIT_REACHED");
-        reasons.add("HAS_MORE");
-        break;
+        mustStop = true;
       }
-      if (parsed.count === 0 || candidates.size === before) {
+      if (offsets.length >= MAX_SEARCH_PAGES) {
+        reasons.add("PAGE_LIMIT_REACHED");
+        mustStop = true;
+      }
+      if (
+        (parsed.count === 0 && (hasMore || offset > 0)) ||
+        (parsed.count > 0 && candidates.size === before)
+      ) {
         reasons.add("NO_PROGRESS");
-        reasons.add("HAS_MORE");
+        mustStop = true;
+      }
+      if (mustStop) {
+        if (hasMore) reasons.add("HAS_MORE");
         break;
       }
+      if (!hasMore) break;
       offset += parsed.count;
     }
 
@@ -231,17 +241,28 @@ export class DataHubMcpCatalog implements DataHubCatalog {
         normalized = withOptional(normalized, "description", field.description);
         fields.set(field.fieldPath, normalized);
       }
-      if (parsed.remainingCount === 0) break;
+      const hasMore = parsed.remainingCount > 0;
+      let mustStop = false;
       if (fields.size >= MAX_SCHEMA_FIELDS || parsed.totalFields > MAX_SCHEMA_FIELDS) {
         reasons.add("ITEM_LIMIT_REACHED");
-        reasons.add("HAS_MORE");
-        break;
+        mustStop = true;
       }
-      if (parsed.returned === 0 || fields.size === before) {
+      if (offsets.length >= MAX_SCHEMA_PAGES) {
+        reasons.add("PAGE_LIMIT_REACHED");
+        mustStop = true;
+      }
+      if (
+        (parsed.returned === 0 && (hasMore || offset > 0)) ||
+        (parsed.returned > 0 && fields.size === before)
+      ) {
         reasons.add("NO_PROGRESS");
-        reasons.add("HAS_MORE");
+        mustStop = true;
+      }
+      if (mustStop) {
+        if (hasMore) reasons.add("HAS_MORE");
         break;
       }
+      if (!hasMore) break;
       offset += parsed.returned;
     }
     const items = [...fields.values()].sort((left, right) =>
@@ -259,6 +280,7 @@ export class DataHubMcpCatalog implements DataHubCatalog {
     const reasons = new Set<RequiredIncompleteReasonCode>();
     const fingerprints = new Set<string>();
     let offset = 0;
+    let returnedCount = 0;
 
     while (true) {
       if (offsets.length >= MAX_LINEAGE_PAGES) {
@@ -296,9 +318,12 @@ export class DataHubMcpCatalog implements DataHubCatalog {
       if (direction?.truncatedDueToTokenBudget === true) {
         reasons.add("TOKEN_BUDGET_TRUNCATION");
       }
+      returnedCount += returned;
       const fingerprint = results.map(({ entity }) => entity.urn).join("\u0000");
       if (fingerprints.has(fingerprint) && returned > 0) {
         reasons.add("REPEATED_PAGE");
+        if (returnedCount >= MAX_LINEAGE_ITEMS) reasons.add("ITEM_LIMIT_REACHED");
+        if (offsets.length >= MAX_LINEAGE_PAGES) reasons.add("PAGE_LIMIT_REACHED");
         if (hasMore) reasons.add("HAS_MORE");
         break;
       }
@@ -313,18 +338,27 @@ export class DataHubMcpCatalog implements DataHubCatalog {
         };
         asset = withOptional(asset, "name", result.entity.name);
         asset = withOptional(asset, "platform", result.entity.platform?.name);
-        if (existing === undefined || asset.hop < existing.hop) assets.set(asset.urn, asset);
+        if (existing !== undefined && asset.hop < existing.hop) assets.set(asset.urn, asset);
+        if (existing === undefined && assets.size < MAX_LINEAGE_ITEMS) assets.set(asset.urn, asset);
       }
-      if (assets.size >= MAX_LINEAGE_ITEMS) {
+      let mustStop = false;
+      if (returnedCount >= MAX_LINEAGE_ITEMS || assets.size >= MAX_LINEAGE_ITEMS) {
         reasons.add("ITEM_LIMIT_REACHED");
+        mustStop = true;
+      }
+      if (offsets.length >= MAX_LINEAGE_PAGES) {
+        reasons.add("PAGE_LIMIT_REACHED");
+        mustStop = true;
+      }
+      if ((returned === 0 && (hasMore || offset > 0)) || (returned > 0 && assets.size === before)) {
+        reasons.add("NO_PROGRESS");
+        mustStop = true;
+      }
+      if (mustStop) {
+        if (hasMore) reasons.add("HAS_MORE");
         break;
       }
       if (!hasMore) break;
-      if (returned === 0 || assets.size === before) {
-        reasons.add("NO_PROGRESS");
-        reasons.add("HAS_MORE");
-        break;
-      }
       offset += returned;
     }
     const items = [...assets.values()].sort((left, right) => compareEnglish(left.urn, right.urn));

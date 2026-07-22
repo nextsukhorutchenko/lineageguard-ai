@@ -55,6 +55,8 @@ interface FakeCatalogOptions {
   readonly searchError?: Error;
   readonly closeError?: Error;
   readonly searchReasons?: readonly RequiredIncompleteReasonCode[];
+  readonly searchPages?: number;
+  readonly searchOffsets?: readonly number[];
   readonly schemaReasons?: readonly RequiredIncompleteReasonCode[];
   readonly tableReasons?: readonly RequiredIncompleteReasonCode[];
   readonly columnReasons?: readonly RequiredIncompleteReasonCode[];
@@ -92,15 +94,26 @@ class FakeCatalog implements DataHubCatalog {
     this.operations.push("searchDatasets");
     if (this.#options.searchError) throw this.#options.searchError;
     if (this.#options.failSearch) throw new AppError("DATAHUB_UNAVAILABLE", "Unavailable.");
-    this.#trace.push({
-      callId: "mcp-001",
-      tool: "search",
-      arguments: { query: "/q orders", num_results: 50, offset: 0 },
-      status: "ok",
-      at: "2026-07-22T12:00:00.000Z",
-      page: 1,
-    });
-    return collection(this.#options.candidates ?? [TARGET], this.#options.searchReasons);
+    const offsets = this.#options.searchOffsets ?? [0];
+    for (const [index, offset] of offsets.entries()) {
+      this.#trace.push({
+        callId: `mcp-${String(this.#trace.length + 1).padStart(3, "0")}`,
+        tool: "search",
+        arguments: { query: "/q orders", num_results: 50, offset },
+        status: "ok",
+        at: "2026-07-22T12:00:00.000Z",
+        page: index + 1,
+      });
+    }
+    const result = collection(this.#options.candidates ?? [TARGET], this.#options.searchReasons);
+    return {
+      ...result,
+      completeness: {
+        ...result.completeness,
+        pages: this.#options.searchPages ?? result.completeness.pages,
+        offsets: this.#options.searchOffsets ?? result.completeness.offsets,
+      },
+    };
   }
 
   async listSchemaFields(): Promise<CollectionResult<SchemaField>> {
@@ -419,6 +432,27 @@ describe("runImpactAnalysis", () => {
     await expect(stat(join(runsRoot, RUN_ID, "impact-report.md"))).rejects.toMatchObject({
       code: "ENOENT",
     });
+    expect(catalog.operations).toEqual(["searchDatasets", "close"]);
+    expect(catalog.closeCount).toBe(1);
+  });
+
+  it("rejects two exact candidates found across a complete two-page search", async () => {
+    const candidates = [TARGET, { ...TARGET, urn: `${TARGET.urn}-second-page` }];
+    const catalog = new FakeCatalog({
+      candidates,
+      searchPages: 2,
+      searchOffsets: [0, 50],
+    });
+
+    await expect(runWith(catalog, await createRunsRoot())).rejects.toMatchObject({
+      code: "NEEDS_USER_CLARIFICATION",
+      details: {
+        candidates: candidates
+          .map(({ urn }) => urn)
+          .sort((left, right) => left.localeCompare(right, "en-US")),
+      },
+    });
+    expect(catalog.getTrace().map(({ arguments: args }) => args.offset)).toEqual([0, 50]);
     expect(catalog.operations).toEqual(["searchDatasets", "close"]);
     expect(catalog.closeCount).toBe(1);
   });

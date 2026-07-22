@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { calculateContextCoverage } from "../../domain/context-coverage.js";
 import { loadRuntimeConfig } from "../../config/runtime-config.js";
+import type { RequiredIncompleteReasonCode } from "../../domain/evidence.js";
 import { AppError } from "../../errors/app-error.js";
 import {
   DataHubMcpCatalog,
@@ -13,6 +14,7 @@ import {
   appendBoundedRedactedStderr,
   assertRequiredReadOnlyTools,
   connectDataHubMcp,
+  connectOwnedDataHubMcpClient,
   dataHubMcpServerParameters,
   listAndAssertRequiredReadOnlyTools,
   toDataHubMcpToolClient,
@@ -49,6 +51,170 @@ class RecordingMcpClient implements McpToolClient {
   getServerInfo() {
     return {};
   }
+}
+
+const searchPage = (offset: number, total: number, urns: readonly string[]) =>
+  jsonResult({
+    start: offset,
+    count: urns.length,
+    total,
+    searchResults: urns.map((urn) => ({ entity: { urn, name: urn } })),
+  });
+
+const schemaPage = (
+  offset: number,
+  totalFields: number,
+  remainingCount: number,
+  fieldPaths: readonly string[],
+) =>
+  jsonResult({
+    urn: DATASET_URN,
+    offset,
+    fields: fieldPaths.map((fieldPath) => ({ fieldPath })),
+    totalFields,
+    returned: fieldPaths.length,
+    remainingCount,
+  });
+
+const lineagePage = (
+  offset: number,
+  urns: readonly string[],
+  hasMore: boolean,
+  options: { readonly returned?: number; readonly tokenTruncated?: boolean } = {},
+) =>
+  jsonResult({
+    downstreams: {
+      searchResults: urns.map((urn) => ({ entity: { urn }, degree: 1 })),
+      offset,
+      returned: options.returned ?? urns.length,
+      hasMore,
+      truncatedDueToTokenBudget: options.tokenTruncated ?? false,
+    },
+  });
+
+interface CollectorScenarioResult {
+  readonly complete: boolean;
+  readonly reasonCodes: readonly RequiredIncompleteReasonCode[];
+  readonly itemCount: number;
+  readonly calls: number;
+  readonly maxItems: number;
+  readonly maxCalls: number;
+}
+
+async function runSearchStopScenario(
+  reason: Exclude<RequiredIncompleteReasonCode, "TOKEN_BUDGET_TRUNCATION">,
+): Promise<CollectorScenarioResult> {
+  const a = "urn:li:dataset:(search-a)";
+  const b = "urn:li:dataset:(search-b)";
+  let pages: readonly CallToolResult[];
+  if (reason === "INCONSISTENT_PAGINATION") {
+    pages = [searchPage(0, 2, [a]), searchPage(1, 3, [b])];
+  } else if (reason === "REPEATED_PAGE") {
+    pages = [searchPage(0, 4, [a, b]), searchPage(2, 4, [a, b])];
+  } else if (reason === "NO_PROGRESS") {
+    pages = [searchPage(0, 4, [a, b]), searchPage(2, 4, [b, a])];
+  } else if (reason === "ITEM_LIMIT_REACHED") {
+    pages = [
+      searchPage(
+        0,
+        1_001,
+        Array.from({ length: 50 }, (_, index) => `urn:li:dataset:(search-${index})`),
+      ),
+    ];
+  } else {
+    pages = Array.from({ length: 20 }, (_, index) =>
+      searchPage(index, 21, [`urn:li:dataset:(search-${index})`]),
+    );
+  }
+  const client = new RecordingMcpClient(pages);
+  const result = await new DataHubMcpCatalog(client).searchDatasets("orders");
+  return {
+    complete: result.completeness.complete,
+    reasonCodes: result.completeness.reasonCodes,
+    itemCount: result.items.length,
+    calls: client.calls.length,
+    maxItems: 1_000,
+    maxCalls: 20,
+  };
+}
+
+async function runSchemaStopScenario(
+  reason: Exclude<RequiredIncompleteReasonCode, "TOKEN_BUDGET_TRUNCATION">,
+): Promise<CollectorScenarioResult> {
+  let pages: readonly CallToolResult[];
+  if (reason === "INCONSISTENT_PAGINATION") {
+    pages = [schemaPage(0, 2, 1, ["a"]), schemaPage(1, 3, 1, ["b"])];
+  } else if (reason === "REPEATED_PAGE") {
+    pages = [schemaPage(0, 4, 2, ["a", "b"]), schemaPage(2, 4, 0, ["a", "b"])];
+  } else if (reason === "NO_PROGRESS") {
+    pages = [schemaPage(0, 4, 2, ["a", "b"]), schemaPage(2, 4, 0, ["b", "a"])];
+  } else if (reason === "ITEM_LIMIT_REACHED") {
+    pages = [
+      schemaPage(
+        0,
+        10_001,
+        9_901,
+        Array.from({ length: 100 }, (_, index) => `field_${index}`),
+      ),
+    ];
+  } else {
+    pages = Array.from({ length: 100 }, (_, index) =>
+      schemaPage(index, 101, 100 - index, [`field_${index}`]),
+    );
+  }
+  const client = new RecordingMcpClient(pages);
+  const result = await new DataHubMcpCatalog(client).listSchemaFields(DATASET_URN);
+  return {
+    complete: result.completeness.complete,
+    reasonCodes: result.completeness.reasonCodes,
+    itemCount: result.items.length,
+    calls: client.calls.length,
+    maxItems: 10_000,
+    maxCalls: 100,
+  };
+}
+
+async function runLineageStopScenario(
+  reason: RequiredIncompleteReasonCode,
+  column: string | undefined,
+): Promise<CollectorScenarioResult> {
+  const a = "urn:li:dataset:(lineage-a)";
+  const b = "urn:li:dataset:(lineage-b)";
+  let pages: readonly CallToolResult[];
+  if (reason === "INCONSISTENT_PAGINATION") {
+    pages = [lineagePage(0, [a], false, { returned: 2 })];
+  } else if (reason === "REPEATED_PAGE") {
+    pages = [lineagePage(0, [a, b], true), lineagePage(2, [a, b], false)];
+  } else if (reason === "NO_PROGRESS") {
+    pages = [lineagePage(0, [a, b], true), lineagePage(2, [b, a], false)];
+  } else if (reason === "ITEM_LIMIT_REACHED") {
+    pages = [
+      lineagePage(
+        0,
+        Array.from({ length: 100 }, (_, index) => `urn:li:dataset:(lineage-${index})`),
+        false,
+      ),
+    ];
+  } else if (reason === "TOKEN_BUDGET_TRUNCATION") {
+    pages = [lineagePage(0, [a], false, { tokenTruncated: true })];
+  } else {
+    pages = Array.from({ length: 20 }, (_, index) =>
+      lineagePage(index, [`urn:li:dataset:(lineage-${index})`], true),
+    );
+  }
+  const client = new RecordingMcpClient(pages);
+  const result = await new DataHubMcpCatalog(client).getDownstreamLineage(DATASET_URN, {
+    ...(column === undefined ? {} : { column }),
+    maxHops: 2,
+  });
+  return {
+    complete: result.completeness.complete,
+    reasonCodes: result.completeness.reasonCodes,
+    itemCount: result.items.length,
+    calls: client.calls.length,
+    maxItems: 100,
+    maxCalls: 20,
+  };
 }
 
 describe("Task 1A bounded evidence collection", () => {
@@ -153,6 +319,142 @@ describe("Task 1A bounded evidence collection", () => {
       itemCount: 100,
       reasonCodes: ["ITEM_LIMIT_REACHED"],
     });
+  });
+
+  it("marks exact terminal search and schema ceilings incomplete before accepting completion", async () => {
+    const searchClient = new RecordingMcpClient(
+      Array.from({ length: 20 }, (_, page) =>
+        searchPage(
+          page * 50,
+          1_000,
+          Array.from({ length: 50 }, (_, index) => `urn:li:dataset:(search-${page * 50 + index})`),
+        ),
+      ),
+    );
+    const schemaClient = new RecordingMcpClient(
+      Array.from({ length: 100 }, (_, page) =>
+        schemaPage(
+          page * 100,
+          10_000,
+          10_000 - (page + 1) * 100,
+          Array.from({ length: 100 }, (_, index) => `field_${page * 100 + index}`),
+        ),
+      ),
+    );
+
+    const search = await new DataHubMcpCatalog(searchClient).searchDatasets("orders");
+    const schema = await new DataHubMcpCatalog(schemaClient).listSchemaFields(DATASET_URN);
+
+    expect(search.items).toHaveLength(1_000);
+    expect(search.completeness).toMatchObject({
+      complete: false,
+      pages: 20,
+      reasonCodes: expect.arrayContaining(["ITEM_LIMIT_REACHED", "PAGE_LIMIT_REACHED"]),
+    });
+    expect(schema.items).toHaveLength(10_000);
+    expect(schema.completeness).toMatchObject({
+      complete: false,
+      pages: 100,
+      reasonCodes: expect.arrayContaining(["ITEM_LIMIT_REACHED", "PAGE_LIMIT_REACHED"]),
+    });
+  });
+
+  it("never returns more than one hundred lineage assets across pages", async () => {
+    const client = new RecordingMcpClient([
+      lineagePage(
+        0,
+        Array.from({ length: 60 }, (_, index) => `urn:li:dataset:(lineage-${index})`),
+        true,
+      ),
+      lineagePage(
+        60,
+        Array.from({ length: 60 }, (_, index) => `urn:li:dataset:(lineage-${index + 60})`),
+        false,
+      ),
+    ]);
+
+    const result = await new DataHubMcpCatalog(client).getDownstreamLineage(DATASET_URN, {
+      maxHops: 2,
+    });
+
+    expect(result.items).toHaveLength(100);
+    expect(result.completeness).toMatchObject({
+      complete: false,
+      itemCount: 100,
+      reasonCodes: expect.arrayContaining(["ITEM_LIMIT_REACHED"]),
+    });
+  });
+
+  it("counts returned lineage records toward the ceiling even when URNs are duplicates", async () => {
+    const duplicateUrn = "urn:li:dataset:(duplicate-lineage)";
+    const result = await new DataHubMcpCatalog(
+      new RecordingMcpClient([
+        lineagePage(
+          0,
+          Array.from({ length: 50 }, () => duplicateUrn),
+          true,
+        ),
+        lineagePage(
+          50,
+          Array.from({ length: 50 }, () => duplicateUrn),
+          false,
+        ),
+      ]),
+    ).getDownstreamLineage(DATASET_URN, { maxHops: 2 });
+
+    expect(result.items).toHaveLength(1);
+    expect(result.completeness).toMatchObject({
+      complete: false,
+      itemCount: 1,
+      reasonCodes: expect.arrayContaining(["ITEM_LIMIT_REACHED"]),
+    });
+  });
+
+  const stopMatrix: readonly {
+    readonly collector: string;
+    readonly reason: RequiredIncompleteReasonCode;
+    readonly run: () => Promise<CollectorScenarioResult>;
+  }[] = [
+    ...(
+      [
+        "HAS_MORE",
+        "PAGE_LIMIT_REACHED",
+        "ITEM_LIMIT_REACHED",
+        "REPEATED_PAGE",
+        "NO_PROGRESS",
+        "INCONSISTENT_PAGINATION",
+      ] as const
+    ).flatMap((reason) => [
+      { collector: "search", reason, run: () => runSearchStopScenario(reason) },
+      { collector: "schema", reason, run: () => runSchemaStopScenario(reason) },
+    ]),
+    ...(
+      [
+        "HAS_MORE",
+        "TOKEN_BUDGET_TRUNCATION",
+        "PAGE_LIMIT_REACHED",
+        "ITEM_LIMIT_REACHED",
+        "REPEATED_PAGE",
+        "NO_PROGRESS",
+        "INCONSISTENT_PAGINATION",
+      ] as const
+    ).flatMap((reason) => [
+      { collector: "table lineage", reason, run: () => runLineageStopScenario(reason, undefined) },
+      {
+        collector: "column lineage",
+        reason,
+        run: () => runLineageStopScenario(reason, "customer_id"),
+      },
+    ]),
+  ];
+
+  it.each(stopMatrix)("$collector stops boundedly with $reason", async ({ reason, run }) => {
+    const result = await run();
+
+    expect(result.complete).toBe(false);
+    expect(result.reasonCodes).toContain(reason);
+    expect(result.itemCount).toBeLessThanOrEqual(result.maxItems);
+    expect(result.calls).toBeLessThanOrEqual(result.maxCalls);
   });
 
   it("normalizes get_entities in batches of ten and records missing optional metadata", async () => {
@@ -426,6 +728,54 @@ describe("Task 1A capability boundary", () => {
     const operation = listAndAssertRequiredReadOnlyTools(client, controller.signal);
     controller.abort();
     await expect(operation).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("closes the owned client exactly once when cancellation aborts a hung second capability page", async () => {
+    const controller = new AbortController();
+    let closeCount = 0;
+    let listCalls = 0;
+    let markSecondPageStarted!: () => void;
+    const secondPageStarted = new Promise<void>((resolve) => {
+      markSecondPageStarted = resolve;
+    });
+    const client = {
+      async connect() {},
+      async listTools(params?: { cursor?: string }, options?: { signal?: AbortSignal }) {
+        listCalls += 1;
+        if (!params?.cursor) {
+          return {
+            tools: requiredTools.slice(0, 3).map((name) => ({
+              name,
+              annotations: { readOnlyHint: true },
+            })),
+            nextCursor: "next",
+          };
+        }
+        markSecondPageStarted();
+        return new Promise<never>((_, reject) => {
+          options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), {
+            once: true,
+          });
+        });
+      },
+      async callTool() {
+        return jsonResult({});
+      },
+      getServerVersion() {
+        return undefined;
+      },
+      async close() {
+        closeCount += 1;
+      },
+    };
+
+    const operation = connectOwnedDataHubMcpClient(client, {} as never, [], controller.signal);
+    await secondPageStarted;
+    controller.abort();
+
+    await expect(operation).rejects.toMatchObject({ name: "AbortError" });
+    expect(listCalls).toBe(2);
+    expect(closeCount).toBe(1);
   });
 
   it("snapshots only bounded credential-safe optional handshake identity", () => {

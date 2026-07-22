@@ -74,8 +74,10 @@ describe("DataHub MCP live integration", () => {
           "search",
           "list_schema_fields",
           "get_lineage",
-          "get_entities",
           "get_lineage",
+          "get_entities",
+          "get_entities",
+          "get_entities",
         ]);
       } finally {
         await catalog.close();

@@ -7,6 +7,7 @@ import { runImpactAnalysis } from "../src/app/run-impact-analysis.js";
 import type { CollectionResult, DataHubCatalog } from "../src/datahub/catalog.js";
 import type {
   EntityContext,
+  EntityContextIncompleteReasonCode,
   LineageAsset,
   SchemaField,
   ToolTraceEntry,
@@ -152,19 +153,37 @@ class FixtureCatalog implements DataHubCatalog {
     );
   }
 
-  async getEntityContext(): Promise<CollectionResult<EntityContext, never>> {
-    this.#trace.push({
-      callId: "mcp-005",
-      tool: "get_entities",
-      arguments: { urns: [] },
-      status: "ok",
-      at: "2026-07-22T12:00:00.000Z",
-      page: 1,
-    });
-    return parseFixture<CollectionResult<EntityContext, never>>(
+  async getEntityContext(
+    urns: readonly string[],
+  ): Promise<CollectionResult<EntityContext, EntityContextIncompleteReasonCode>> {
+    const requested = [...new Set(urns)].sort((left, right) => left.localeCompare(right, "en-US"));
+    for (let offset = 0; offset < requested.length; offset += 10) {
+      this.#trace.push({
+        callId: `mcp-${String(this.#trace.length + 1).padStart(3, "0")}`,
+        tool: "get_entities",
+        arguments: { urns: requested.slice(offset, offset + 10) },
+        status: "ok",
+        at: "2026-07-22T12:00:00.000Z",
+        page: offset / 10 + 1,
+      });
+    }
+    const fixture = await parseFixture<CollectionResult<EntityContext, never>>(
       "entity-context-order-details-impact.json",
       collectionSchema(entityContextSchema),
     );
+    const requestedSet = new Set(requested);
+    const items = fixture.items.filter(({ urn }) => requestedSet.has(urn));
+    const missing = requested.some((urn) => !items.some((item) => item.urn === urn));
+    return {
+      items,
+      completeness: {
+        complete: !missing,
+        pages: Math.ceil(requested.length / 10),
+        itemCount: items.length,
+        offsets: Array.from({ length: Math.ceil(requested.length / 10) }, (_, page) => page * 10),
+        reasonCodes: missing ? ["ENTITY_CONTEXT_UNAVAILABLE"] : [],
+      },
+    };
   }
 
   getServerInfo() {
@@ -200,6 +219,25 @@ afterEach(async () => {
 });
 
 describe("fixture-backed impact analysis", () => {
+  it("filters entity context to requested URNs and reports uninspected requests truthfully", async () => {
+    const catalog = new FixtureCatalog();
+    const missingUrn = "urn:li:dataset:(missing-from-fixture)";
+
+    const result = await catalog.getEntityContext([DATASET_URN, missingUrn]);
+
+    expect(result.items.map(({ urn }) => urn)).toEqual([DATASET_URN]);
+    expect(result.completeness).toEqual({
+      complete: false,
+      pages: 1,
+      itemCount: 1,
+      offsets: [0],
+      reasonCodes: ["ENTITY_CONTEXT_UNAVAILABLE"],
+    });
+    expect(catalog.getTrace().at(-1)?.arguments).toEqual({
+      urns: [DATASET_URN, missingUrn].sort((left, right) => left.localeCompare(right, "en-US")),
+    });
+  });
+
   it("repeats the grounded 24/11/90 result and matches the committed example", async () => {
     const first = await runFixturePipeline();
     const second = await runFixturePipeline();
