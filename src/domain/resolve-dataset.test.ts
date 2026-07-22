@@ -60,6 +60,23 @@ describe("resolveDataset", () => {
     );
   });
 
+  it("preserves a literal percent sequence accepted by pinned DataHub", () => {
+    const candidate = {
+      urn: "urn:li:dataset:(urn:li:dataPlatform:snowflake,orders%ZZarchive,PROD)",
+      name: "ORDERS ARCHIVE",
+    };
+
+    expect(resolveDataset(intent("snowflake:orders%ZZarchive"), [candidate])).toEqual(candidate);
+  });
+
+  it("does not derive an identity from a raw unit separator in a top-level component", () => {
+    const urn = "urn:li:dataset:(urn:li:dataPlatform:snowflake,orders\u001Farchive,PROD)";
+
+    expect(() =>
+      resolveDataset(intent("snowflake:orders\u001Farchive"), [{ urn, name: "ORDERS" }]),
+    ).toThrowError(expect.objectContaining({ code: "TARGET_NOT_FOUND" }));
+  });
+
   it.each([
     {
       label: "an extra top-level component",

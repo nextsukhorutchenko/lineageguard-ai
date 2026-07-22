@@ -12,14 +12,9 @@ const normalize = (value: string): string => value.trim().toLocaleLowerCase("en-
 const datasetUrnPrefix = "urn:li:dataset:(";
 const dataPlatformUrnPrefix = "urn:li:dataPlatform:";
 const invalidRawComponentCharacter = /[(),]/;
-const invalidPercentEscape = /%(?![0-9A-Fa-f]{2})/;
 
 function isCanonicalUrnComponent(value: string): boolean {
-  return (
-    value.length > 0 &&
-    !invalidRawComponentCharacter.test(value) &&
-    !invalidPercentEscape.test(value)
-  );
+  return value.length > 0 && !value.includes("\u001F") && !invalidRawComponentCharacter.test(value);
 }
 
 function platformQualifiedUrnIdentity(urn: string): string | undefined {
