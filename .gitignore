@@ -1,0 +1,42 @@
+# Dependencies and package-manager state
+node_modules/
+.pnpm-store/
+
+# Build and test output
+.next/
+out/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local DataHub and MCP state
+.datahub/
+.mcp/
+
+# Generated run artifacts
+runs/
+
+# Logs and temporary files
+*.log
+*.tmp
+tmp/
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
