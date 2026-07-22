@@ -12,7 +12,7 @@ The pinned demo analyzes `customer_id` to `customer_key` on the official DataHub
 
 ## Architecture and Safety Boundary
 
-The project is one TypeScript package with a thin CLI, an application orchestrator, pure domain modules, a typed DataHub catalog port, an MCP stdio adapter, and a Markdown artifact writer. Generated reports are confined beneath `runs/<run-id>/`.
+The project is one TypeScript package with a thin CLI, an application orchestrator, pure domain modules, a typed DataHub catalog port, an MCP stdio adapter, and a Markdown artifact writer. Generated reports are confined beneath the configured runs directory at `<runs-dir>/<run-id>/`. For that boundary to be trustworthy, the writer rejects a runs root, or any existing ancestor of it, that is a symbolic link or Windows junction.
 
 DataHub access is read-only. The adapter launches the official pinned command:
 
@@ -98,6 +98,12 @@ Remove-Item Env:DATAHUB_MCP_UVX_PATH -ErrorAction SilentlyContinue
 pnpm demo
 ```
 
+To analyze another rename that follows the supported grammar, invoke the CLI directly and change the request values:
+
+```powershell
+pnpm tsx src/cli.ts --request "Rename column order_id to order_key in dataset snowflake:b2fd91.order_entry_db.analytics.order_details"
+```
+
 A successful run prints its status, run ID, and a path like:
 
 ```text
@@ -108,11 +114,11 @@ Report: <repository>\runs\20260722T120000Z-0123abcd\impact-report.md
 
 Report-producing statuses are:
 
-| Status                       | Meaning                                                         |
-| ---------------------------- | --------------------------------------------------------------- |
-| `COMPLETED`                  | Table and column lineage evidence are available.                |
-| `COMPLETED_WITH_LIMITATIONS` | Downstream tables exist, but column lineage is incomplete.      |
-| `INSUFFICIENT_METADATA`      | No downstream lineage was returned within the two-hop boundary. |
+| Status                       | Meaning                                                                                                   |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `COMPLETED`                  | Downstream tables and at least one exact-URN column confirmation are available; coverage gaps may remain. |
+| `COMPLETED_WITH_LIMITATIONS` | Downstream tables exist, but no column-lineage result confirms an exact downstream table URN.             |
+| `INSUFFICIENT_METADATA`      | No downstream lineage was returned within the two-hop boundary.                                           |
 
 Input, resolution, missing-column, DataHub/MCP, and artifact failures return actionable terminal guidance and do not fabricate a report.
 

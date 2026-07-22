@@ -30,17 +30,17 @@
 
 ## Resolved Technical Decisions
 
-| Decision           | Resolution                                                                                                     | Reason                                                                                                                                     |
-| ------------------ | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Demo dataset       | `urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.order_details,PROD)`            | The official `showcase-ecommerce` datapack gives it 19 downstream assets within two hops and multiple column-level `customer_id` mappings. |
-| Demo change        | Rename `customer_id` to `customer_key`                                                                         | The source field exists as `NUMBER(38,0)` and has visible downstream column evidence.                                                      |
-| Demo request       | `Rename column customer_id to customer_key in dataset snowflake:b2fd91.order_entry_db.analytics.order_details` | The platform-qualified dataset identity supports deterministic resolution.                                                                 |
-| Lineage bound      | Two hops                                                                                                       | It captures the complete observed demo blast radius without invoking DataHub's `3+` full-graph behavior.                                   |
-| MCP client         | `@modelcontextprotocol/sdk@1.29.0` v1                                                                          | The official SDK still recommends v1 until the v2 line becomes stable.                                                                     |
-| Runtime validation | Zod 4.4.3                                                                                                      | One dependency covers CLI input, configuration, MCP response boundaries, and fixtures.                                                     |
-| Test runner        | Vitest 4.1.10                                                                                                  | It supports Node 22 and TypeScript ESM with fast focused test execution.                                                                   |
-| Impact formula     | `25 + downstream + depth + confirmed-column + gap`, capped at 100                                              | It is deterministic, explainable, and separately exposes every factor.                                                                     |
-| Next.js transition | After AC-001 through AC-010 pass for the CLI slice                                                             | This preserves the CLI as the proof boundary and prevents premature UI work.                                                               |
+| Decision           | Resolution                                                                                                     | Reason                                                                                                                                                                                            |
+| ------------------ | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Demo dataset       | `urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.order_details,PROD)`            | The committed sanitized capture of the official `showcase-ecommerce` datapack records 24 downstream dataset URNs within two hops and 11 exact-URN column-lineage confirmations for `customer_id`. |
+| Demo change        | Rename `customer_id` to `customer_key`                                                                         | The source field exists as `NUMBER(38,0)` and has visible downstream column evidence.                                                                                                             |
+| Demo request       | `Rename column customer_id to customer_key in dataset snowflake:b2fd91.order_entry_db.analytics.order_details` | The platform-qualified dataset identity supports deterministic resolution.                                                                                                                        |
+| Lineage bound      | Two hops                                                                                                       | It captures the complete observed demo blast radius without invoking DataHub's `3+` full-graph behavior.                                                                                          |
+| MCP client         | `@modelcontextprotocol/sdk@1.29.0` v1                                                                          | The official SDK still recommends v1 until the v2 line becomes stable.                                                                                                                            |
+| Runtime validation | Zod 4.4.3                                                                                                      | One dependency covers CLI input, configuration, MCP response boundaries, and fixtures.                                                                                                            |
+| Test runner        | Vitest 4.1.10                                                                                                  | It supports Node 22 and TypeScript ESM with fast focused test execution.                                                                                                                          |
+| Impact formula     | `25 + downstream + depth + confirmed-column + gap`, capped at 100                                              | It is deterministic, explainable, and separately exposes every factor.                                                                                                                            |
+| Next.js transition | After AC-001 through AC-010 pass for the CLI slice                                                             | This preserves the CLI as the proof boundary and prevents premature UI work.                                                                                                                      |
 
 ## Verified Primary References
 
@@ -1245,7 +1245,7 @@ const guidance = {
   NEEDS_USER_CLARIFICATION: "Choose one of the listed dataset URNs and retry with that exact URN.",
   COLUMN_NOT_FOUND: "Choose one of the actual schema fields listed above.",
   ARTIFACT_WRITE_FAILED:
-    "Verify that the configured runs directory is writable and remains inside the project workspace.",
+    "Verify that the configured runs directory is writable and has no symbolic-link or junction ancestors.",
 } as const;
 ```
 
