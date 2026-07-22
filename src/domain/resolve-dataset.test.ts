@@ -69,7 +69,15 @@ describe("resolveDataset", () => {
     expect(resolveDataset(intent("snowflake:orders%ZZarchive"), [candidate])).toEqual(candidate);
   });
 
-  it("does not derive an identity from a raw unit separator in a top-level component", () => {
+  it("does not derive an identity from DataHub reserved symbol U+241F in a component", () => {
+    const urn = "urn:li:dataset:(urn:li:dataPlatform:snowflake,orders\u241Farchive,PROD)";
+
+    expect(() =>
+      resolveDataset(intent("snowflake:orders\u241Farchive"), [{ urn, name: "ORDERS" }]),
+    ).toThrowError(expect.objectContaining({ code: "TARGET_NOT_FOUND" }));
+  });
+
+  it("also rejects ASCII unit separator U+001F as an additional safety guard", () => {
     const urn = "urn:li:dataset:(urn:li:dataPlatform:snowflake,orders\u001Farchive,PROD)";
 
     expect(() =>

@@ -12,9 +12,17 @@ const normalize = (value: string): string => value.trim().toLocaleLowerCase("en-
 const datasetUrnPrefix = "urn:li:dataset:(";
 const dataPlatformUrnPrefix = "urn:li:dataPlatform:";
 const invalidRawComponentCharacter = /[(),]/;
+const dataHubReservedUnitSeparatorSymbol = "\u241F";
+const asciiUnitSeparator = "\u001F";
 
 function isCanonicalUrnComponent(value: string): boolean {
-  return value.length > 0 && !value.includes("\u001F") && !invalidRawComponentCharacter.test(value);
+  return (
+    value.length > 0 &&
+    !value.includes(dataHubReservedUnitSeparatorSymbol) &&
+    // U+001F is not in DataHub RESERVED_CHARS, but remains rejected as a defensive safety guard.
+    !value.includes(asciiUnitSeparator) &&
+    !invalidRawComponentCharacter.test(value)
+  );
 }
 
 function platformQualifiedUrnIdentity(urn: string): string | undefined {
