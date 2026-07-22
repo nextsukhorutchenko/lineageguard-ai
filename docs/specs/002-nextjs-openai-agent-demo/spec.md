@@ -6,7 +6,7 @@
 
 **Date:** 2026-07-22
 
-**Last amended:** 2026-07-22 — approved DataHub evidence-completeness, context-coverage, and hackathon-submission scope
+**Last amended:** 2026-07-23 — approved tutorial-derived runtime proof, live preflight, provenance, and reviewer-gate scope
 
 **Project:** LineageGuard AI
 
@@ -54,6 +54,26 @@ Next.js browser UI
   -> safe local run directory
   -> browser preview and download
 ```
+
+The clean-room project diagram adapts the official hackathon reference architecture to the
+approved read-only category and boundary:
+
+```mermaid
+flowchart LR
+  U["Trigger: Next.js request"] --> A["OpenAI agent<br/>framework + model"]
+  A --> T1["analyze_rename_change"]
+  A --> T2["generate_migration_package"]
+  T1 --> M["Pinned read-only DataHub MCP"]
+  M -->|"read-only queries"| D["Local DataHub OSS<br/>schema · lineage · ownership · governance · quality"]
+  D -->|"metadata responses"| M
+  T1 --> C["Deterministic ChangeContext"]
+  C --> T2
+  T2 --> P["Validated migration package<br/>four review-ready artifacts"]
+```
+
+Unlike the general `Agents That Do Real Work` reference architecture, this application has no
+SQL execution, notification, incident, arbitrary API, or DataHub write-back action. Its action is
+the locally persisted, human-reviewed migration package.
 
 The manager agent has only high-level, application-owned tools. It has no raw DataHub, filesystem, shell, database, or GitHub tool access.
 
@@ -309,6 +329,16 @@ The rollback must not claim restoration of data that the forward plan could dest
 
 `rollout-plan.md` must contain preparation, staged change, downstream migration, validation, rollback triggers, approval gates, and completion criteria appropriate to the risk decision.
 
+Every classification must contain exactly one `PR Review Summary` section that states the
+DataHub decision, visible impact scope, and package state, followed by exactly one `Reviewer Gates`
+section. These sections prepare the artifact for human pull-request review; they do not create,
+approve, or merge a GitHub pull request.
+
+Reviewer gates must be grounded in the normalized `entityContext` for evidenced downstream URNs.
+They may name only verified owner URNs returned for successfully inspected entities, must list
+inspected downstream assets with no owner separately, and must label uninspected downstream
+ownership as unknown. The artifact must never infer an owner from counts or generic evidence.
+
 For `BLOCK_DIRECT_RENAME`, it must explicitly require human approval and downstream coordination before any breaking step.
 
 ### FR-018 — Evidence Grounding
@@ -375,6 +405,22 @@ If OpenAI generation or artifact validation fails after deterministic analysis s
 
 The UI must show concise factual activity entries for state transitions, application tool calls, durations, and success or failure. It must not display hidden reasoning, chain-of-thought, secrets, or raw provider traces.
 
+The activity timeline owns state transitions, durations, and sanitized success or failure. A
+separate runtime-proof panel must name `analyze_rename_change` and `generate_migration_package`
+exactly, show their bounded call counts and sanitized outcomes from application-owned metadata, and
+show whether the run used live MCP or fixture replay, the configured MCP package, sanitized reported
+server identity when available, the four allowed DataHub read operations, provider, model, and
+reasoning setting. DataHub operation summaries may show only operation name, page/item counts,
+completeness, and allowlisted reasons; raw MCP payloads and discovered extra-tool metadata must
+never reach the browser.
+
+The proof state must be closed and truthful: replay may identify the pinned MCP package only as the
+live reference it emulates, while live proof may claim MCP use only after the four-tool capability
+gate passes. A snapshot without verified DataHub and agent metadata must show `Runtime proof is not
+available for this state` and must not claim that MCP was used, extra tools were ignored, or live
+mutations were disabled. Persisted metadata must reject contradictory mode, source, provider, and
+verification combinations.
+
 ### FR-024 — Impact Presentation
 
 The UI must show score, level, confidence, risk factors, advisory decision, confirmed downstream count, evidence level, assumptions, and unknowns directly from deterministic results.
@@ -416,6 +462,13 @@ The application must provide a clearly labeled fixture replay mode that can demo
 ### FR-030 — Live Local Mode
 
 The application must provide a documented local mode using the pinned DataHub stack and a server-side OpenAI API key. The UI must make the active mode visible.
+
+The documented operator preflight must complete before a live OpenAI run: verify GMS health at
+`http://localhost:8080`, open the local DataHub UI at `http://localhost:9002`, locate the golden
+Snowflake `order_details` asset, confirm the `customer_id` schema field plus visible lineage and
+ownership context, and run the live MCP integration check. The guide must distinguish the UI
+endpoint from the GMS endpoint, require `uv` and Python 3.11 or newer for the pinned MCP server,
+and include personal-access-token troubleshooting without enabling mutations.
 
 ### FR-031 — Configuration Validation
 
@@ -489,11 +542,23 @@ After the MCP handshake, live mode must verify that `search`, `list_schema_field
 
 The subprocess environment must explicitly disable mutation, user, document, save-document, data-quality, and semantic-search surfaces supported by the pinned server. Additional advertised tools must be ignored.
 
+Readiness must never depend on a total advertised-tool count. Tutorial totals such as 22 tools,
+10 read tools, or 12 write tools are version- and configuration-dependent observations, not an
+API contract.
+
 ### FR-040 — Hackathon Submission Package
 
 The repository must contain English submission materials for the `Metadata-Aware Code Generation & Development` category: official-resource attribution, license and third-party disclosure, new-project and AI-tool disclosure, judging-criteria mapping, sample-output guide, live/replay explanation, submission checklist, and a timed video script shorter than three minutes.
 
 Manual checklist items must include public-repository visibility, Apache-2.0 license detection, a free replay/test-build Project URL through the judging period, Devpost dates, final repository-wide secret scanning, and the immutable submission commit or tag. DataHub Community Slack outreach and the Devpost feedback survey are optional manual actions; neither may be represented as a submission requirement or completed contribution before it happens.
+
+The package must attribute the official `Build a DataHub AI Agent in 30 Minutes` session and the
+personal-access-token documentation as reference-only sources with `no code copied`. Dataset
+provenance must record the source URL, applicable license or terms, redistribution permission,
+review date, and confirmation that no sensitive or employer/client data is included. The video and
+judging map must visibly connect DataHub asset resolution, schema, table/column lineage,
+ownership/context coverage, and the four-operation read-only trail to the 24/11/90 result and
+`BLOCK_DIRECT_RENAME` decision.
 
 ### FR-041 — Read-Only DataHub Skill Candidate
 
@@ -717,6 +782,13 @@ Tests prove that browser cancellation before atomic rename, MCP connection timeo
 
 The repository contains the complete English hackathon submission package, sanitized sample outputs, current dated checklist, and a contribution-ready local read-only LineageGuard DataHub Skill candidate without prohibited operations, false bonus claims, or unapproved external publication.
 
+Repository validation proves the presence and internal completeness of tutorial attribution,
+dataset provenance and redistribution review, the documented UI/GMS/MCP preflight checklist, a
+visible runtime-proof contract with both exact application-tool names, and an explicit
+mutations-disabled boundary. Separately recorded live evidence must prove GMS health, UI
+inspection, and the MCP integration check. The recorded demo shows how DataHub context changes the
+migration decision rather than merely displaying a `Powered by DataHub` claim.
+
 ## Required Deliverables
 
 - One Next.js page implementing the approved demonstration flow.
@@ -730,11 +802,17 @@ The repository contains the complete English hackathon submission package, sanit
 - Fixture replay mode.
 - Offline automated tests, including browser acceptance tests.
 - Opt-in live OpenAI smoke coverage.
+- One structured, sanitized, commit-bound live-verification record that distinguishes `NOT RUN`,
+  `PASSED`, and `FAILED` without embedding external-service output or secrets.
 - Updated English setup, configuration, architecture, safety, and demo documentation.
 - A hardened MCP capability, pagination, deadline, and cleanup boundary.
 - Versioned Evidence Completeness, normalized entity-context, and deterministic Context Coverage schemas.
+- A sanitized runtime-proof panel for source, MCP boundary, provider/model, and exact application
+  tool calls.
 - A replay case demonstrating incomplete evidence without executable output.
-- An English Devpost submission pack with attribution, disclosures, judging map, checklist, sample-output guide, and sub-three-minute script.
+- An English Devpost submission pack with tutorial attribution, dataset provenance, live preflight,
+  clean-room architecture diagram, disclosures, judging map, checklist, sample-output guide, and
+  sub-three-minute script.
 - One repository-owned, read-only LineageGuard schema-change impact skill prepared for separate upstream review.
 
 ## Definition of Done
@@ -748,12 +826,22 @@ This specification is implemented only when:
 - the golden fixture replay completes in the browser and produces all required artifacts;
 - the live local demo completes with pinned DataHub services and OpenAI configuration;
 - generated golden artifacts contain no facts absent from normalized evidence;
+- every rendered rollout plan contains exactly one PR review summary and one reviewer-gates
+  section grounded in the deterministic decision, visible impact scope, and verified ownership
+  context, with missing and unknown owners identified explicitly;
 - the critical-risk golden result cannot be presented as approved for autonomous execution;
 - DataHub remains read-only and no database execution capability exists;
 - model output cannot bypass deterministic validation;
 - browser bundles and responses contain no server credentials;
 - output and download boundaries cannot escape the configured runs root;
 - documentation clearly distinguishes live mode from fixture replay;
+- the live-verification record is structurally valid and reflects actual GMS, UI, MCP, and OpenAI
+  check status; repository phrase validation alone cannot mark those checks passed;
+- the UI visibly proves the runtime source, four-operation read-only boundary, exact two
+  application-tool calls, provider, and model without exposing raw MCP discovery or traces, and
+  shows a no-proof state instead of making claims when verified metadata is unavailable;
+- persisted metadata enforces replay/fixture and verified-live/MCP/OpenAI invariants and rejects
+  missing, duplicate, reordered, or extra application-tool proof entries;
 - no secret, private trace, or sensitive environment value is present in tracked files or reachable repository history;
 - every required collection dimension is either proven complete or represented with an allowlisted incomplete reason;
 - incomplete evidence cannot produce `EXECUTABLE_WITH_REVIEW`, and search or schema incompleteness cannot produce executable SQL;
@@ -761,6 +849,8 @@ This specification is implemented only when:
 - Context Coverage is deterministic, distinguishes absent from unknown metadata, and does not change risk;
 - cancellation before the atomic package rename, every configured pre-commit deadline, and injected persistence failure close owned resources and leave no finalized package or committed manifest; cancellation after the rename preserves the manifest-gated completed package as authoritative;
 - submission documents pass their dated Devpost, license, attribution, disclosure, and secret-scan checklist;
+- dataset provenance records source, terms, redistribution review, review date, and absence of
+  sensitive or employer/client data;
 - the repository-owned skill passes review for exact pinned parameters, read-only behavior, English content, and absence of SQL execution or autonomous approval.
 
 ## Deferred Decisions
@@ -791,3 +881,12 @@ These are technical-plan decisions. They must not broaden the approved product s
 This specification extends `001-datahub-impact-slice` and is derived from the approved design discussion and `PROJECT_BRIEF.md`, especially its requirements for a browser demo, agentic workflow, DataHub grounding, migration artifacts, Snowflake-aware safety, error handling, testing, and preservation of deterministic facts.
 
 The 2026-07-22 amendment was validated against the official DataHub Quickstart, pinned MCP Server `0.6.0` source and release, Agent Context Kit guidance, DataHub Skills repository, Analytics Agent repository, official sample datasets, and the Build with DataHub Devpost rules and resources. Those sources are implementation references and attribution targets; none is added as a new runtime dependency by this amendment.
+
+The 2026-07-23 amendment additionally reviewed the complete English transcript of
+<https://www.youtube.com/watch?v=_7cOIsvjFB0> and cross-checked its setup and token guidance
+against <https://docs.datahub.com/docs/quickstart>,
+<https://docs.datahub.com/docs/features/feature-guides/mcp>, and
+<https://docs.datahub.com/docs/authentication/personal-access-tokens>. The tutorial's total tool
+counts are descriptive and configuration-dependent, not an application contract. Its mutation,
+automatic-owner, and SQL/action examples remain intentionally outside this read-only runtime; no
+tutorial code or image is copied.

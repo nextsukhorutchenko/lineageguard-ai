@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Last amended:** 2026-07-23 — approved DataHub tutorial runtime-proof and live-preflight delta
+
 **Goal:** Build a polished local Next.js demo that proves complete-or-explicitly-incomplete DataHub impact analysis, enriches it with bounded read-only business context, uses one bounded OpenAI agent to plan a grounded Snowflake-first migration package, validates every artifact deterministically, and ships a truthful hackathon submission package.
 
 **Architecture:** Keep one `pnpm` package and preserve the existing domain and DataHub modules as the source of truth. Harden the pinned MCP boundary first: the application allowlists four internal read operations, validates capability annotations, proves or denies pagination completeness, and derives Context Coverage from bounded entity enrichment. A Node.js Next.js Route Handler then streams typed NDJSON workflow events from one application orchestrator; the orchestrator exposes exactly `analyze_rename_change` and `generate_migration_package` to either a real OpenAI Agents SDK provider or a deterministic fake provider. The model returns structured strategy data only, while application code owns risk, completeness, context coverage, identifiers, SQL rendering, validation, persistence, downloads, and all safety decisions.
@@ -15,6 +17,7 @@
 - Preserve the existing deterministic intent, DataHub, evidence, impact, redaction, and artifact-path behavior.
 - Keep DataHub MCP read-only; do not add database, shell, raw MCP, filesystem, or GitHub tools to the agent.
 - Internally allowlist only `search`, `list_schema_fields`, `get_lineage`, and `get_entities`; verify all four advertise `readOnlyHint: true`, ignore every other advertised MCP tool, and never confuse protocol discovery with an agent tool.
+- Treat tutorial totals such as `22 tools`, `10 read`, or `12 write` as configuration-dependent observations, never as a runtime contract or authorization boundary.
 - Expose exactly two agent tools: `analyze_rename_change` and `generate_migration_package`.
 - Use a configurable default model of `gpt-5.6-sol` with `medium` reasoning effort.
 - Configure the Agents SDK with `maxTurns: 8`, `maxFunctionToolConcurrency: 1`, `parallelToolCalls: false`, `tracingDisabled: true`, and a 90-second agent deadline.
@@ -33,6 +36,7 @@
 - Treat DataHub entity metadata as bounded untrusted data and keep Context Coverage separate from Evidence Completeness, risk, and confidence.
 - Do not add `datahub-agent-context`, Analytics Agent, LangChain, Google ADK, Snowflake Cortex, or any second runtime stack.
 - Keep the official `showcase-ecommerce` datapack as the golden dataset and fixture replay as the deterministic fallback.
+- Require a live operator preflight—GMS health, DataHub UI inspection of the golden asset, and `pnpm test:integration`—before any live OpenAI run.
 - Keep repository content, code, documentation, comments, tests, errors, and UI copy in English.
 
 ---
@@ -132,6 +136,7 @@ Primary references:
 - Create `src/ui/impact-panel.tsx` — authoritative deterministic assessment.
 - Create `src/ui/evidence-panel.tsx` — table/column evidence distinction.
 - Create `src/ui/context-coverage-panel.tsx` — deterministic metadata coverage and missing/unknown distinction.
+- Create `src/ui/runtime-proof-panel.tsx` — truthful source, MCP allowlist, provider/model, and exact application-tool proof.
 - Create `src/ui/artifact-workspace.tsx` — preview, copy, download, and validation state.
 - Create `src/ui/run-error.tsx` — actionable typed failures and clarification.
 - Create `src/ui/read-ndjson.ts` — strict streamed-event decoder.
@@ -587,7 +592,21 @@ expect(() =>
     })),
   ),
 ).toThrow("Required read-only DataHub MCP tools are unavailable.");
+
+expect(() =>
+  assertRequiredReadOnlyTools([
+    ...requiredTools.map((name) => ({ name, annotations: { readOnlyHint: true } })),
+    { name: "save_document", annotations: { readOnlyHint: false } },
+    { name: "add_owners", annotations: { readOnlyHint: false } },
+    { name: "future_tool", annotations: { readOnlyHint: false } },
+  ]),
+).not.toThrow();
 ```
+
+For the extra-tool case, assert that `save_document`, `add_owners`, and `future_tool` are not
+returned by `DataHubMcpCatalog` and cannot be invoked through its exact-name TypeScript boundary.
+Task 9 owns their absence from run metadata and the provider surface. Do not assert any total
+advertised-tool count.
 
 Also fake two `listTools` pages with a `nextCursor` and place `get_entities` only on page two; the gate must pass after collecting both pages. Every cursor request must receive the same 15-second connection `AbortSignal`. A repeated cursor or more than five tool-list pages must fail with `MCP_UNAVAILABLE` before any DataHub tool call. A hung second page must be aborted and close the owned client exactly once.
 
@@ -1705,6 +1724,7 @@ export const DeadlineEventSchema = z
 export const DataHubRunMetadataSchema = z
   .object({
     source: z.enum(["mcp", "fixture"]),
+    verification: z.enum(["CAPABILITY_GATE_PASSED", "REPLAY_FIXTURE"]),
     configuredMcpPackage: z.literal("mcp-server-datahub@0.6.0"),
     allowedTools: z.tuple([
       z.literal("search"),
@@ -1715,7 +1735,18 @@ export const DataHubRunMetadataSchema = z
     reportedServerName: z.string().max(100).optional(),
     reportedServerVersion: z.string().max(100).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    const sourceAndVerificationDisagree =
+      (value.source === "mcp") !== (value.verification === "CAPABILITY_GATE_PASSED");
+    if (sourceAndVerificationDisagree) {
+      ctx.addIssue({
+        code: "custom",
+        message: "DataHub source and verification status are inconsistent.",
+      });
+    }
+  });
+export type DataHubRunMetadata = z.infer<typeof DataHubRunMetadataSchema>;
 
 export const AgentRunMetadataSchema = z
   .object({
@@ -1725,15 +1756,22 @@ export const AgentRunMetadataSchema = z
     promptVersion: z.string().min(1).max(100),
     schemaVersion: z.string().min(1).max(20),
     generationAttempts: z.number().int().min(0).max(2),
-    toolCalls: z.array(
+    toolCalls: z.tuple([
       z
         .object({
-          name: z.enum(["analyze_rename_change", "generate_migration_package"]),
+          name: z.literal("analyze_rename_change"),
+          calls: z.number().int().min(0).max(1),
+          outcome: z.enum(["accepted", "clarification", "failed", "not_called"]),
+        })
+        .strict(),
+      z
+        .object({
+          name: z.literal("generate_migration_package"),
           calls: z.number().int().min(0).max(2),
           outcome: z.enum(["accepted", "clarification", "failed", "not_called"]),
         })
         .strict(),
-    ),
+    ]),
     latencyMs: z.number().int().nonnegative().optional(),
     usage: z
       .object({
@@ -1744,7 +1782,18 @@ export const AgentRunMetadataSchema = z
       .strict()
       .optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    const [analysis, generation] = value.toolCalls;
+    const callsAndOutcomesDisagree =
+      (analysis.calls === 0) !== (analysis.outcome === "not_called") ||
+      (generation.calls === 0) !== (generation.outcome === "not_called") ||
+      generation.outcome === "clarification" ||
+      value.generationAttempts !== generation.calls;
+    if (callsAndOutcomesDisagree) {
+      ctx.addIssue({ code: "custom", message: "Agent tool-call metadata is inconsistent." });
+    }
+  });
 
 export const WorkflowSnapshotSchema = z
   .object({
@@ -1812,6 +1861,33 @@ export const WorkflowSnapshotSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
+    const runtimeProofIsContradictory =
+      (value.datahub?.source === "fixture" &&
+        (value.mode !== "REPLAY" || value.datahub.verification !== "REPLAY_FIXTURE")) ||
+      (value.datahub?.source === "mcp" &&
+        (value.mode !== "LIVE" || value.datahub.verification !== "CAPABILITY_GATE_PASSED")) ||
+      (value.agent?.provider === "fixture" && value.mode !== "REPLAY") ||
+      (value.agent?.provider === "openai" && value.mode !== "LIVE");
+    if (runtimeProofIsContradictory) {
+      ctx.addIssue({ code: "custom", message: "Runtime proof metadata contradicts the run mode." });
+    }
+    if (value.agent !== undefined) {
+      const [analysis, generation] = value.agent.toolCalls;
+      const statusAndToolProofDisagree =
+        (value.status === "COMPLETED" &&
+          (analysis.outcome !== "accepted" || generation.outcome !== "accepted")) ||
+        (value.status === "NEEDS_USER_CLARIFICATION" &&
+          (analysis.outcome !== "clarification" || generation.outcome !== "not_called")) ||
+        (generation.calls > 0 &&
+          (analysis.outcome !== "accepted" || value.contextHash === undefined)) ||
+        (analysis.outcome === "accepted" && value.contextHash === undefined);
+      if (statusAndToolProofDisagree) {
+        ctx.addIssue({
+          code: "custom",
+          message: "Agent tool proof contradicts the workflow snapshot.",
+        });
+      }
+    }
     const nonTerminal = new Set([
       "DRAFT",
       "RESOLVING_CONTEXT",
@@ -1906,6 +1982,19 @@ export const WorkflowEventSchema = z.discriminatedUnion("type", [
 ]);
 export type WorkflowEvent = z.infer<typeof WorkflowEventSchema>;
 ```
+
+Extend `src/workflow/contracts.test.ts` with a table-driven runtime-proof contract. Accept only
+`REPLAY + fixture + REPLAY_FIXTURE + fixture` and
+`LIVE + mcp + CAPABILITY_GATE_PASSED + openai` when the corresponding optional metadata is present;
+reject every crossed mode/source/verification/provider combination. Prove that `agent.toolCalls`
+accepts only the exact ordered two-entry tuple, rejecting a missing entry, duplicate entry, reversed
+order, extra entry, wrong name, and more than one analysis call. Also reject zero calls with any
+outcome other than `not_called`, positive calls with `not_called`, `clarification` on generation, and
+any mismatch between `generationAttempts` and the generation-tool call count. These tests are the
+persistence boundary behind the UI claim; rendering tests must not be the only enforcement. Add
+snapshot-level cases proving that `COMPLETED` requires two accepted tool outcomes,
+`NEEDS_USER_CLARIFICATION` requires analysis clarification with generation not called, and every
+positive generation call or accepted analysis requires the persisted `contextHash`.
 
 - [ ] **Step 4: Implement the explicit state machine**
 
@@ -2496,6 +2585,13 @@ export const ChangeContextSchema = z
       (total, entity) => total + entity.qualitySignals.length,
       0,
     );
+    const entityUrns = new Set(value.entityContext.map(({ urn }) => urn));
+    const relevantUrns = new Set([
+      value.target.urn,
+      ...value.evidence.filter(({ kind }) => kind === "downstream").map(({ urn }) => urn),
+    ]);
+    const unknownUrns = new Set(value.contextCoverage.unknownMetadataUrns);
+    const expectedUnknownUrns = [...relevantUrns].filter((urn) => !entityUrns.has(urn));
     const invalid =
       value.schemaSummary.includedFields !== value.knownFields.length ||
       value.schemaSummary.truncated !==
@@ -2507,6 +2603,12 @@ export const ChangeContextSchema = z
       value.entityContextRetrieval.complete !== value.contextCoverage.retrievalComplete ||
       value.entityContextRetrieval.itemCount !== value.contextCoverage.inspectedAssets ||
       value.entityContext.length !== value.contextCoverage.inspectedAssets ||
+      value.contextCoverage.relevantAssets !== relevantUrns.size ||
+      [...entityUrns].some((urn) => !relevantUrns.has(urn)) ||
+      expectedUnknownUrns.length !== unknownUrns.size ||
+      expectedUnknownUrns.some((urn) => !unknownUrns.has(urn)) ||
+      value.contextCoverage.missingMetadataUrns.some((urn) => !entityUrns.has(urn)) ||
+      value.contextCoverage.unknownMetadataUrns.some((urn) => entityUrns.has(urn)) ||
       value.contextIndicators.quality.assetsWithSignals !== qualityAssets ||
       value.contextIndicators.quality.signalCount !== qualitySignals ||
       !entitiesAreCanonical;
@@ -2649,6 +2751,12 @@ export function buildChangeContext(
   return ChangeContextSchema.parse({ ...payload, contextHash: hashChangeContext(payload) });
 }
 ```
+
+In `src/workflow/change-context.test.ts`, add exact partition regressions: reject a foreign entity
+URN, a foreign `unknownMetadataUrns` entry, an omitted unknown relevant URN, an entity/unknown
+overlap, and a `relevantAssets` count that differs from the unique target-plus-downstream URN set.
+Accept the canonical partition in which every relevant URN appears exactly once in either
+`entityContext` or `unknownMetadataUrns`. This is the contract used by ownership reviewer gates.
 
 - [ ] **Step 5: Run focused tests and verify deterministic regression**
 
@@ -3175,6 +3283,9 @@ it("renders the golden four-part DataHub name as a non-executable staged templat
     "b2fd91.order_entry_db.analytics.order_details",
   );
   expect(result.files["migration-up.sql"]).not.toMatch(/^\s*ALTER\s/im);
+  expect(result.files["rollout-plan.md"]).toContain("## PR Review Summary");
+  expect(result.files["rollout-plan.md"]).toContain("## Reviewer Gates");
+  expect(result.files["rollout-plan.md"]).toContain("DataHub decision: BLOCK_DIRECT_RENAME");
 });
 
 it("renders a confirmed low-risk three-part Snowflake object from deterministic templates", () => {
@@ -3214,6 +3325,16 @@ it("fails closed if an unparsed non-executable strategy reaches the renderer", (
   expect(result.files["migration-up.sql"]).not.toMatch(/^\s*ALTER\s/imu);
 });
 ```
+
+Add three ownership-grounding cases to the same renderer test. For an inspected downstream entity
+with owners, require the exact downstream URN and only its normalized owner URNs under `Reviewer
+Gates`. For an inspected entity with an empty owner list, require the explicit `DataHub returned no
+owner` gate and no invented person or team. For a downstream URN present in
+`contextCoverage.unknownMetadataUrns` but absent from `entityContext`, require the explicit
+`ownership is unknown because entity context was not retrieved` gate. Include Markdown
+metacharacters inside legal URNs and prove all asset and owner values pass through
+`markdownCodeSpan`. Run each case for template, direct, and staged output, and assert every rollout
+still contains exactly one `PR Review Summary` and one `Reviewer Gates` heading.
 
 - [ ] **Step 2: Run the focused tests and verify missing modules**
 
@@ -3291,6 +3412,39 @@ export interface RenderedMigrationPackage {
   readonly files: Readonly<Record<MigrationArtifactFilename, string>>;
 }
 
+function renderOwnershipReviewerGates(context: ChangeContext): string {
+  const downstreamUrns = [
+    ...new Set(context.evidence.filter(({ kind }) => kind === "downstream").map(({ urn }) => urn)),
+  ].sort((left, right) => left.localeCompare(right, "en"));
+  const entityByUrn = new Map(context.entityContext.map((entity) => [entity.urn, entity]));
+  const lines = downstreamUrns.flatMap((urn) => {
+    const entity = entityByUrn.get(urn);
+    if (entity === undefined) {
+      return [
+        `- [ ] Resolve ownership for uninspected downstream asset ${markdownCodeSpan(urn)}; ownership is unknown because entity context was not retrieved.`,
+      ];
+    }
+    if (entity.owners.length === 0) {
+      return [
+        `- [ ] Assign or confirm an owner for inspected downstream asset ${markdownCodeSpan(urn)}; DataHub returned no owner.`,
+      ];
+    }
+    const owners = [...new Set(entity.owners)]
+      .sort((left, right) => left.localeCompare(right, "en"))
+      .map(markdownCodeSpan)
+      .join(", ");
+    return [
+      `- [ ] Record approval for downstream asset ${markdownCodeSpan(urn)} from verified owner URNs: ${owners}.`,
+    ];
+  });
+  if (lines.length === 0) {
+    lines.push(
+      "- [ ] Confirm that current DataHub evidence contains no downstream asset requiring owner approval.",
+    );
+  }
+  return lines.join("\n");
+}
+
 function templateFiles(context: ChangeContext): RenderedMigrationPackage["files"] {
   const identity = context.target.name;
   const source = context.sourceField.fieldPath;
@@ -3304,7 +3458,7 @@ function templateFiles(context: ChangeContext): RenderedMigrationPackage["files"
     "migration-up.sql": `-- LineageGuard AI — NON-EXECUTABLE TEMPLATE\n-- DataHub dataset: ${identity}\n-- Evidence: ${evidenceIds}\n-- Confirm an exact Snowflake DATABASE.SCHEMA.TABLE before execution.\n-- Staged intent: add ${target}, backfill from ${source}, migrate downstream consumers, validate, then retire ${source}.\n`,
     "migration-down.sql": `-- LineageGuard AI — NON-EXECUTABLE TEMPLATE\n-- Evidence: ${evidenceIds}\n-- Keep ${source} available during rollback.\n-- Remove ${target} only after a human confirms that no writes would be lost.\n`,
     "validation.sql": `-- LineageGuard AI — NON-EXECUTABLE TEMPLATE\n-- Evidence: ${evidenceIds}\n-- Confirm the physical table, then check source existence, target existence, row counts, null counts, backfill completion, and sampled value equality.\n`,
-    "rollout-plan.md": `# Rollout Plan\n\n**Classification:** NON_EXECUTABLE_TEMPLATE\n\n**DataHub dataset:** ${markdownIdentity}\n\n**Decision:** ${context.advisoryDecision}\n\n**Evidence:** ${markdownEvidenceIds}\n\n1. Confirm the physical Snowflake \`DATABASE.SCHEMA.TABLE\`.\n2. Preserve ${markdownSource} and add ${markdownTarget}.\n3. Backfill and validate the target column.\n4. Coordinate the ${context.evidence.filter(({ kind }) => kind === "downstream").length} visible downstream assets.\n5. Migrate readers and writers before retiring the source column.\n6. Require human approval before every breaking step.\n7. Trigger rollback on mismatched values, unexpected nulls, or downstream errors.\n8. Complete only after validation passes and every evidenced downstream owner confirms cutover.\n`,
+    "rollout-plan.md": `# Rollout Plan\n\n**Classification:** NON_EXECUTABLE_TEMPLATE\n\n**DataHub dataset:** ${markdownIdentity}\n\n**Decision:** ${context.advisoryDecision}\n\n**Evidence:** ${markdownEvidenceIds}\n\n## PR Review Summary\n\n- DataHub decision: ${context.advisoryDecision}.\n- Impact scope: ${context.evidence.filter(({ kind }) => kind === "downstream").length} visible downstream assets.\n- Package state: the physical Snowflake name is unconfirmed, so no SQL is executable.\n\n## Reviewer Gates\n\n${renderOwnershipReviewerGates(context)}\n\n1. Confirm the physical Snowflake \`DATABASE.SCHEMA.TABLE\`.\n2. Preserve ${markdownSource} and add ${markdownTarget}.\n3. Backfill and validate the target column.\n4. Coordinate the ${context.evidence.filter(({ kind }) => kind === "downstream").length} visible downstream assets.\n5. Migrate readers and writers before retiring the source column.\n6. Require human approval before every breaking step.\n7. Trigger rollback on mismatched values, unexpected nulls, or downstream errors.\n8. Complete only after validation passes, all ownership gaps are resolved, and required approvals are recorded.\n`,
   };
 }
 
@@ -3346,7 +3500,7 @@ export function renderMigrationPackage(
         "migration-up.sql": `-- Evidence: ${evidenceIds}\nALTER TABLE ${table} RENAME COLUMN ${source} TO ${target};\n`,
         "migration-down.sql": `-- Evidence: ${evidenceIds}\nALTER TABLE ${table} RENAME COLUMN ${target} TO ${source};\n`,
         "validation.sql": `-- Evidence: ${evidenceIds}\n-- PRE-MIGRATION: confirm ${source} exists and ${target} does not.\nSHOW COLUMNS IN TABLE ${table};\n-- POST-MIGRATION: confirm the renamed target and stable row population.\nSELECT COUNT(*) AS row_count, COUNT_IF(${target} IS NULL) AS target_null_count FROM ${table};\n`,
-        "rollout-plan.md": `# Rollout Plan\n\n**Classification:** ${draft.executionClassification}\n\n**Evidence:** ${markdownEvidenceIds}\n\n1. Obtain human approval.\n2. Pause dependent deployments.\n3. Run the forward rename.\n4. Run validation.\n5. Roll back by renaming the target only if validation fails before downstream cutover.\n6. Complete only after validation passes and downstream owners confirm cutover.\n`,
+        "rollout-plan.md": `# Rollout Plan\n\n**Classification:** ${draft.executionClassification}\n\n**Evidence:** ${markdownEvidenceIds}\n\n## PR Review Summary\n\n- DataHub decision: ${context.advisoryDecision}.\n- Impact scope: ${context.evidence.filter(({ kind }) => kind === "downstream").length} visible downstream assets.\n- Package state: direct rename is reviewable only after every deterministic gate passes.\n\n## Reviewer Gates\n\n${renderOwnershipReviewerGates(context)}\n\n1. Obtain human approval.\n2. Pause dependent deployments.\n3. Run the forward rename.\n4. Run validation.\n5. Roll back by renaming the target only if validation fails before downstream cutover.\n6. Complete only after validation passes, all ownership gaps are resolved, and required approvals are recorded.\n`,
       },
     };
   }
@@ -3357,7 +3511,7 @@ export function renderMigrationPackage(
       "migration-up.sql": `-- ${draft.executionClassification === "ADVISORY_ONLY" ? "ADVISORY ONLY — HUMAN APPROVAL REQUIRED\n-- " : ""}Evidence: ${evidenceIds}\n-- Staged migration; human review is required.\nALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${target} ${nativeType};\nUPDATE ${table} SET ${target} = ${source} WHERE ${target} IS NULL;\n`,
       "migration-down.sql": `-- ${draft.executionClassification === "ADVISORY_ONLY" ? "ADVISORY ONLY — HUMAN APPROVAL REQUIRED\n-- " : ""}Evidence: ${evidenceIds}\n-- Rollback requires review of target-only writes.\n-- ALTER TABLE ${table} DROP COLUMN IF EXISTS ${target};\n`,
       "validation.sql": `-- ${draft.executionClassification === "ADVISORY_ONLY" ? "ADVISORY ONLY — HUMAN APPROVAL REQUIRED\n-- " : ""}Evidence: ${evidenceIds}\n-- PRE-MIGRATION: confirm ${source} exists and ${target} does not.\nSHOW COLUMNS IN TABLE ${table};\n-- POST-MIGRATION: confirm source preservation, backfill completion, null counts, and sampled equality.\nSELECT COUNT(*) AS row_count, COUNT_IF(${source} IS NULL) AS source_null_count, COUNT_IF(${target} IS NULL) AS target_null_count, COUNT_IF(${source} IS DISTINCT FROM ${target}) AS mismatched_count FROM ${table};\n`,
-      "rollout-plan.md": `# Rollout Plan\n\n**Classification:** ${draft.executionClassification}\n\n**Decision:** ${context.advisoryDecision}\n\n**Evidence:** ${markdownEvidenceIds}\n\n1. Confirm ownership and obtain human approval.\n2. Add ${markdownCodeSpan(context.intent.targetColumn)} while retaining ${markdownCodeSpan(context.sourceField.fieldPath)}.\n3. Backfill existing rows and dual-write new changes.\n4. Coordinate every evidenced downstream consumer.\n5. Run \`validation.sql\` and require zero mismatches.\n6. Migrate readers before considering source-column retirement.\n7. Trigger rollback on mismatched values, unexpected nulls, or downstream errors; keep the source and remove the target only after data review.\n8. Complete only after validation passes and every evidenced downstream owner confirms cutover.\n`,
+      "rollout-plan.md": `# Rollout Plan\n\n**Classification:** ${draft.executionClassification}\n\n**Decision:** ${context.advisoryDecision}\n\n**Evidence:** ${markdownEvidenceIds}\n\n## PR Review Summary\n\n- DataHub decision: ${context.advisoryDecision}.\n- Impact scope: ${context.evidence.filter(({ kind }) => kind === "downstream").length} visible downstream assets.\n- Package state: staged compatibility requires owner coordination and human approval.\n\n## Reviewer Gates\n\n${renderOwnershipReviewerGates(context)}\n\n1. Confirm ownership and obtain human approval.\n2. Add ${markdownCodeSpan(context.intent.targetColumn)} while retaining ${markdownCodeSpan(context.sourceField.fieldPath)}.\n3. Backfill existing rows and dual-write new changes.\n4. Coordinate every evidenced downstream consumer.\n5. Run \`validation.sql\` and require zero mismatches.\n6. Migrate readers before considering source-column retirement.\n7. Trigger rollback on mismatched values, unexpected nulls, or downstream errors; keep the source and remove the target only after data review.\n8. Complete only after validation passes, all ownership gaps are resolved, and required approvals are recorded.\n`,
     },
   };
 }
@@ -3391,7 +3545,7 @@ it.each(["DROP TABLE x;", "TRUNCATE TABLE x;", "DELETE FROM x;"])(
 );
 ```
 
-Create `src/migrations/validate-package.test.ts` and prove that all four files are required, every file cites a valid draft evidence ID, a critical package cannot be `EXECUTABLE_WITH_REVIEW`, executable SQL cannot contain `<PLACEHOLDER>` tokens, and the golden non-executable template passes.
+Create `src/migrations/validate-package.test.ts` and prove that all four files are required, every file cites a valid draft evidence ID, a critical package cannot be `EXECUTABLE_WITH_REVIEW`, executable SQL cannot contain `<PLACEHOLDER>` tokens, and the golden non-executable template passes. Require every rendered `rollout-plan.md` classification to contain exactly one `## PR Review Summary` and one `## Reviewer Gates` heading; reject a package that omits or duplicates either section.
 
 - [ ] **Step 6: Implement secondary SQL and complete-package validation**
 
@@ -4622,6 +4776,14 @@ export class OpenAIAgentProvider implements AgentProvider {
         description: "Validate, render, and persist one grounded structured migration package.",
         parameters: MigrationPackageDraftSchema,
         execute: async (draft) => {
+          if (execution.analysisResult?.kind !== "ready") {
+            return {
+              kind: "rejected",
+              findings: [
+                { code: "ANALYSIS_REQUIRED", message: "Complete analysis before generation." },
+              ],
+            };
+          }
           if (execution.accepted) {
             return {
               kind: "rejected",
@@ -4653,6 +4815,12 @@ export const openAIAgentMetadata = {
 ```
 
 Immediately run `pnpm typecheck` after creating this file. Expected: the pinned `@openai/agents@0.13.5` types accept `OpenAIProvider`, `Runner`, `Agent`, `tool`, typed output, cancellation, usage, and run options without a second SDK or a global environment mutation.
+
+Add adversarial tool-order tests in `src/agent/openai-agent-provider.test.ts`. If the runner calls
+`generate_migration_package` before a ready analysis, or after analysis returned clarification or
+failure, the wrapper must return `ANALYSIS_REQUIRED` before incrementing generation attempts and
+must never call the supplied application generation tool. A later valid analysis may proceed, but a
+blocked out-of-order call is not misreported as an application execution attempt.
 
 Add a provider regression that invokes `generate_migration_package` twice after the first call is accepted. The second call must return only `ATTEMPT_AFTER_ACCEPTED`, must not call the application tool again, must not increment `generationAttempts`, and must not cause a second `VALIDATING_ARTIFACTS` transition. Also prove that model-authored `failure.message` is ignored in favor of the fixed application message above.
 
@@ -4879,20 +5047,18 @@ export async function runAgentWorkflow(
   const safeRequest = RunRequestSchema.shape.request.parse(
     sanitizeBoundaryText(inputDeps.request, inputDeps.secrets, 500),
   );
-  let datahubServerInfo: DataHubServerInfo =
-    inputDeps.mode === "REPLAY"
-      ? { reportedServerName: "fixture", reportedServerVersion: "replay-v1" }
-      : {};
+  let verifiedDataHubMetadata: DataHubRunMetadata | undefined;
   const deps = {
     ...inputDeps,
     request: safeRequest,
-    getDataHubServerInfo: () => datahubServerInfo,
+    getVerifiedDataHubMetadata: () => verifiedDataHubMetadata,
   };
   let status: WorkflowStatus = "DRAFT";
   const activity: ActivityEntry[] = [];
   const startedAt = new Map<WorkflowStatus, number>();
   let context: ChangeContext | undefined;
   let analysisOutcome: AnalyzeRenameResult | undefined;
+  let applicationAnalysisCalls = 0;
   let applicationGenerationAttempts = 0;
   let accepted: { draft: MigrationPackageDraft; rendered: RenderedMigrationPackage } | undefined;
   let lastRejected:
@@ -4931,6 +5097,14 @@ export async function runAgentWorkflow(
     move("RESOLVING_CONTEXT", "Resolve the requested dataset and column", "started");
     const tools: AgentToolset = {
       analyzeRenameChange: async (_input, signal) => {
+        if (applicationAnalysisCalls >= 1) {
+          return {
+            kind: "failed",
+            code: "ANALYSIS_FAILED",
+            message: "Analysis may be called only once per run.",
+          };
+        }
+        applicationAnalysisCalls += 1;
         if (context !== undefined) {
           analysisOutcome = { kind: "ready", context };
           return analysisOutcome;
@@ -4938,7 +5112,13 @@ export async function runAgentWorkflow(
         move("ANALYZING_IMPACT", "Analyze two-hop DataHub impact", "started");
         try {
           const catalog = await deps.createCatalog(signal);
-          datahubServerInfo = sanitizeDataHubServerInfo(catalog.getServerInfo(), deps.secrets);
+          verifiedDataHubMetadata = DataHubRunMetadataSchema.parse({
+            source: deps.mode === "LIVE" ? "mcp" : "fixture",
+            verification: deps.mode === "LIVE" ? "CAPABILITY_GATE_PASSED" : "REPLAY_FIXTURE",
+            configuredMcpPackage: "mcp-server-datahub@0.6.0",
+            allowedTools: ["search", "list_schema_fields", "get_lineage", "get_entities"],
+            ...sanitizeDataHubServerInfo(catalog.getServerInfo(), deps.secrets),
+          });
           const report = await runImpactAnalysis({
             request: deps.request,
             catalog,
@@ -5009,6 +5189,12 @@ export async function runAgentWorkflow(
         }
       },
       generateMigrationPackage: async (draft, signal) => {
+        if (analysisOutcome?.kind !== "ready" || context === undefined) {
+          return {
+            kind: "rejected",
+            findings: [{ code: "MISSING_CONTEXT", message: "Analyze the request first." }],
+          };
+        }
         if (accepted !== undefined) {
           return {
             kind: "rejected",
@@ -5024,12 +5210,6 @@ export async function runAgentWorkflow(
           };
         }
         applicationGenerationAttempts += 1;
-        if (context === undefined) {
-          return {
-            kind: "rejected",
-            findings: [{ code: "MISSING_CONTEXT", message: "Analyze the request first." }],
-          };
-        }
         move("VALIDATING_ARTIFACTS", "Validate grounding, SQL, rollback, and paths", "started");
         const draftFindings = validateMigrationDraft(context, draft);
         const rendered = renderMigrationPackage(context, draft);
@@ -5056,7 +5236,7 @@ export async function runAgentWorkflow(
     });
     const providerResult: AgentProviderResult = {
       ...reportedProviderResult,
-      analysisCalls: analysisOutcome === undefined ? 0 : 1,
+      analysisCalls: applicationAnalysisCalls,
       generationAttempts: applicationGenerationAttempts,
     };
     if (analysisOutcome?.kind === "clarification") {
@@ -5236,8 +5416,8 @@ export async function runAgentWorkflow(
           provider: deps.mode === "LIVE" ? "openai" : "fixture",
           model: deps.mode === "LIVE" ? "gpt-5.6-sol" : "replay-v1",
           reasoningEffort: deps.mode === "LIVE" ? "medium" : "none",
-          analysisCalls: context === undefined ? 0 : 1,
-          generationAttempts: 0,
+          analysisCalls: applicationAnalysisCalls,
+          generationAttempts: applicationGenerationAttempts,
           message: "Run cancelled.",
         },
         accepted !== undefined
@@ -5279,7 +5459,7 @@ Implement `terminalSnapshot` in the same file with this exact serialization boun
 ```ts
 function terminalSnapshot(
   deps: RunAgentWorkflowDependencies & {
-    readonly getDataHubServerInfo: () => DataHubServerInfo;
+    readonly getVerifiedDataHubMetadata: () => DataHubRunMetadata | undefined;
   },
   status: WorkflowStatus,
   activity: readonly ActivityEntry[],
@@ -5304,16 +5484,12 @@ function terminalSnapshot(
     failureCode === "COLUMN_NOT_FOUND"
       ? boundKnownFields(provider.failure?.knownFields, deps.secrets).slice(0, 100)
       : undefined;
+  const verifiedDataHubMetadata = deps.getVerifiedDataHubMetadata();
   return WorkflowSnapshotSchema.parse({
     runId: deps.runId,
     mode: deps.mode,
     status,
-    datahub: {
-      source: deps.mode === "LIVE" ? "mcp" : "fixture",
-      configuredMcpPackage: "mcp-server-datahub@0.6.0",
-      allowedTools: ["search", "list_schema_fields", "get_lineage", "get_entities"],
-      ...sanitizeDataHubServerInfo(deps.getDataHubServerInfo(), deps.secrets),
-    },
+    ...(verifiedDataHubMetadata === undefined ? {} : { datahub: verifiedDataHubMetadata }),
     ...(deps.parentRunId === undefined ? {} : { parentRunId: deps.parentRunId }),
     ...(safeContext === undefined
       ? {}
@@ -5364,11 +5540,13 @@ function terminalSnapshot(
           name: "analyze_rename_change",
           calls: provider.analysisCalls,
           outcome:
-            provider.status === "needs_clarification"
-              ? "clarification"
-              : context === undefined
-                ? "failed"
-                : "accepted",
+            provider.analysisCalls === 0
+              ? "not_called"
+              : provider.status === "needs_clarification"
+                ? "clarification"
+                : context === undefined
+                  ? "failed"
+                  : "accepted",
         },
         {
           name: "generate_migration_package",
@@ -5403,7 +5581,23 @@ function terminalSnapshot(
 }
 ```
 
-Import `DataHubServerInfo`, `WorkflowFailureSchema`, `WorkflowSnapshotSchema`, and `MIGRATION_AGENT_PROMPT_VERSION` explicitly. Implement `sanitizeDataHubServerInfo` as a closed helper that accepts only optional strings, passes each through `sanitizeBoundaryText(..., secrets, 100)`, omits empty/redacted-only values, and never retains the raw handshake. This function is the only provider/adapter-to-persistence mapper; its closed schema excludes prompts, raw traces, secrets, absolute paths, tool descriptions, and other handshake fields. Add workflow tests for a present name/version, a legitimately absent pair, an overlong value, and a value containing each active secret; snapshots and diagnostic files may contain only the sanitized optional pair. Task 9A replaces the deadline defaults with the workflow-owned instantiated event records.
+Import `DataHubRunMetadata`, `DataHubRunMetadataSchema`, `DataHubServerInfo`, `WorkflowFailureSchema`, `WorkflowSnapshotSchema`, and `MIGRATION_AGENT_PROMPT_VERSION` explicitly. Implement `sanitizeDataHubServerInfo` as a closed helper that accepts only optional strings, passes each through `sanitizeBoundaryText(..., secrets, 100)`, omits empty/redacted-only values, and never retains the raw handshake. This function is the only provider/adapter-to-persistence mapper; its closed schema excludes prompts, raw traces, secrets, absolute paths, tool descriptions, and other handshake fields. Set `verifiedDataHubMetadata` only after `createCatalog` returns: in live mode that return occurs after the required four-tool capability gate, while replay records `REPLAY_FIXTURE`. A connection or capability-gate failure must leave `datahub` absent rather than serialize an unverified MCP claim. Add workflow tests for a present name/version, a legitimately absent pair, an overlong value, a value containing each active secret, a live gate failure with no `datahub`, a verified live mapping, a replay mapping, and schema rejection of every contradictory `mode`/`source`/`verification`/`provider` combination. Snapshots and diagnostic files may contain only the sanitized optional pair. Task 9A replaces the deadline defaults with the workflow-owned instantiated event records.
+
+Add one metadata-surface regression whose lower-level connection fixture advertises the required
+four tools plus `save_document`, `add_owners`, and `future_tool`. The resulting snapshot must have
+`datahub.allowedTools` equal exactly `search`, `list_schema_fields`, `get_lineage`, and
+`get_entities`; `agent.toolCalls` must contain exactly `analyze_rename_change` and
+`generate_migration_package`; serialized events, metadata, and provider input must contain none of
+the three extra names or their descriptions.
+
+Add workflow-level order and interruption regressions. A fake provider that invokes generation
+before analysis, after clarification, or after failed analysis must receive `MISSING_CONTEXT`, leave
+`applicationGenerationAttempts` at zero, and produce schema-valid `not_called` generation metadata.
+Increment `applicationAnalysisCalls` at tool entry, so a DataHub throw or browser cancellation after
+entry persists exactly one failed analysis call even when neither `analysisOutcome` nor `context`
+was produced. Cancellation during generation must likewise preserve the already-started generation
+attempt. Assert each terminal snapshot parses, displays no `0 calls · accepted` combination, and
+does not invoke validation, rendering, or persistence out of order.
 
 - [ ] **Step 5: Implement regeneration as a fresh child run**
 
@@ -5451,7 +5645,7 @@ export async function regeneratePackage(input: {
 }
 ```
 
-Import `DemoMode`, `AppError`, `loadRegenerationContext`, and `reserveGenerationRetry` explicitly. Add `runAgentWorkflowFromContext` beside `runAgentWorkflow` with a final dedicated dependency type that requires `mode`, `provider`, `signal`, `clock`, `runsRoot`, `runId`, `parentRunId`, the parent's parsed `datahubMetadata`, the matching branded `reservedChild`, `secrets`, and optional `onEvent`, but has no catalog factory. It constructs the same internal snapshot dependency by returning the already-sanitized parent server pair from `getDataHubServerInfo`; it never invents a new handshake or fixture identity. It must begin at `GENERATING_ARTIFACTS`, expose `analyze_rename_change` as a cached response returning the integrity-gated context, persist the child run with the same context hash, preserve the validated parent mode and DataHub metadata, apply the same output sanitizer and deadline chain as a new run, and record `parentRunId` in terminal metadata. It must never accept or instantiate a catalog factory. Eligible parents are `COMPLETED`, `GENERATION_FAILED`, and `VALIDATION_FAILED`; the failed statuses require the private diagnostic context. A parent that already has `parentRunId` or lacks parsed DataHub metadata is ineligible, so the whole lineage permits exactly one fresh generation-only child. Each child still has at most two bounded model generation attempts.
+Import `DemoMode`, `AppError`, `loadRegenerationContext`, and `reserveGenerationRetry` explicitly. Add `runAgentWorkflowFromContext` beside `runAgentWorkflow` with a final dedicated dependency type that requires `mode`, `provider`, `signal`, `clock`, `runsRoot`, `runId`, `parentRunId`, the parent's parsed `datahubMetadata`, the matching branded `reservedChild`, `secrets`, and optional `onEvent`, but has no catalog factory. It constructs the same internal snapshot dependency by returning the already-validated parent metadata from `getVerifiedDataHubMetadata`; it never invents a new handshake, capability-gate result, or fixture identity. It must begin at `GENERATING_ARTIFACTS`, expose `analyze_rename_change` as a cached response returning the integrity-gated context, persist the child run with the same context hash, preserve the validated parent mode and DataHub metadata, apply the same output sanitizer and deadline chain as a new run, and record `parentRunId` in terminal metadata. It must never accept or instantiate a catalog factory. Eligible parents are `COMPLETED`, `GENERATION_FAILED`, and `VALIDATION_FAILED`; the failed statuses require the private diagnostic context. A parent that already has `parentRunId` or lacks parsed DataHub metadata is ineligible, so the whole lineage permits exactly one fresh generation-only child. Each child still has at most two bounded model generation attempts.
 
 Extend `src/app/regenerate-package.test.ts` with an ineligible failure status, eligible `GENERATION_FAILED` and `VALIDATION_FAILED` parents, parent-mode mismatch, context-hash/file tampering, reused run ID, second-child/concurrent reservation, and injected-secret cases. Every invalid case must fail with fixed text before provider execution. Each valid case proves a fresh child, identical context hash, same mode, sanitized output, no catalog/DataHub call, and a newly instantiated agent/workflow deadline chain.
 
@@ -6308,7 +6502,7 @@ Create `src/ui/impact-panel.tsx`:
 ```tsx
 import type { WorkflowSnapshot } from "../workflow/contracts.js";
 
-export function ImpactPanel({ snapshot }: { readonly snapshot?: WorkflowSnapshot }) {
+export function ImpactPanel({ snapshot }: { readonly snapshot: WorkflowSnapshot | undefined }) {
   const impact = snapshot?.impact;
   return (
     <section className="panel impact-panel" aria-labelledby="impact-title">
@@ -6365,8 +6559,8 @@ Create `src/ui/run-error.tsx`:
 import type { ValidationSummary, WorkflowFailure } from "../workflow/contracts.js";
 
 export function RunError(props: {
-  readonly failure?: WorkflowFailure;
-  readonly validation?: ValidationSummary;
+  readonly failure: WorkflowFailure | undefined;
+  readonly validation: ValidationSummary | undefined;
   readonly onSelectCandidate: (urn: string) => void;
   readonly onRetryGeneration: () => void;
   readonly canRetryGeneration: boolean;
@@ -6412,7 +6606,7 @@ Create `src/ui/evidence-panel.tsx`:
 ```tsx
 import type { WorkflowSnapshot } from "../workflow/contracts.js";
 
-export function EvidencePanel({ snapshot }: { readonly snapshot?: WorkflowSnapshot }) {
+export function EvidencePanel({ snapshot }: { readonly snapshot: WorkflowSnapshot | undefined }) {
   return (
     <section className="panel evidence-panel" aria-labelledby="evidence-title">
       <div className="section-heading">
@@ -6456,7 +6650,7 @@ import type { WorkflowSnapshot } from "../workflow/contracts.js";
 export type ArtifactContent = Readonly<Record<string, string>>;
 
 export function ArtifactWorkspace(props: {
-  readonly snapshot?: WorkflowSnapshot;
+  readonly snapshot: WorkflowSnapshot | undefined;
   readonly content: ArtifactContent;
   readonly onRegenerate: () => void;
 }) {
@@ -7090,7 +7284,11 @@ import type { WorkflowSnapshot } from "../workflow/contracts.js";
 
 const labelReason = (reason: string): string => reason.replaceAll("_", " ");
 
-export function ContextCoveragePanel({ snapshot }: { readonly snapshot?: WorkflowSnapshot }) {
+export function ContextCoveragePanel({
+  snapshot,
+}: {
+  readonly snapshot: WorkflowSnapshot | undefined;
+}) {
   const completeness = snapshot?.evidenceCompleteness;
   const retrieval = snapshot?.entityContextRetrieval;
   const coverage = snapshot?.contextCoverage;
@@ -7245,6 +7443,365 @@ Expected: the golden replay shows separate Evidence Completeness and Context Cov
 ```powershell
 git add src/ui/context-coverage-panel.tsx src/ui/context-coverage-panel.test.tsx src/ui/demo-client.tsx src/ui/evidence-panel.tsx app/globals.css tests/e2e/lineageguard-demo.spec.ts
 git commit -m "feat: show DataHub context completeness"
+```
+
+---
+
+### Task 11B: Show the DataHub and Agent Runtime Proof
+
+**Files:**
+
+- Create: `src/ui/runtime-proof-panel.tsx`
+- Create: `src/ui/runtime-proof-panel.test.tsx`
+- Modify: `src/ui/context-coverage-panel.tsx`
+- Modify: `src/ui/context-coverage-panel.test.tsx`
+- Modify: `src/ui/demo-client.tsx`
+- Modify: `app/globals.css`
+- Modify: `tests/e2e/lineageguard-demo.spec.ts`
+
+**Interfaces:**
+
+- Consumes: `WorkflowSnapshot.datahub`, `WorkflowSnapshot.agent`,
+  `WorkflowSnapshot.evidenceCompleteness`, and `WorkflowSnapshot.entityContextRetrieval`.
+- Produces: a browser-visible, sanitized proof of verified-live versus replay source, a replay-only
+  pinned-live reference label, the four-operation read-only allowlist, provider/model/reasoning,
+  exact application-tool call counts and outcomes, per-operation bounded collection summaries, and
+  a claim-free no-proof state when required metadata is absent.
+
+- [ ] **Step 1: Write the failing component and browser tests**
+
+Create `src/ui/runtime-proof-panel.test.tsx`:
+
+```tsx
+import { renderToStaticMarkup } from "react-dom/server";
+import { expect, it } from "vitest";
+import { RuntimeProofPanel, type RuntimeProofSnapshot } from "./runtime-proof-panel.js";
+
+const snapshot: RuntimeProofSnapshot = {
+  mode: "REPLAY",
+  datahub: {
+    source: "fixture",
+    verification: "REPLAY_FIXTURE",
+    configuredMcpPackage: "mcp-server-datahub@0.6.0",
+    allowedTools: ["search", "list_schema_fields", "get_lineage", "get_entities"],
+    reportedServerName: "fixture",
+    reportedServerVersion: "replay-v1",
+  },
+  agent: {
+    provider: "fixture",
+    model: "replay-v1",
+    reasoningEffort: "none",
+    promptVersion: "fixture-replay-v1",
+    schemaVersion: "1",
+    generationAttempts: 1,
+    toolCalls: [
+      { name: "analyze_rename_change", calls: 1, outcome: "accepted" },
+      { name: "generate_migration_package", calls: 1, outcome: "accepted" },
+    ],
+  },
+};
+
+it("renders truthful read-only runtime proof without extra MCP tools", () => {
+  const rendered = renderToStaticMarkup(<RuntimeProofPanel snapshot={snapshot} />);
+  expect(rendered).toContain("Runtime proof");
+  expect(rendered).toContain("Fixture replay");
+  expect(rendered).toContain("Pinned live reference");
+  expect(rendered).toContain("mcp-server-datahub@0.6.0");
+  expect(rendered).toContain("fixture replay-v1");
+  expect(rendered).toContain("search");
+  expect(rendered).toContain("list_schema_fields");
+  expect(rendered).toContain("get_lineage");
+  expect(rendered).toContain("get_entities");
+  expect(rendered).toContain("analyze_rename_change");
+  expect(rendered).toContain("generate_migration_package");
+  expect(rendered).toContain("1 call · accepted");
+  expect(rendered).toContain("All other tools are outside the application allowlist");
+  expect(rendered).not.toContain("Additional advertised tools are ignored");
+  expect(rendered).toContain("Replay has no mutation capability");
+  expect(rendered).not.toContain("save_document");
+  expect(rendered).not.toContain("raw MCP");
+});
+
+it("renders live claims only after the capability gate passed", () => {
+  const liveSnapshot: RuntimeProofSnapshot = {
+    ...snapshot,
+    mode: "LIVE",
+    datahub: {
+      ...snapshot.datahub!,
+      source: "mcp",
+      verification: "CAPABILITY_GATE_PASSED",
+      reportedServerName: "datahub-mcp",
+      reportedServerVersion: "0.6.0",
+    },
+    agent: {
+      ...snapshot.agent!,
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      promptVersion: "migration-agent-v1",
+    },
+  };
+  const rendered = renderToStaticMarkup(<RuntimeProofPanel snapshot={liveSnapshot} />);
+  expect(rendered).toContain("Verified live MCP");
+  expect(rendered).toContain("MCP package used");
+  expect(rendered).toContain("Capability gate passed");
+  expect(rendered).toContain("Additional advertised tools are ignored");
+  expect(rendered).toContain("Mutations are disabled in the live MCP configuration");
+  expect(rendered).not.toContain("Pinned live reference");
+});
+
+it.each([undefined, { mode: "LIVE" } satisfies RuntimeProofSnapshot])(
+  "makes no runtime claims without verified DataHub and agent metadata",
+  (unverified) => {
+    const rendered = renderToStaticMarkup(<RuntimeProofPanel snapshot={unverified} />);
+    expect(rendered).toContain("Runtime proof is not available for this state");
+    expect(rendered).not.toContain("Additional advertised tools are ignored");
+    expect(rendered).not.toContain("All other tools are outside the application allowlist");
+    expect(rendered).not.toContain("Mutations are disabled");
+    expect(rendered).not.toContain("MCP package used");
+  },
+);
+```
+
+Replace its earlier unscoped fixture-mode assertion, then extend the golden Playwright case with:
+
+```ts
+await expect(page.locator(".mode-badge")).toHaveText("Fixture replay");
+const runtimeProof = page.getByRole("region", { name: "Runtime proof" });
+await expect(runtimeProof).toBeVisible();
+await expect(runtimeProof.getByText("Fixture replay", { exact: true })).toBeVisible();
+await expect(runtimeProof.getByText("mcp-server-datahub@0.6.0", { exact: true })).toBeVisible();
+await expect(runtimeProof.getByText("analyze_rename_change", { exact: true })).toBeVisible();
+await expect(runtimeProof.getByText("generate_migration_package", { exact: true })).toBeVisible();
+await expect(
+  runtimeProof.getByText("Replay has no mutation capability.", { exact: true }),
+).toBeVisible();
+await expect(runtimeProof.getByText("save_document", { exact: true })).toHaveCount(0);
+```
+
+- [ ] **Step 2: Run the focused tests and verify the proof panel is absent**
+
+Run:
+
+```powershell
+pnpm vitest run src/ui/runtime-proof-panel.test.tsx
+pnpm test:e2e --project=chromium --grep "golden"
+```
+
+Expected: FAIL because `RuntimeProofPanel` and its visible proof do not exist.
+
+- [ ] **Step 3: Implement the closed runtime-proof component**
+
+Create `src/ui/runtime-proof-panel.tsx`:
+
+```tsx
+import type { WorkflowSnapshot } from "../workflow/contracts.js";
+
+export type RuntimeProofSnapshot = Pick<WorkflowSnapshot, "mode" | "datahub" | "agent">;
+
+const callLabel = (calls: number): string => `${calls} ${calls === 1 ? "call" : "calls"}`;
+
+export function RuntimeProofPanel({
+  snapshot,
+}: {
+  readonly snapshot: RuntimeProofSnapshot | undefined;
+}) {
+  const datahub = snapshot?.datahub;
+  const agent = snapshot?.agent;
+  if (datahub === undefined || agent === undefined) {
+    return (
+      <section className="panel runtime-proof" aria-labelledby="runtime-proof-title">
+        <div className="section-heading">
+          <p className="eyebrow">Auditable execution</p>
+          <h2 id="runtime-proof-title">Runtime proof</h2>
+        </div>
+        <p>Runtime proof is not available for this state.</p>
+      </section>
+    );
+  }
+  const isLive = datahub.verification === "CAPABILITY_GATE_PASSED";
+  const source = isLive ? "Verified live MCP" : "Fixture replay";
+  const packageLabel = isLive ? "MCP package used" : "Pinned live reference";
+  const extraToolStatement = isLive
+    ? "Additional advertised tools are ignored."
+    : "All other tools are outside the application allowlist.";
+  const mutationStatement = isLive
+    ? "Mutations are disabled in the live MCP configuration."
+    : "Replay has no mutation capability.";
+  const server =
+    datahub.reportedServerName === undefined
+      ? "Not reported"
+      : [datahub.reportedServerName, datahub.reportedServerVersion].filter(Boolean).join(" ");
+
+  return (
+    <section className="panel runtime-proof" aria-labelledby="runtime-proof-title">
+      <div className="section-heading">
+        <p className="eyebrow">Auditable execution</p>
+        <h2 id="runtime-proof-title">Runtime proof</h2>
+      </div>
+      <div className="runtime-proof-grid">
+        <div>
+          <h3>DataHub boundary</h3>
+          <dl>
+            <dt>Source</dt>
+            <dd>{source}</dd>
+            <dt>Verification</dt>
+            <dd>{isLive ? "Capability gate passed" : "Replay fixture"}</dd>
+            <dt>{packageLabel}</dt>
+            <dd>{datahub.configuredMcpPackage}</dd>
+            <dt>Reported server</dt>
+            <dd>{server}</dd>
+          </dl>
+          <h4>Required read-only operations</h4>
+          <ul className="runtime-proof-list">
+            {datahub.allowedTools.map((tool) => (
+              <li key={tool}>
+                <code>{tool}</code>
+              </li>
+            ))}
+          </ul>
+          <p>{extraToolStatement}</p>
+          <p>{mutationStatement}</p>
+        </div>
+        <div>
+          <h3>Agent boundary</h3>
+          <dl>
+            <dt>Provider</dt>
+            <dd>{agent.provider}</dd>
+            <dt>Model</dt>
+            <dd>{agent.model}</dd>
+            <dt>Reasoning</dt>
+            <dd>{agent.reasoningEffort}</dd>
+          </dl>
+          <h4>Application tools</h4>
+          <ul className="runtime-proof-list">
+            {agent.toolCalls.map((tool) => (
+              <li key={tool.name}>
+                <code>{tool.name}</code>
+                <span>
+                  {callLabel(tool.calls)} · {tool.outcome.replaceAll("_", " ")}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </section>
+  );
+}
+```
+
+In `src/ui/context-coverage-panel.tsx`, replace the four display labels with exact operation
+provenance while retaining the existing collection objects:
+
+```tsx
+const dimensions =
+  completeness === undefined
+    ? []
+    : ([
+        ["search", completeness.search],
+        ["list_schema_fields", completeness.schema],
+        ["get_lineage · table", completeness.tableLineage],
+        ["get_lineage · column", completeness.columnLineage],
+      ] as const);
+```
+
+Within the existing `retrieval-state` block from Task 11A, replace its plain entity/batch count
+paragraph exactly once with the operation-labeled form below. Do not add a second retrieval summary,
+arguments, or payloads:
+
+```tsx
+<p>
+  <code>get_entities</code> · {retrieval.itemCount} entities · {retrieval.pages} batches
+</p>
+```
+
+Extend `src/ui/context-coverage-panel.test.tsx` with exact assertions for all five operation labels
+and assert `(renderedComplete.match(/get_entities/gu) ?? []).length === 1`.
+
+In `src/ui/demo-client.tsx`, add the import. Inside `dashboard-grid`, replace the earlier
+`ImpactPanel`-then-`ActivityTimeline` pair with the exact final order below; do not leave duplicate
+timeline or impact instances. Task 11A's `ContextCoveragePanel` remains after `ImpactPanel` and before
+the DataHub evidence list:
+
+```tsx
+import { RuntimeProofPanel } from "./runtime-proof-panel.js";
+
+<ActivityTimeline entries={activity} />
+<RuntimeProofPanel snapshot={snapshot} />
+<ImpactPanel snapshot={snapshot} />
+```
+
+- [ ] **Step 4: Add responsive proof styles**
+
+Append to `app/globals.css`:
+
+```css
+.runtime-proof-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.runtime-proof dl {
+  display: grid;
+  grid-template-columns: minmax(7rem, auto) 1fr;
+  gap: 0.35rem 0.75rem;
+}
+
+.runtime-proof dt {
+  color: var(--muted);
+}
+
+.runtime-proof dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.runtime-proof-list {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0;
+  list-style: none;
+}
+
+.runtime-proof-list li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+@media (max-width: 760px) {
+  .runtime-proof-grid {
+    grid-template-columns: 1fr;
+  }
+}
+```
+
+- [ ] **Step 5: Prove runtime truthfulness and the closed tool surface**
+
+Run:
+
+```powershell
+pnpm vitest run src/ui/runtime-proof-panel.test.tsx src/ui/context-coverage-panel.test.tsx
+pnpm test:e2e --project=chromium
+pnpm build:web
+pnpm lint
+pnpm typecheck
+```
+
+Expected: replay is labeled as replay and the MCP pin is labeled only as a live reference; verified
+live metadata is labeled only after the capability gate; missing or gate-failure metadata produces
+the claim-free no-proof message. In full proof states the four read operations, provider, model,
+exact two application-tool names, call counts, and outcomes are visible; no extra MCP tool, raw
+payload, mutation capability, or private reasoning appears.
+
+- [ ] **Step 6: Commit the runtime proof**
+
+```powershell
+git add src/ui/runtime-proof-panel.tsx src/ui/runtime-proof-panel.test.tsx src/ui/context-coverage-panel.tsx src/ui/context-coverage-panel.test.tsx src/ui/demo-client.tsx app/globals.css tests/e2e/lineageguard-demo.spec.ts
+git commit -m "feat: expose the read-only runtime proof"
 ```
 
 ---
@@ -7776,11 +8333,14 @@ git commit -m "ci: add offline browser acceptance"
 - Modify: `README.md`
 - Modify: `docs/demo-scenario.md`
 - Create: `docs/architecture/agent-demo.md`
+- Create: `docs/live-verification.md`
 
 **Interfaces:**
 
 - Consumes: the completed replay and live workflows.
-- Produces: an opt-in real OpenAI/DataHub proof, committed sanitized golden outputs, a reproducible local setup, a three-minute demo path, and explicit fallback instructions.
+- Produces: an opt-in real OpenAI/DataHub proof, a structured sanitized live-verification record,
+  committed sanitized golden outputs, a reproducible local setup, a three-minute demo path, and
+  explicit fallback instructions.
 
 - [ ] **Step 1: Write the opt-in live test before enabling it**
 
@@ -7952,15 +8512,63 @@ Open <http://localhost:3000>. Replay is deterministic, offline, and explicitly l
 
 ## Browser Demo — Live DataHub + OpenAI
 
-Start the pinned DataHub stack and load the documented showcase datapack first. Then set `DATAHUB_GMS_URL`, `DATAHUB_GMS_TOKEN`, `DATAHUB_MCP_UVX_PATH`, `OPENAI_API_KEY`, `OPENAI_MODEL=gpt-5.6-sol`, `OPENAI_AGENTS_DISABLE_TRACING=1`, and `LINEAGEGUARD_DEMO_MODE=LIVE` in the current shell before running `pnpm dev`.
+Start the pinned DataHub stack and load the documented showcase datapack first.
+
+### Live Operator Preflight
+
+1. Run `Invoke-RestMethod http://localhost:8080/health` and require a healthy GMS response.
+2. Open <http://localhost:9002> and sign in to the local-development UI.
+3. Search for the Snowflake asset `b2fd91.order_entry_db.analytics.order_details`.
+4. Confirm the `customer_id` field, visible downstream lineage, and ownership context in DataHub.
+5. Run `uvx mcp-server-datahub@0.6.0 --version` with Python 3.11 or newer available.
+6. Run `pnpm test:integration` and require the pinned four-operation read-only contract to pass.
+7. Only then configure OpenAI and start the live browser workflow.
+
+The UI endpoint is `http://localhost:9002`; the MCP subprocess connects to the GMS endpoint at `http://localhost:8080`. If personal-access-token controls are unavailable, verify that Metadata Authentication is enabled and that the local user has `Generate Personal Access Tokens` or `Manage All Access Tokens`; do not enable mutations as a workaround.
+
+Set `DATAHUB_GMS_URL`, `DATAHUB_GMS_TOKEN`, `DATAHUB_MCP_UVX_PATH`, `OPENAI_API_KEY`, `OPENAI_MODEL=gpt-5.6-sol`, `OPENAI_AGENTS_DISABLE_TRACING=1`, and `LINEAGEGUARD_DEMO_MODE=LIVE` in the current shell before running `pnpm dev`.
 
 The application reads DataHub through the official read-only MCP server. It does not execute SQL, mutate DataHub, or perform GitHub operations.
 ````
 
-Create `docs/architecture/agent-demo.md` with these headings and concrete content from the implementation:
+Create `docs/architecture/agent-demo.md` with these headings, the exact boundary statement from
+Task 14A, and concrete content from the implementation:
 
-```markdown
+````markdown
 # Agent Demo Architecture
+
+## Reference Architecture
+
+```mermaid
+flowchart LR
+  U["Trigger: Next.js request"] --> A["OpenAI agent<br/>framework + model"]
+  A --> T1["analyze_rename_change"]
+  A --> T2["generate_migration_package"]
+  T1 --> M["Pinned read-only DataHub MCP"]
+  M -->|"read-only queries"| D["Local DataHub OSS<br/>schema · lineage · ownership · governance · quality"]
+  D -->|"metadata responses"| M
+  T1 --> C["Deterministic ChangeContext"]
+  C --> T2
+  T2 --> P["Validated migration package<br/>four review-ready artifacts"]
+```
+
+This clean-room diagram is adapted conceptually from the official hackathon build-session
+reference architecture. LineageGuard has no SQL execution, notification, incident, arbitrary API,
+or DataHub write-back action.
+
+## Agent Building Blocks
+
+| Building block | LineageGuard implementation                                          |
+| -------------- | -------------------------------------------------------------------- |
+| Framework      | OpenAI TypeScript Agents SDK with one bounded manager agent          |
+| Tools          | Exactly `analyze_rename_change` and `generate_migration_package`     |
+| Model          | Configurable OpenAI model; fixture provider for deterministic replay |
+
+## Why MCP
+
+MCP is the only runtime DataHub access surface. Agent Context Kit is an architecture reference,
+the repository-owned DataHub Skill is a contribution candidate, and Analytics Agent is a
+clean-room UX reference. None is a runtime dependency.
 
 ## Trust Boundaries
 
@@ -7983,32 +8591,47 @@ Create `docs/architecture/agent-demo.md` with these headings and concrete conten
 ## Secret and Trace Handling
 
 ## Known Limitations
+````
+
+Create `docs/live-verification.md` as the only repository-owned live-evidence record. Initialize it
+without making a live claim:
+
+```markdown
+# Live Verification
+
+- Overall status: `NOT RUN`
+- Verified at: `NOT RUN`
+- Commit: `NOT RUN`
+
+| Check                                     | Status    | Evidence  |
+| ----------------------------------------- | --------- | --------- |
+| GMS health                                | `NOT RUN` | `NOT RUN` |
+| DataHub UI asset, schema, lineage, owners | `NOT RUN` | `NOT RUN` |
+| Pinned read-only MCP integration contract | `NOT RUN` | `NOT RUN` |
+| OpenAI live smoke and validated package   | `NOT RUN` | `NOT RUN` |
 ```
+
+The only allowed status values are `NOT RUN`, `PASSED`, and `FAILED`. `Verified at` is either
+`NOT RUN` or one UTC ISO-8601 timestamp; `Commit` is either `NOT RUN` or the full 40-character commit
+SHA that was checked. `Overall status: PASSED` requires all four rows to be `PASSED`; `FAILED`
+requires at least one failed row and may leave later checks `NOT RUN`; an overall `NOT RUN` requires
+all rows and both binding fields to remain `NOT RUN`. Evidence is a sanitized command/result label
+or visible UI target, never command output, credentials, environment values, raw provider data, or
+private screenshots.
 
 Update `docs/demo-scenario.md` with a timed three-minute script:
 
 1. 0:00–0:20 — state the breaking-change problem and show the replay/live badge.
 2. 0:20–0:45 — submit the golden rename request.
-3. 0:45–1:15 — show real DataHub resolution, 24 downstream assets, 11 column-confirmed assets, and score 90.
+3. 0:45–1:15 — show the golden asset, schema, lineage, and ownership in DataHub, then the runtime-proof panel and the verified 24 downstream assets, 11 column-confirmed assets, and score 90.
 4. 1:15–1:40 — explain `BLOCK_DIRECT_RENAME` and the difference between table and column evidence.
 5. 1:40–2:25 — open all four validated artifacts and show the non-executable physical-name safety gate.
-6. 2:25–2:45 — show evidence IDs, mode honesty, and read-only boundaries.
+6. 2:25–2:45 — show evidence IDs, exact application-tool calls, mode honesty, and the mutations-disabled read-only boundary.
 7. 2:45–2:55 — close with practical value for data and platform teams; keep five seconds of publication margin below the three-minute limit.
 
 Document the fallback: restart in `REPLAY` mode if DataHub or OpenAI is unavailable, and say explicitly that replay is recorded fixture execution.
 
-- [ ] **Step 5: Run the opt-in live proof when credentials and pinned DataHub are available**
-
-Run:
-
-```powershell
-$env:RUN_LIVE_OPENAI_TEST = "1"
-pnpm test:openai
-```
-
-Expected: one live test passes, reports 24/11/90, uses the configured OpenAI model, produces four validated artifacts, and retains no secret. If an external service is unavailable, preserve the sanitized failure output, restore `RUN_LIVE_OPENAI_TEST` to unset, and do not weaken the offline gate.
-
-- [ ] **Step 6: Run the final clean completion gate**
+- [ ] **Step 5: Run the final clean completion gate**
 
 Run:
 
@@ -8020,14 +8643,65 @@ git diff --check
 git status --short --untracked-files=all
 ```
 
-Expected: frozen install succeeds; format, lint, typecheck, all offline Vitest tests, CLI build, Next.js production build, and all Chromium acceptance tests pass; `git diff --check` is clean; status lists exactly the Task 14 live integration test, generator script, `package.json`, five generated examples, `README.md`, `docs/demo-scenario.md`, and `docs/architecture/agent-demo.md`, with no unrelated or generated residue.
+Expected: frozen install succeeds; format, lint, typecheck, all offline Vitest tests, CLI build, Next.js production build, and all Chromium acceptance tests pass; `git diff --check` is clean; status lists exactly the Task 14 live integration test, generator script, `package.json`, five generated examples, `README.md`, `docs/demo-scenario.md`, `docs/architecture/agent-demo.md`, and `docs/live-verification.md`, with no unrelated or generated residue.
 
-- [ ] **Step 7: Commit the reproducible demo and documentation**
+- [ ] **Step 6: Commit the reproducible demo and documentation**
 
 ```powershell
-git add tests/integration/openai-agent.integration.test.ts scripts/generate-agent-example.ts package.json examples/002-nextjs-openai-agent-demo README.md docs/demo-scenario.md docs/architecture/agent-demo.md
+git add tests/integration/openai-agent.integration.test.ts scripts/generate-agent-example.ts package.json examples/002-nextjs-openai-agent-demo README.md docs/demo-scenario.md docs/architecture/agent-demo.md docs/live-verification.md
 git commit -m "docs: deliver the reproducible agent demo"
 ```
+
+- [ ] **Step 7: Run the opt-in live proof against the clean committed source**
+
+Require an empty worktree. Complete the documented operator preflight through the DataHub UI:
+confirm the `order_details` asset, `customer_id` schema field, visible downstream lineage, and
+ownership context. Then capture the exact tested source commit and run:
+
+```powershell
+git status --short --untracked-files=all
+$testedCommit = git rev-parse HEAD
+$health = Invoke-RestMethod http://localhost:8080/health
+pnpm test:integration
+$env:RUN_LIVE_OPENAI_TEST = "1"
+pnpm test:openai
+Remove-Item Env:RUN_LIVE_OPENAI_TEST -ErrorAction SilentlyContinue
+```
+
+Expected: the initial status is empty; GMS is healthy; the pinned live MCP contract passes before
+OpenAI is called; one live OpenAI test then passes, reports 24/11/90, uses the configured model,
+produces four validated artifacts whose rollout plan contains `PR Review Summary` and `Reviewer
+Gates`, and retains no secret. If an external service is unavailable, preserve only the sanitized
+status, keep the offline gate unchanged, and record `FAILED` or `NOT RUN` honestly.
+
+Update `docs/live-verification.md` from the checks actually performed, using `$testedCommit` as the
+full immutable source commit: verification date, GMS health result, UI
+asset/schema/lineage/ownership inspection result, MCP integration-test result, and OpenAI smoke-test
+result. Record only the allowed status plus the relevant command or visible UI target—never tokens,
+environment values, raw provider output, or screenshots containing private data. The later
+evidence-only commit does not change which source commit was tested.
+
+- [ ] **Step 8: Validate and commit the live-evidence record separately**
+
+```powershell
+pnpm run format:check
+git diff --check
+git status --short --untracked-files=all
+$recordChanged = -not [string]::IsNullOrWhiteSpace(
+  (git status --short -- docs/live-verification.md | Out-String)
+)
+if ($recordChanged) {
+  git add docs/live-verification.md
+  git commit -m "docs: record live demo verification"
+}
+```
+
+Expected: when a live attempt changed the record, only `docs/live-verification.md` is modified before
+the evidence-only commit; the record is structurally consistent, contains no service output or
+secret, and references the exact clean source commit from Step 7. If no live attempt occurred and
+the initialized record remains fully `NOT RUN`, no commit is attempted. If every live check passed,
+overall status is `PASSED`; otherwise it remains truthful and the live Definition of Done stays
+open.
 
 ---
 
@@ -8053,7 +8727,7 @@ git commit -m "docs: deliver the reproducible agent demo"
 
 **Interfaces:**
 
-- Consumes: the verified live/replay demo, official DataHub and Devpost resources dated 2026-07-22, sanitized sample outputs, and the approved read-only completeness policy.
+- Consumes: the verified live/replay demo, official DataHub and Devpost resources reviewed through 2026-07-23, the official build-session tutorial transcript, sanitized sample outputs, and the approved read-only completeness policy.
 - Produces: a public-submission-ready English documentation set and one local contribution-candidate skill that is not loaded into the product runtime, does not claim the contribution bonus, and is not published externally without separate approval.
 
 - [ ] **Step 1: Write a failing repository-level submission validator**
@@ -8069,7 +8743,7 @@ it("accepts the complete English hackathon package and read-only skill", async (
 });
 ```
 
-Create `scripts/validate-submission-assets.ts` with one exported function. It must read the five submission documents, the three skill files, root `LICENSE`, and `.env.example`; return stable finding strings rather than throw for content failures; and enforce:
+Create `scripts/validate-submission-assets.ts` with one exported function. It must read every required submission, architecture, generated-rollout, skill, license, and environment-example file listed below; return stable finding strings rather than throw for content failures; and enforce:
 
 ```ts
 const requiredFiles = [
@@ -8077,7 +8751,10 @@ const requiredFiles = [
   "docs/submission-checklist.md",
   "docs/judging-map.md",
   "docs/demo-scenario.md",
+  "docs/architecture/agent-demo.md",
+  "docs/live-verification.md",
   "examples/002-nextjs-openai-agent-demo/README.md",
+  "examples/002-nextjs-openai-agent-demo/rollout-plan.md",
   "skills/lineageguard-schema-change-impact/SKILL.md",
   "skills/lineageguard-schema-change-impact/references/pinned-mcp-contract.md",
   "skills/lineageguard-schema-change-impact/templates/schema-change-impact.md",
@@ -8101,6 +8778,15 @@ const requiredSubmissionPhrases = [
   "Pre-existing software disclosure",
   "AI tools disclosure",
   "#agent-hackathon",
+  "Build a DataHub AI Agent in 30 Minutes",
+  "No code copied",
+  "Dataset provenance",
+  "Redistribution permission",
+  "http://localhost:9002",
+  "Runtime proof",
+  "Mutations are disabled",
+  "PR Review Summary",
+  "Reviewer Gates",
 ] as const;
 
 const prohibitedSkillPhrases = [
@@ -8112,6 +8798,26 @@ const prohibitedSkillPhrases = [
 ```
 
 Also require the skill frontmatter name `lineageguard-schema-change-impact`, all four exact MCP names, the exact parameters `upstream`, `max_hops`, `max_results`, and `offset`, and the phrases `incomplete evidence`, `human approval`, and `read-only`. Require the exact negative safety sentence containing `Never mutate DataHub, execute SQL...`; remove that one required sentence before applying affirmative-danger patterns such as `Run the generated SQL`, `Execute SQL now`, or `Apply the migration automatically`. Do not use a raw prohibited substring that makes negative safety documentation fail its own validator.
+
+Validate the tutorial and provenance requirements by destination rather than only against one
+concatenated blob: `docs/resources-and-attribution.md` must contain the tutorial URL, personal-
+access-token documentation URL, `No code copied`, dataset source URL, license/terms,
+redistribution decision, review date, and no-sensitive-data statement;
+`docs/submission-checklist.md` must contain the live preflight, visible DataHub proof, and
+mutations-disabled checks; `docs/architecture/agent-demo.md` must contain `Agent Building Blocks`,
+`Why MCP`, both exact application-tool names, and the clean-room Mermaid diagram. Parse the golden
+`rollout-plan.md` and require exactly one `PR Review Summary` and one `Reviewer Gates` heading.
+
+This repository validator proves only that the preflight instructions, evidence fields, and
+submission checklist are present and internally complete. It must never mark GMS, UI inspection,
+MCP integration, or OpenAI as passed by reading phrases. Those statuses come only from the separate
+live execution record and may remain unchecked or `NOT RUN`.
+
+Parse `docs/live-verification.md` structurally. Require exactly the four named checks, the allowed
+status enum, and the `Overall status`, `Verified at`, and `Commit` bindings defined in Task 14.
+Enforce the `PASSED`/`FAILED`/`NOT RUN` consistency rules, ISO timestamp, and full commit SHA when a
+live attempt is recorded. Accept a fully `NOT RUN` record. This validation proves only a coherent
+record shape; it does not independently prove that any external check occurred.
 
 Parse `docs/demo-scenario.md` rather than checking only for a phrase. Require exactly seven numbered `M:SS–M:SS` beats, the approved seven visible topics, monotonic non-overlapping times beginning at `0:00`, positive duration for every beat, and a final timestamp no later than `2:55` and strictly below `3:00`. Return stable findings for a missing beat, malformed range, overlap, gap, reordered topic, or terminal timestamp at/after `3:00`. Validator tests mutate an in-memory/temporary copy to each failure, including a `2:45–3:00` regression, so `submission:check` cannot pass with a missing or over-limit video script.
 
@@ -8143,10 +8849,26 @@ Create `docs/resources-and-attribution.md` with a dated table containing officia
 - Analytics Agent inspected at commit `b8e38283b6fc96459805dc577f1a54628dab744d` as a clean-room UX reference only;
 - Static Assets inspected at commit `a3e4adeba9c7461a1be0e197deff537931f901df`;
 - `showcase-ecommerce` as the retained golden datapack;
+- the official `Build a DataHub AI Agent in 30 Minutes` session at
+  <https://www.youtube.com/watch?v=_7cOIsvjFB0>, reviewed from its complete English transcript on
+  2026-07-23, as a reference only with `No code copied`;
+- DataHub personal-access-token documentation at
+  <https://docs.datahub.com/docs/authentication/personal-access-tokens> as a troubleshooting
+  reference only;
 - OpenAI Agents SDK and every runtime dependency already listed in the lockfile;
 - an explicit statement that no Analytics Agent or Agent Context Kit code is a runtime dependency.
 
+Add a `Dataset provenance` row for `showcase-ecommerce` with the exact source URL, repository
+license or applicable terms, redistribution permission, review date `2026-07-23`, and confirmation
+that the committed fixtures contain no sensitive, employer, or client data. Do not repeat the
+tutorial speaker's informal claim that every open dataset must use Apache-2.0; the gate is lawful
+use and redistribution under the dataset's actual terms.
+
 Create `docs/judging-map.md` with one evidence table for all official criteria: Use of DataHub, Technical Execution, Originality, Real-World Usefulness, and Submission Quality. Every row must cite a repository path, a visible demo moment, and a test or live check. Add a separate row labeled `Contribution candidate — bonus not yet earned` for the read-only DataHub Skill; it must remain pending until an upstream DataHub PR exists and passes the upstream repository checks.
+
+The `Use of DataHub` row must cite the visible causal chain: golden DataHub asset and schema,
+table/column lineage, ownership and Context Coverage, four read-only operation summaries,
+24/11/90, and `BLOCK_DIRECT_RENAME`. A generic `Powered by DataHub` statement is insufficient.
 
 Create `docs/submission-checklist.md` with checkboxes grouped under:
 
@@ -8168,6 +8890,17 @@ Post-deadline submission freeze
 
 Record the deadline exactly as `August 10, 2026 at 5:00 PM EDT / August 11, 2026 at 12:00 AM Europe/Kyiv` and the judging-access end as `August 31, 2026 at 5:00 PM EDT / September 1, 2026 at 12:00 AM Europe/Kyiv`. Include the exact sentence `Submission must not be changed after the deadline unless the Sponsor or Devpost explicitly permits a narrow correction`; continued portfolio edits are separate from the frozen Submission. Add explicit checks for the public repository URL, an easy-access Project URL that points judges to the no-key replay/test-build path, YouTube as the recommended public video host (or another host explicitly allowed by the current rules), third-party music/image/trademark permissions, and an immutable submission commit or tag. Mark Slack joining/posting, the optional Devpost feedback survey, Devpost submission, video publication, GitHub About configuration, and any upstream PR as manual external actions requiring the user's account or separate approval.
 
+Under `Live and replay verification`, add checks for GMS health, DataHub UI `http://localhost:9002`,
+the `order_details` asset, `customer_id`, visible lineage and ownership, `pnpm test:integration`,
+the runtime-proof panel, both exact application-tool names, and the literal boundary `Mutations are
+disabled`. Under third-party disclosure, require the completed dataset-provenance row and lawful
+redistribution review.
+
+For every live-only check, link to the matching row in `docs/live-verification.md` and leave the
+checkbox unchecked unless that row is `PASSED`. The replay checks may be completed from the offline
+gate. The repository validator requires the links and coherent structured record but must not
+require or fabricate a live `PASSED` value.
+
 Create `examples/002-nextjs-openai-agent-demo/README.md` explaining each artifact and `run-metadata.json`, the 24/11/90 fixture facts, Evidence Completeness, Context Coverage, execution classification, and why replay is not a live service claim.
 
 - [ ] **Step 4: Strengthen setup and the three-minute story**
@@ -8182,15 +8915,21 @@ Document DataHub Quickstart as local-development-only with Docker Compose v2 and
 uvx mcp-server-datahub@0.6.0 --version
 ```
 
+Document that `http://localhost:9002` is the UI and `http://localhost:8080` is GMS. Include the
+seven-step live operator preflight from Task 14 and the PAT troubleshooting rule: missing token
+controls require Metadata Authentication and token-generation privileges, never mutation enablement.
+State that total advertised counts such as `22`, `10 read`, or `12 write` are version- and
+configuration-dependent; only the four-name application allowlist is contractual.
+
 Update `docs/demo-scenario.md` so the timed script remains below 3:00 and visibly includes:
 
 1. the `Metadata-Aware Code Generation & Development` problem;
 2. the live/replay badge;
 3. verified DataHub dataset, schema, table lineage, and column lineage;
-4. Evidence Completeness and Context Coverage as separate panels;
+4. Evidence Completeness, Context Coverage, and Runtime Proof as separate panels;
 5. 24 downstream / 11 column-confirmed / score 90 / `BLOCK_DIRECT_RENAME`;
-6. four deterministic artifacts and the non-executable physical-name gate;
-7. read-only/no-SQL/human-approval close.
+6. exact `analyze_rename_change` and `generate_migration_package` calls, four deterministic artifacts, and the non-executable physical-name gate;
+7. mutations-disabled/read-only/no-SQL/human-approval close.
 
 - [ ] **Step 5: Create the local contribution candidate using the official skill format**
 
@@ -8277,7 +9016,7 @@ pnpm typecheck
 git diff --check
 ```
 
-Expected: validator and tests pass; formatting, linting, and type checking pass; tracked-plus-untracked working-tree and history scans return no secret findings or secret values; attribution names Apache-2.0 sources; all repository content remains English; no document claims that Slack, Devpost feedback, video publication, public hosting, or an upstream PR has already happened.
+Expected: validator and tests pass; formatting, linting, and type checking pass; tracked-plus-untracked working-tree and history scans return no secret findings or secret values; attribution records the tutorial and lawful dataset provenance without copying code or imagery; architecture and demo documents prove the four-operation runtime boundary and exact two application tools; every rollout plan is PR-review-ready; all repository content remains English; no document claims that Slack, Devpost feedback, video publication, public hosting, or an upstream PR has already happened.
 
 - [ ] **Step 7: Commit the submission package without external publication**
 
@@ -8300,6 +9039,12 @@ After Task 14A:
 4. Run both tracked-plus-untracked working-tree and repository-history secret scans; confirm the branch contains no API keys, DataHub tokens, private traces, raw chain-of-thought, unrestricted tool access, database execution, DataHub mutation, GitHub automation, unapproved external publication, or false live-demo/OSS-contribution claims.
 5. Confirm `git diff origin/main...HEAD -- .github/workflows/ci.yml` retains immutable action SHAs.
 6. Confirm the dated submission checklist, attribution inventory, judging map, sample-output guide, local skill-candidate validator, and atomic-package integrity tests pass without network access.
-7. After the full review is clean, obtain explicit publication approval, then push and open a ready-for-review pull request with the offline gate output, live-smoke result, replay instructions, submission-check output, and a link to specification `002-nextjs-openai-agent-demo`.
+7. Confirm the documented live preflight distinguishes UI from GMS; separately inspect the dated,
+   commit-bound `docs/live-verification.md` without treating repository phrase validation as
+   execution proof. Also confirm the runtime-proof panel shows the four read operations and exact
+   two application tools, every rollout plan contains both PR-review sections grounded in
+   verified/missing/unknown owner context, and dataset provenance records lawful redistribution
+   without sensitive data.
+8. After the full review is clean, obtain explicit publication approval, then push and open a ready-for-review pull request with the offline gate output, live-smoke result, replay instructions, submission-check output, and a link to specification `002-nextjs-openai-agent-demo`.
 
 Do not merge until GitHub CI passes and the three-minute demo has been rehearsed once from a clean checkout.
