@@ -194,16 +194,16 @@ Generated files must be written only beneath the configured local runs directory
 
 ## Failure and Recovery Requirements
 
-| Condition | Required status | Required recovery guidance |
-|---|---|---|
-| DataHub is unavailable | `DATAHUB_UNAVAILABLE` | Explain how to verify the local containers and GMS endpoint. |
-| MCP Server cannot start or connect | `MCP_UNAVAILABLE` | Identify the failed integration boundary without exposing credentials. |
-| No dataset matches | `TARGET_NOT_FOUND` | Show the search hint and suggest a more specific dataset identifier. |
-| Several datasets remain plausible | `NEEDS_USER_CLARIFICATION` | Show deterministic candidate identifiers for selection. |
-| Source column is absent | `COLUMN_NOT_FOUND` | Show the actual retrieved field names. |
-| Downstream lineage is empty | `INSUFFICIENT_METADATA` | Produce a limited report, state that no downstream impact is proven, and lower confidence. |
-| Column-level lineage is absent | `COMPLETED_WITH_LIMITATIONS` | Clearly label downstream impact as table-level only. |
-| Artifact writing fails | `ARTIFACT_WRITE_FAILED` | Preserve the in-memory result and report the safe output location that failed. |
+| Condition                          | Required status              | Required recovery guidance                                                                 |
+| ---------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------ |
+| DataHub is unavailable             | `DATAHUB_UNAVAILABLE`        | Explain how to verify the local containers and GMS endpoint.                               |
+| MCP Server cannot start or connect | `MCP_UNAVAILABLE`            | Identify the failed integration boundary without exposing credentials.                     |
+| No dataset matches                 | `TARGET_NOT_FOUND`           | Show the search hint and suggest a more specific dataset identifier.                       |
+| Several datasets remain plausible  | `NEEDS_USER_CLARIFICATION`   | Show deterministic candidate identifiers for selection.                                    |
+| Source column is absent            | `COLUMN_NOT_FOUND`           | Show the actual retrieved field names.                                                     |
+| Downstream lineage is empty        | `INSUFFICIENT_METADATA`      | Produce a limited report, state that no downstream impact is proven, and lower confidence. |
+| Column-level lineage is absent     | `COMPLETED_WITH_LIMITATIONS` | Clearly label downstream impact as table-level only.                                       |
+| Artifact writing fails             | `ARTIFACT_WRITE_FAILED`      | Preserve the in-memory result and report the safe output location that failed.             |
 
 ## Acceptance Criteria
 
