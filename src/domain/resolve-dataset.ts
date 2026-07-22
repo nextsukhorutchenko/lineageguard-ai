@@ -9,6 +9,17 @@ export interface DatasetCandidate {
 
 const normalize = (value: string): string => value.trim().toLocaleLowerCase("en-US");
 
+const datasetUrnPattern = /^urn:li:dataset:\(urn:li:dataPlatform:([^,()]+),(.+),([^,()]+)\)$/;
+
+function platformQualifiedUrnIdentity(urn: string): string | undefined {
+  const match = datasetUrnPattern.exec(urn);
+  const platform = match?.[1];
+  const datasetName = match?.[2];
+  return platform === undefined || datasetName === undefined
+    ? undefined
+    : `${platform}:${datasetName}`;
+}
+
 export function resolveDataset(
   intent: ChangeIntent,
   candidates: readonly DatasetCandidate[],
@@ -17,6 +28,8 @@ export function resolveDataset(
   const exact = candidates.filter((candidate) => {
     const keys = [candidate.urn, candidate.name];
     if (candidate.platform) keys.push(`${candidate.platform}:${candidate.name}`);
+    const urnIdentity = platformQualifiedUrnIdentity(candidate.urn);
+    if (urnIdentity) keys.push(urnIdentity);
     return keys.some((key) => normalize(key) === hint);
   });
 

@@ -38,6 +38,32 @@ describe("resolveDataset", () => {
     ).toMatchObject({ platform: "snowflake" });
   });
 
+  it("resolves a platform-qualified identity from a canonical DataHub dataset URN", () => {
+    const candidate = {
+      urn: "urn:li:dataset:(urn:li:dataPlatform:snowflake,account.database.schema.orders,PROD)",
+      name: "ORDERS",
+    };
+
+    expect(resolveDataset(intent("snowflake:account.database.schema.orders"), [candidate])).toEqual(
+      candidate,
+    );
+  });
+
+  it.each([
+    "urn:li:chart:(urn:li:dataPlatform:snowflake,account.database.schema.orders)",
+    "urn:li:dataset:(not-a-platform-urn,account.database.schema.orders,PROD)",
+    "urn:li:dataset:(urn:li:dataPlatform:snowflake,account.database.schema.orders)",
+  ])("does not derive a dataset identity from malformed or non-dataset URN: %s", (urn) => {
+    expect(() =>
+      resolveDataset(intent("snowflake:account.database.schema.orders"), [
+        {
+          urn,
+          name: "ORDERS",
+        },
+      ]),
+    ).toThrowError(expect.objectContaining({ code: "TARGET_NOT_FOUND" }));
+  });
+
   it("rejects a request with no exact candidate", () => {
     expect(() => resolveDataset(intent("snowflake:orders"), [])).toThrowError(AppError);
     expect(() => resolveDataset(intent("snowflake:orders"), [])).toThrowError(

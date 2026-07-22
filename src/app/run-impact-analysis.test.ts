@@ -183,7 +183,7 @@ describe("runImpactAnalysis", () => {
     );
   });
 
-  it("writes a limited report when no downstream lineage is returned", async () => {
+  it("writes a metadata-limited report when no downstream lineage is returned", async () => {
     const catalog = new FakeCatalog({ tableLineage: [], columnLineage: [] });
     const run = await runWith(catalog, await createRunsRoot());
 
@@ -194,6 +194,12 @@ describe("runImpactAnalysis", () => {
     );
     expect(run.artifactPath).toBeDefined();
     await expect(stat(run.artifactPath!)).resolves.toMatchObject({ size: expect.any(Number) });
+    const report = await readFile(run.artifactPath!, "utf8");
+    expect(report).toContain("INSUFFICIENT_METADATA");
+    expect(report).toContain(
+      "No downstream impact is proven because DataHub returned no downstream lineage.",
+    );
+    expect(report).not.toMatch(/\bsafe\b/i);
   });
 
   it("derives pagination and optional metadata unknowns from normalized evidence", async () => {
