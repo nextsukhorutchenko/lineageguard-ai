@@ -30,17 +30,17 @@
 
 ## Resolved Technical Decisions
 
-| Decision           | Resolution                                                                                                     | Reason                                                                                                                                     |
-| ------------------ | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Demo dataset       | `urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.order_details,PROD)`            | The official `showcase-ecommerce` datapack gives it 19 downstream assets within two hops and multiple column-level `customer_id` mappings. |
-| Demo change        | Rename `customer_id` to `customer_key`                                                                         | The source field exists as `NUMBER(38,0)` and has visible downstream column evidence.                                                      |
-| Demo request       | `Rename column customer_id to customer_key in dataset snowflake:b2fd91.order_entry_db.analytics.order_details` | The platform-qualified dataset identity supports deterministic resolution.                                                                 |
-| Lineage bound      | Two hops                                                                                                       | It captures the complete observed demo blast radius without invoking DataHub's `3+` full-graph behavior.                                   |
-| MCP client         | `@modelcontextprotocol/sdk@1.29.0` v1                                                                          | The official SDK still recommends v1 until the v2 line becomes stable.                                                                     |
-| Runtime validation | Zod 4.4.3                                                                                                      | One dependency covers CLI input, configuration, MCP response boundaries, and fixtures.                                                     |
-| Test runner        | Vitest 4.1.10                                                                                                  | It supports Node 22 and TypeScript ESM with fast focused test execution.                                                                   |
-| Impact formula     | `25 + downstream + depth + confirmed-column + gap`, capped at 100                                              | It is deterministic, explainable, and separately exposes every factor.                                                                     |
-| Next.js transition | After AC-001 through AC-010 pass for the CLI slice                                                             | This preserves the CLI as the proof boundary and prevents premature UI work.                                                               |
+| Decision           | Resolution                                                                                                     | Reason                                                                                                                                                                                          |
+| ------------------ | -------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Demo dataset       | `urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.order_details,PROD)`            | The committed sanitized capture of the official `showcase-ecommerce` datapack records 24 downstream asset URNs within two hops and 11 exact-URN column-lineage confirmations for `customer_id`. |
+| Demo change        | Rename `customer_id` to `customer_key`                                                                         | The source field exists as `NUMBER(38,0)` and has visible downstream column evidence.                                                                                                           |
+| Demo request       | `Rename column customer_id to customer_key in dataset snowflake:b2fd91.order_entry_db.analytics.order_details` | The platform-qualified dataset identity supports deterministic resolution.                                                                                                                      |
+| Lineage bound      | Two hops                                                                                                       | It captures the complete observed demo blast radius without invoking DataHub's `3+` full-graph behavior.                                                                                        |
+| MCP client         | `@modelcontextprotocol/sdk@1.29.0` v1                                                                          | The official SDK still recommends v1 until the v2 line becomes stable.                                                                                                                          |
+| Runtime validation | Zod 4.4.3                                                                                                      | One dependency covers CLI input, configuration, MCP response boundaries, and fixtures.                                                                                                          |
+| Test runner        | Vitest 4.1.10                                                                                                  | It supports Node 22 and TypeScript ESM with fast focused test execution.                                                                                                                        |
+| Impact formula     | `25 + downstream + depth + confirmed-column + gap`, capped at 100                                              | It is deterministic, explainable, and separately exposes every factor.                                                                                                                          |
+| Next.js transition | After AC-001 through AC-010 pass for the CLI slice                                                             | This preserves the CLI as the proof boundary and prevents premature UI work.                                                                                                                    |
 
 ## Verified Primary References
 
@@ -366,8 +366,7 @@ export interface DatasetCandidate {
   readonly platform?: string;
 }
 
-const normalize = (value: string): string =>
-  value.trim().toLocaleLowerCase("en-US");
+const normalize = (value: string): string => value.trim().toLocaleLowerCase("en-US");
 
 export function resolveDataset(
   intent: ChangeIntent,
@@ -376,28 +375,19 @@ export function resolveDataset(
   const hint = normalize(intent.datasetHint);
   const exact = candidates.filter((candidate) => {
     const keys = [candidate.urn, candidate.name];
-    if (candidate.platform)
-      keys.push(`${candidate.platform}:${candidate.name}`);
+    if (candidate.platform) keys.push(`${candidate.platform}:${candidate.name}`);
     return keys.some((key) => normalize(key) === hint);
   });
 
   if (exact.length === 0) {
-    throw new AppError(
-      "TARGET_NOT_FOUND",
-      `No dataset exactly matches ${intent.datasetHint}.`,
-      {
-        searchHint: intent.datasetHint,
-      },
-    );
+    throw new AppError("TARGET_NOT_FOUND", `No dataset exactly matches ${intent.datasetHint}.`, {
+      searchHint: intent.datasetHint,
+    });
   }
   if (exact.length > 1) {
-    throw new AppError(
-      "NEEDS_USER_CLARIFICATION",
-      "Several datasets match exactly.",
-      {
-        candidates: exact.map(({ urn }) => urn).sort(),
-      },
-    );
+    throw new AppError("NEEDS_USER_CLARIFICATION", "Several datasets match exactly.", {
+      candidates: exact.map(({ urn }) => urn).sort(),
+    });
   }
   return exact[0]!;
 }
@@ -446,16 +436,11 @@ it("sorts assets and fields deterministically", () => {
     "customer_id",
     "z_col",
   ]);
-  expect(result.downstreamAssets.map((item) => item.urn)).toEqual([
-    "urn:a",
-    "urn:z",
-  ]);
+  expect(result.downstreamAssets.map((item) => item.urn)).toEqual(["urn:a", "urn:z"]);
 });
 
 it("rejects a missing source column with actual field names", () => {
-  expect(() =>
-    requireSourceColumn([field("order_id")], "customer_id"),
-  ).toThrowError(
+  expect(() => requireSourceColumn([field("order_id")], "customer_id")).toThrowError(
     expect.objectContaining<AppError>({
       code: "COLUMN_NOT_FOUND",
       details: { knownFields: ["order_id"] },
@@ -513,11 +498,7 @@ export interface NormalizedEvidence {
 
 ```ts
 const evidenceLevel: EvidenceLevel =
-  columnAffectedAssets.length > 0
-    ? "column"
-    : downstreamAssets.length > 0
-      ? "table"
-      : "none";
+  columnAffectedAssets.length > 0 ? "column" : downstreamAssets.length > 0 ? "table" : "none";
 ```
 
 `requireSourceColumn` must compare `fieldPath.normalize("NFKC").toLocaleLowerCase("en-US")` exactly and throw `COLUMN_NOT_FOUND` with sorted real field names.
@@ -580,25 +561,19 @@ git commit -m "feat: define normalized DataHub evidence contracts"
 Test these exact cases:
 
 ```ts
-expect(
-  assessImpact(evidence({ downstream: 0, columnAffected: 0, maxHop: 0 })),
-).toMatchObject({
+expect(assessImpact(evidence({ downstream: 0, columnAffected: 0, maxHop: 0 }))).toMatchObject({
   score: 35,
   level: "medium",
   confidence: "low",
 });
 
-expect(
-  assessImpact(evidence({ downstream: 2, columnAffected: 2, maxHop: 1 })),
-).toMatchObject({
+expect(assessImpact(evidence({ downstream: 2, columnAffected: 2, maxHop: 1 }))).toMatchObject({
   score: 44,
   level: "medium",
   confidence: "high",
 });
 
-expect(
-  assessImpact(evidence({ downstream: 19, columnAffected: 8, maxHop: 2 })),
-).toMatchObject({
+expect(assessImpact(evidence({ downstream: 19, columnAffected: 8, maxHop: 2 }))).toMatchObject({
   score: 90,
   level: "critical",
   confidence: "medium",
@@ -621,11 +596,7 @@ export type Confidence = "low" | "medium" | "high";
 
 export interface RiskFactor {
   readonly name:
-    | "renameSeverity"
-    | "downstreamAssets"
-    | "lineageDepth"
-    | "confirmedColumns"
-    | "metadataGap";
+    "renameSeverity" | "downstreamAssets" | "lineageDepth" | "confirmedColumns" | "metadataGap";
   readonly points: number;
   readonly explanation: string;
 }
@@ -640,10 +611,7 @@ export interface ImpactAssessment {
 export function assessImpact(evidence: NormalizedEvidence): ImpactAssessment {
   const downstreamCount = evidence.downstreamAssets.length;
   const columnCount = evidence.columnAffectedAssets.length;
-  const maxHop = Math.max(
-    0,
-    ...evidence.downstreamAssets.map(({ hop }) => hop),
-  );
+  const maxHop = Math.max(0, ...evidence.downstreamAssets.map(({ hop }) => hop));
   const factors: RiskFactor[] = [
     {
       name: "renameSeverity",
@@ -668,11 +636,7 @@ export function assessImpact(evidence: NormalizedEvidence): ImpactAssessment {
     {
       name: "metadataGap",
       points:
-        columnCount === downstreamCount && downstreamCount > 0
-          ? 0
-          : columnCount === 0
-            ? 10
-            : 5,
+        columnCount === downstreamCount && downstreamCount > 0 ? 0 : columnCount === 0 ? 10 : 5,
       explanation:
         columnCount === downstreamCount && downstreamCount > 0
           ? "All visible assets have column-level evidence."
@@ -684,19 +648,9 @@ export function assessImpact(evidence: NormalizedEvidence): ImpactAssessment {
     factors.reduce((sum, factor) => sum + factor.points, 0),
   );
   const level: RiskLevel =
-    score < 30
-      ? "low"
-      : score < 60
-        ? "medium"
-        : score < 80
-          ? "high"
-          : "critical";
+    score < 30 ? "low" : score < 60 ? "medium" : score < 80 ? "high" : "critical";
   const confidence: Confidence =
-    columnCount === 0
-      ? "low"
-      : columnCount === downstreamCount
-        ? "high"
-        : "medium";
+    columnCount === 0 ? "low" : columnCount === downstreamCount ? "high" : "medium";
   return { score, level, confidence, factors };
 }
 ```
@@ -759,8 +713,7 @@ Expected: FAIL because `redact` does not exist.
 - [ ] **Step 3: Implement recursive redaction without mutating the input**
 
 ```ts
-const secretKey =
-  /(token|password|secret|authorization|api[_-]?key|private[_-]?key)/i;
+const secretKey = /(token|password|secret|authorization|api[_-]?key|private[_-]?key)/i;
 
 export function redact(value: unknown, secrets: readonly string[]): unknown {
   if (typeof value === "string") {
@@ -786,13 +739,7 @@ export function redact(value: unknown, secrets: readonly string[]): unknown {
 Use a fresh `mkdtemp` root for every case. Assert that `run-001/impact-report.md` is written, while these values are rejected with `ARTIFACT_WRITE_FAILED`:
 
 ```ts
-const unsafe = [
-  "../outside",
-  "..\\outside",
-  "C:\\outside",
-  "/outside",
-  "run-001/../../outside",
-];
+const unsafe = ["../outside", "..\\outside", "C:\\outside", "/outside", "run-001/../../outside"];
 ```
 
 - [ ] **Step 5: Implement safe artifact writing**
@@ -816,10 +763,7 @@ export async function writeRunArtifact(options: {
     fromRoot === ".." ||
     fromRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
   ) {
-    throw new AppError(
-      "ARTIFACT_WRITE_FAILED",
-      "The artifact path escapes the runs directory.",
-    );
+    throw new AppError("ARTIFACT_WRITE_FAILED", "The artifact path escapes the runs directory.");
   }
   try {
     await mkdir(resolve(root, options.runId), { recursive: true });
@@ -872,9 +816,7 @@ git commit -m "feat: secure traces and run artifact paths"
 Assert that URL and token are required, `uvx` and `runs` are defaults, and no parsed configuration object is printable with the raw token:
 
 ```ts
-expect(() =>
-  loadRuntimeConfig({ DATAHUB_GMS_URL: "http://localhost:8080" }),
-).toThrow();
+expect(() => loadRuntimeConfig({ DATAHUB_GMS_URL: "http://localhost:8080" })).toThrow();
 expect(
   loadRuntimeConfig({
     DATAHUB_GMS_URL: "http://localhost:8080",
@@ -911,8 +853,7 @@ Test `structuredContent`, a single JSON text block, `isError: true`, and invalid
 
 ```ts
 export function decodeJsonToolResult(result: CallToolResult): unknown {
-  if (result.isError)
-    throw new Error("DataHub MCP tool returned an error result.");
+  if (result.isError) throw new Error("DataHub MCP tool returned an error result.");
   if (result.structuredContent) return result.structuredContent;
   const text = result.content
     .filter((item): item is TextContent => item.type === "text")
@@ -937,10 +878,7 @@ export const searchResponseSchema = z
                 urn: z.string().startsWith("urn:li:"),
                 name: z.string().optional(),
                 type: z.string().optional(),
-                platform: z
-                  .object({ name: z.string().optional() })
-                  .passthrough()
-                  .optional(),
+                platform: z.object({ name: z.string().optional() }).passthrough().optional(),
               })
               .passthrough(),
           })
@@ -975,10 +913,7 @@ const lineageResultSchema = z
       .object({
         urn: z.string(),
         name: z.string().optional(),
-        platform: z
-          .object({ name: z.string().optional() })
-          .passthrough()
-          .optional(),
+        platform: z.object({ name: z.string().optional() }).passthrough().optional(),
       })
       .passthrough(),
     degree: z.number().int().nonnegative(),
@@ -1002,9 +937,7 @@ export const lineageResponseSchema = z
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-export async function connectDataHubMcp(
-  config: RuntimeConfig,
-): Promise<Client> {
+export async function connectDataHubMcp(config: RuntimeConfig): Promise<Client> {
   const client = new Client({ name: "lineageguard-ai", version: "0.1.0" });
   const transport = new StdioClientTransport({
     command: config.uvxPath,
@@ -1079,10 +1012,7 @@ The adapter constructor receives a minimal client interface:
 
 ```ts
 export interface McpToolClient {
-  callTool(request: {
-    name: string;
-    arguments: Record<string, unknown>;
-  }): Promise<CallToolResult>;
+  callTool(request: { name: string; arguments: Record<string, unknown> }): Promise<CallToolResult>;
   close(): Promise<void>;
 }
 ```
@@ -1148,9 +1078,7 @@ Expected: FAIL because the application service does not exist.
 - [ ] **Step 3: Implement the explicit application flow**
 
 ```ts
-export async function runImpactAnalysis(
-  deps: RunImpactAnalysisDependencies,
-): Promise<AnalysisRun> {
+export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Promise<AnalysisRun> {
   const intent = parseChangeIntent(deps.request);
   try {
     const candidates = await deps.catalog.searchDatasets(intent.datasetHint);
@@ -1313,13 +1241,11 @@ const guidance = {
     "Verify Docker containers with `docker ps` and confirm http://localhost:8080/health responds.",
   MCP_UNAVAILABLE:
     "Verify `uvx mcp-server-datahub@0.6.0 --version` and the DATAHUB_GMS_URL configuration.",
-  TARGET_NOT_FOUND:
-    "Use a more specific platform-qualified dataset identifier.",
-  NEEDS_USER_CLARIFICATION:
-    "Choose one of the listed dataset URNs and retry with that exact URN.",
+  TARGET_NOT_FOUND: "Use a more specific platform-qualified dataset identifier.",
+  NEEDS_USER_CLARIFICATION: "Choose one of the listed dataset URNs and retry with that exact URN.",
   COLUMN_NOT_FOUND: "Choose one of the actual schema fields listed above.",
   ARTIFACT_WRITE_FAILED:
-    "Verify that the configured runs directory is writable and remains inside the project workspace.",
+    "Verify that the configured runs directory is writable and has no symbolic-link or junction ancestors.",
 } as const;
 ```
 
@@ -1392,9 +1318,7 @@ Expected: datapack load completes, GMS health responds, and no authentication ma
 The test must skip only when `DATAHUB_GMS_TOKEN` is absent. Otherwise it must connect to the real MCP subprocess and assert:
 
 ```ts
-expect(candidates).toContainEqual(
-  expect.objectContaining({ urn: DATASET_URN }),
-);
+expect(candidates).toContainEqual(expect.objectContaining({ urn: DATASET_URN }));
 expect(fields).toContainEqual(
   expect.objectContaining({
     fieldPath: "customer_id",

@@ -1,0 +1,35 @@
+{
+  "name": "lineageguard-ai",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.10.0",
+  "engines": {
+    "node": "22.23.1"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "demo": "tsx src/cli.ts --request \"Rename column customer_id to customer_key in dataset snowflake:b2fd91.order_entry_db.analytics.order_details\"",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "start": "node dist/cli.js",
+    "test": "vitest run --exclude tests/integration/**",
+    "test:integration": "vitest run tests/integration/datahub-mcp.integration.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "22.20.1",
+    "eslint": "10.7.0",
+    "prettier": "3.9.6",
+    "tsx": "4.23.1",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.65.0",
+    "vitest": "4.1.10"
+  }
+}
