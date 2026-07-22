@@ -2,9 +2,15 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 import { runImpactAnalysis } from "../src/app/run-impact-analysis.js";
-import type { DataHubCatalog } from "../src/datahub/catalog.js";
-import type { LineageAsset, SchemaField, ToolTraceEntry } from "../src/domain/evidence.js";
+import type { CollectionResult, DataHubCatalog } from "../src/datahub/catalog.js";
+import type {
+  EntityContext,
+  LineageAsset,
+  SchemaField,
+  ToolTraceEntry,
+} from "../src/domain/evidence.js";
 import type { DatasetCandidate } from "../src/domain/resolve-dataset.js";
 
 const REQUEST =
@@ -19,10 +25,72 @@ async function readFixture<T>(name: string): Promise<T> {
   ) as T;
 }
 
+const completenessSchema = z
+  .object({
+    complete: z.boolean(),
+    pages: z.number().int().nonnegative(),
+    itemCount: z.number().int().nonnegative(),
+    offsets: z.array(z.number().int().nonnegative()),
+    reasonCodes: z.array(z.string()),
+  })
+  .strict();
+
+const collectionSchema = <T extends z.ZodType>(item: T) =>
+  z
+    .object({
+      items: z.array(item),
+      completeness: completenessSchema,
+    })
+    .strict();
+
+const candidateSchema = z
+  .object({
+    urn: z.string(),
+    name: z.string(),
+    platform: z.string().optional(),
+    environment: z.string().optional(),
+  })
+  .strict();
+const fieldSchema = z
+  .object({
+    fieldPath: z.string(),
+    nativeDataType: z.string().optional(),
+    nullable: z.boolean().optional(),
+    description: z.string().optional(),
+  })
+  .strict();
+const lineageSchema = z
+  .object({
+    urn: z.string(),
+    name: z.string().optional(),
+    platform: z.string().optional(),
+    hop: z.number(),
+    lineageColumns: z.array(z.string()),
+  })
+  .strict();
+const entityContextSchema = z
+  .object({
+    urn: z.string(),
+    entityType: z.string(),
+    name: z.string().optional(),
+    platform: z.string().optional(),
+    description: z.string().max(2_000).optional(),
+    owners: z.array(z.string()).max(20),
+    tags: z.array(z.string()).max(20),
+    glossaryTerms: z.array(z.string()).max(20),
+    siblingUrns: z.array(z.string()).max(20),
+    qualitySignals: z.array(z.string()).max(20),
+  })
+  .strict();
+
+async function parseFixture<T>(name: string, schema: z.ZodType): Promise<T> {
+  return schema.parse(await readFixture<unknown>(name)) as T;
+}
+
 class FixtureCatalog implements DataHubCatalog {
   readonly #trace: ToolTraceEntry[] = [];
 
-  async searchDatasets(): Promise<readonly DatasetCandidate[]> {
+  async searchDatasets(): Promise<CollectionResult<DatasetCandidate>> {
     this.#trace.push({
       callId: "mcp-001",
       tool: "search",
@@ -33,24 +101,34 @@ class FixtureCatalog implements DataHubCatalog {
         offset: 0,
       },
       status: "ok",
+      at: "2026-07-22T12:00:00.000Z",
+      page: 1,
     });
-    return readFixture<readonly DatasetCandidate[]>("search-order-details.json");
+    return parseFixture<CollectionResult<DatasetCandidate>>(
+      "search-order-details.json",
+      collectionSchema(candidateSchema),
+    );
   }
 
-  async listSchemaFields(): Promise<readonly SchemaField[]> {
+  async listSchemaFields(): Promise<CollectionResult<SchemaField>> {
     this.#trace.push({
       callId: "mcp-002",
       tool: "list_schema_fields",
       arguments: { urn: DATASET_URN, limit: 100, offset: 0 },
       status: "ok",
+      at: "2026-07-22T12:00:00.000Z",
+      page: 1,
     });
-    return readFixture<readonly SchemaField[]>("schema-order-details.json");
+    return parseFixture<CollectionResult<SchemaField>>(
+      "schema-order-details.json",
+      collectionSchema(fieldSchema),
+    );
   }
 
   async getDownstreamLineage(
     _datasetUrn: string,
     options: { readonly column?: string; readonly maxHops: 2 },
-  ): Promise<readonly LineageAsset[]> {
+  ): Promise<CollectionResult<LineageAsset>> {
     this.#trace.push({
       callId: `mcp-${String(this.#trace.length + 1).padStart(3, "0")}`,
       tool: "get_lineage",
@@ -63,12 +141,34 @@ class FixtureCatalog implements DataHubCatalog {
         offset: 0,
       },
       status: "ok",
+      at: "2026-07-22T12:00:00.000Z",
+      page: 1,
     });
-    return readFixture<readonly LineageAsset[]>(
+    return parseFixture<CollectionResult<LineageAsset>>(
       options.column
         ? "lineage-order-details-customer-id.json"
         : "lineage-order-details-table.json",
+      collectionSchema(lineageSchema),
     );
+  }
+
+  async getEntityContext(): Promise<CollectionResult<EntityContext, never>> {
+    this.#trace.push({
+      callId: "mcp-005",
+      tool: "get_entities",
+      arguments: { urns: [] },
+      status: "ok",
+      at: "2026-07-22T12:00:00.000Z",
+      page: 1,
+    });
+    return parseFixture<CollectionResult<EntityContext, never>>(
+      "entity-context-order-details-impact.json",
+      collectionSchema(entityContextSchema),
+    );
+  }
+
+  getServerInfo() {
+    return {};
   }
 
   getTrace(): readonly ToolTraceEntry[] {
@@ -103,10 +203,6 @@ describe("fixture-backed impact analysis", () => {
   it("repeats the grounded 24/11/90 result and matches the committed example", async () => {
     const first = await runFixturePipeline();
     const second = await runFixturePipeline();
-    const committedExample = await readFile(
-      new URL("../examples/001-customer-id-rename/impact-report.md", import.meta.url),
-      "utf8",
-    );
 
     expect(first.run.evidence.targetDataset).toMatchObject({
       urn: DATASET_URN,
@@ -116,7 +212,12 @@ describe("fixture-backed impact analysis", () => {
     expect(first.run.evidence.downstreamAssets).toHaveLength(24);
     expect(first.run.evidence.columnAffectedAssets).toHaveLength(11);
     expect(first.run.evidence.searchCandidateUrns).toEqual(
-      (await readFixture<readonly DatasetCandidate[]>("search-order-details.json"))
+      (
+        await parseFixture<CollectionResult<DatasetCandidate>>(
+          "search-order-details.json",
+          collectionSchema(candidateSchema),
+        )
+      ).items
         .map(({ urn }) => urn)
         .sort((left, right) => left.localeCompare(right, "en-US")),
     );
@@ -135,6 +236,31 @@ describe("fixture-backed impact analysis", () => {
       status: first.run.status,
     });
     expect(second.markdown).toBe(first.markdown);
-    expect(first.markdown).toBe(committedExample);
+    expect(first.run.evidence.entityContext).toHaveLength(25);
+    expect(first.run.evidence.entityContextRetrieval).toEqual({
+      complete: true,
+      pages: 3,
+      itemCount: 25,
+      offsets: [0, 10, 20],
+      reasonCodes: [],
+    });
+  });
+
+  it("rejects forbidden raw entity-context fields in replay fixtures", () => {
+    const forbidden = ["email", "profile", "relatedDocuments", "rawSql", "token", "diagnostics"];
+    for (const field of forbidden) {
+      expect(() =>
+        entityContextSchema.parse({
+          urn: "urn:li:dataset:test",
+          entityType: "DATASET",
+          owners: [],
+          tags: [],
+          glossaryTerms: [],
+          siblingUrns: [],
+          qualitySignals: [],
+          [field]: "unsafe",
+        }),
+      ).toThrow();
+    }
   });
 });

@@ -2,8 +2,15 @@ import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
-import type { DataHubCatalog } from "../datahub/catalog.js";
-import type { LineageAsset, SchemaField, ToolTraceEntry } from "../domain/evidence.js";
+import type { CollectionResult, DataHubCatalog } from "../datahub/catalog.js";
+import type {
+  EntityContext,
+  EntityContextIncompleteReasonCode,
+  LineageAsset,
+  RequiredIncompleteReasonCode,
+  SchemaField,
+  ToolTraceEntry,
+} from "../domain/evidence.js";
 import type { DatasetCandidate } from "../domain/resolve-dataset.js";
 import { AppError } from "../errors/app-error.js";
 import * as impactAnalysisModule from "./run-impact-analysis.js";
@@ -47,6 +54,28 @@ interface FakeCatalogOptions {
   readonly failSearch?: boolean;
   readonly searchError?: Error;
   readonly closeError?: Error;
+  readonly searchReasons?: readonly RequiredIncompleteReasonCode[];
+  readonly schemaReasons?: readonly RequiredIncompleteReasonCode[];
+  readonly tableReasons?: readonly RequiredIncompleteReasonCode[];
+  readonly columnReasons?: readonly RequiredIncompleteReasonCode[];
+  readonly entityContextReasons?: readonly EntityContextIncompleteReasonCode[];
+  readonly entityContextError?: Error;
+}
+
+function collection<T, R extends string>(
+  items: readonly T[],
+  reasonCodes: readonly R[] = [],
+): CollectionResult<T, R> {
+  return {
+    items,
+    completeness: {
+      complete: reasonCodes.length === 0,
+      pages: 1,
+      itemCount: items.length,
+      offsets: [0],
+      reasonCodes,
+    },
+  };
 }
 
 class FakeCatalog implements DataHubCatalog {
@@ -59,7 +88,7 @@ class FakeCatalog implements DataHubCatalog {
     this.#options = options;
   }
 
-  async searchDatasets(): Promise<readonly DatasetCandidate[]> {
+  async searchDatasets(): Promise<CollectionResult<DatasetCandidate>> {
     this.operations.push("searchDatasets");
     if (this.#options.searchError) throw this.#options.searchError;
     if (this.#options.failSearch) throw new AppError("DATAHUB_UNAVAILABLE", "Unavailable.");
@@ -68,25 +97,29 @@ class FakeCatalog implements DataHubCatalog {
       tool: "search",
       arguments: { query: "/q orders", num_results: 50, offset: 0 },
       status: "ok",
+      at: "2026-07-22T12:00:00.000Z",
+      page: 1,
     });
-    return this.#options.candidates ?? [TARGET];
+    return collection(this.#options.candidates ?? [TARGET], this.#options.searchReasons);
   }
 
-  async listSchemaFields(): Promise<readonly SchemaField[]> {
+  async listSchemaFields(): Promise<CollectionResult<SchemaField>> {
     this.operations.push("listSchemaFields");
     this.#trace.push({
       callId: "mcp-002",
       tool: "list_schema_fields",
       arguments: { urn: TARGET.urn, limit: 100, offset: 0 },
       status: "ok",
+      at: "2026-07-22T12:00:00.000Z",
+      page: 1,
     });
-    return this.#options.fields ?? FIELDS;
+    return collection(this.#options.fields ?? FIELDS, this.#options.schemaReasons);
   }
 
   async getDownstreamLineage(
     _datasetUrn: string,
     options: { readonly column?: string; readonly maxHops: 2 },
-  ): Promise<readonly LineageAsset[]> {
+  ): Promise<CollectionResult<LineageAsset>> {
     const mode = options.column ?? "table";
     this.operations.push(`getDownstreamLineage:${mode}`);
     this.#trace.push({
@@ -100,10 +133,33 @@ class FakeCatalog implements DataHubCatalog {
         offset: 0,
       },
       status: "ok",
+      at: "2026-07-22T12:00:00.000Z",
+      page: 1,
     });
     return options.column
-      ? (this.#options.columnLineage ?? [COLUMN_DOWNSTREAM])
-      : (this.#options.tableLineage ?? [DOWNSTREAM]);
+      ? collection(this.#options.columnLineage ?? [COLUMN_DOWNSTREAM], this.#options.columnReasons)
+      : collection(this.#options.tableLineage ?? [DOWNSTREAM], this.#options.tableReasons);
+  }
+
+  async getEntityContext(
+    urns: readonly string[],
+  ): Promise<CollectionResult<EntityContext, EntityContextIncompleteReasonCode>> {
+    this.operations.push("getEntityContext");
+    if (this.#options.entityContextError) throw this.#options.entityContextError;
+    const entities = urns.map((urn) => ({
+      urn,
+      entityType: "DATASET",
+      owners: [],
+      tags: [],
+      glossaryTerms: [],
+      siblingUrns: [],
+      qualitySignals: [],
+    }));
+    return collection(entities, this.#options.entityContextReasons);
+  }
+
+  getServerInfo() {
+    return {};
   }
 
   getTrace(): readonly ToolTraceEntry[] {
@@ -172,6 +228,7 @@ describe("runImpactAnalysis", () => {
       "listSchemaFields",
       "getDownstreamLineage:table",
       "getDownstreamLineage:customer_id",
+      "getEntityContext",
       "close",
     ]);
     expect(catalog.closeCount).toBe(1);
@@ -503,6 +560,7 @@ describe("runImpactAnalysis", () => {
       "listSchemaFields",
       "getDownstreamLineage:table",
       "getDownstreamLineage:customer_id",
+      "getEntityContext",
       "close",
     ]);
     await expect(access(join(runsRoot, RUN_ID, "impact-report.md"))).rejects.toThrow();
@@ -510,5 +568,94 @@ describe("runImpactAnalysis", () => {
 
   it("does not expose the pre-write report builder as public application API", () => {
     expect(impactAnalysisModule).not.toHaveProperty("buildAnalysisRun");
+  });
+
+  it("marks required lineage truncation incomplete without changing the collected score", async () => {
+    const complete = await runWith(new FakeCatalog(), await createRunsRoot());
+    const incomplete = await runWith(
+      new FakeCatalog({ tableReasons: ["ITEM_LIMIT_REACHED"] }),
+      await createRunsRoot(),
+    );
+
+    expect(incomplete).toMatchObject({
+      status: "INCOMPLETE_EVIDENCE",
+      evidence: { completeness: { complete: false } },
+    });
+    expect(incomplete.assessment.score).toBe(complete.assessment.score);
+    expect(incomplete.unknowns).toContain(
+      "Table-lineage counts are collected lower bounds because required evidence is incomplete.",
+    );
+  });
+
+  it("continues through explicit optional entity-context gaps", async () => {
+    const run = await runWith(
+      new FakeCatalog({ entityContextReasons: ["ENTITY_CONTEXT_UNAVAILABLE"] }),
+      await createRunsRoot(),
+    );
+
+    expect(run.status).not.toBe("DATAHUB_UNAVAILABLE");
+    expect(run.evidence.contextCoverage).toMatchObject({ retrievalComplete: false });
+    expect(run.evidence.entityContextRetrieval.reasonCodes).toEqual(["ENTITY_CONTEXT_UNAVAILABLE"]);
+  });
+
+  it("treats an aborted get_entities transport call as terminal and closes once", async () => {
+    const catalog = new FakeCatalog({
+      entityContextError: new AppError("DATAHUB_UNAVAILABLE", "Entity context transport failed."),
+    });
+    const runsRoot = await createRunsRoot();
+
+    await expect(runWith(catalog, runsRoot)).rejects.toMatchObject({ code: "DATAHUB_UNAVAILABLE" });
+    expect(catalog.operations).toEqual([
+      "searchDatasets",
+      "listSchemaFields",
+      "getDownstreamLineage:table",
+      "getDownstreamLineage:customer_id",
+      "getEntityContext",
+      "close",
+    ]);
+    expect(catalog.closeCount).toBe(1);
+    await expect(access(join(runsRoot, RUN_ID, "impact-report.md"))).rejects.toThrow();
+  });
+
+  it("allows one exact candidate from incomplete search but never infers absence", async () => {
+    const continued = await runWith(
+      new FakeCatalog({ searchReasons: ["PAGE_LIMIT_REACHED"] }),
+      await createRunsRoot(),
+    );
+    expect(continued.status).toBe("INCOMPLETE_EVIDENCE");
+
+    await expect(
+      runWith(
+        new FakeCatalog({ candidates: [], searchReasons: ["PAGE_LIMIT_REACHED"] }),
+        await createRunsRoot(),
+      ),
+    ).rejects.toMatchObject({
+      code: "DATAHUB_UNAVAILABLE",
+      message: "Dataset search was incomplete.",
+    });
+    await expect(
+      runWith(new FakeCatalog({ candidates: [] }), await createRunsRoot()),
+    ).rejects.toMatchObject({ code: "TARGET_NOT_FOUND" });
+  });
+
+  it("allows a verified source field from incomplete schema but never infers absence", async () => {
+    const continued = await runWith(
+      new FakeCatalog({ schemaReasons: ["ITEM_LIMIT_REACHED"] }),
+      await createRunsRoot(),
+    );
+    expect(continued.status).toBe("INCOMPLETE_EVIDENCE");
+
+    await expect(
+      runWith(
+        new FakeCatalog({ fields: [{ fieldPath: "order_id" }], schemaReasons: ["HAS_MORE"] }),
+        await createRunsRoot(),
+      ),
+    ).rejects.toMatchObject({
+      code: "DATAHUB_UNAVAILABLE",
+      message: "Dataset schema was incomplete.",
+    });
+    await expect(
+      runWith(new FakeCatalog({ fields: [{ fieldPath: "order_id" }] }), await createRunsRoot()),
+    ).rejects.toMatchObject({ code: "COLUMN_NOT_FOUND" });
   });
 });

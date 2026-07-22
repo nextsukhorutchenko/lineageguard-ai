@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "build:cli": "tsc -p tsconfig.build.json",
     "demo": "tsx src/cli.ts --request \"Rename column customer_id to customer_key in dataset snowflake:b2fd91.order_entry_db.analytics.order_details\"",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

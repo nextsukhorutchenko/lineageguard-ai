@@ -7,6 +7,7 @@ import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { RuntimeConfig } from "../../config/runtime-config.js";
 import { AppError } from "../../errors/app-error.js";
 import { redact } from "../../security/redact.js";
+import { sanitizeBoundaryText } from "../../security/sanitize-output.js";
 import type { McpToolClient, ToolCallRequest } from "./datahub-mcp-catalog.js";
 
 const MAX_STDERR_CHARACTERS = 4_096;
@@ -19,8 +20,11 @@ export function dataHubMcpServerParameters(config: RuntimeConfig): StdioServerPa
       DATAHUB_GMS_URL: config.datahubGmsUrl,
       DATAHUB_GMS_TOKEN: config.datahubGmsToken,
       TOOLS_IS_MUTATION_ENABLED: "false",
+      TOOLS_IS_USER_ENABLED: "false",
       DATAHUB_MCP_DOCUMENT_TOOLS_DISABLED: "true",
       SAVE_DOCUMENT_TOOL_ENABLED: "false",
+      DATA_QUALITY_TOOLS_ENABLED: "false",
+      SEMANTIC_SEARCH_ENABLED: "false",
     },
     stderr: "pipe",
   };
@@ -32,7 +36,84 @@ interface SdkToolClient {
     resultSchema?: typeof CallToolResultSchema,
     options?: { readonly signal?: AbortSignal },
   ): ReturnType<Client["callTool"]>;
+  listTools(
+    params?: { readonly cursor?: string },
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<{
+    readonly tools: readonly {
+      readonly name: string;
+      readonly annotations?: { readonly readOnlyHint?: boolean | undefined } | undefined;
+    }[];
+    readonly nextCursor?: string | undefined;
+  }>;
+  getServerVersion(): { readonly name: string; readonly version: string } | undefined;
   close(): Promise<void>;
+}
+
+export const REQUIRED_DATAHUB_READ_TOOLS = [
+  "search",
+  "list_schema_fields",
+  "get_lineage",
+  "get_entities",
+] as const;
+
+export function assertRequiredReadOnlyTools(
+  tools: readonly {
+    readonly name: string;
+    readonly annotations?: { readonly readOnlyHint?: boolean | undefined } | undefined;
+  }[],
+): void {
+  const byName = new Map(tools.map((tool) => [tool.name, tool]));
+  const invalid = REQUIRED_DATAHUB_READ_TOOLS.filter(
+    (name) => byName.get(name)?.annotations?.readOnlyHint !== true,
+  );
+  if (invalid.length > 0) {
+    throw new AppError("MCP_UNAVAILABLE", "Required read-only DataHub MCP tools are unavailable.");
+  }
+}
+
+interface ToolListClient {
+  listTools(
+    params?: { readonly cursor?: string },
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<{
+    readonly tools: readonly {
+      readonly name: string;
+      readonly annotations?: { readonly readOnlyHint?: boolean | undefined } | undefined;
+    }[];
+    readonly nextCursor?: string | undefined;
+  }>;
+}
+
+export async function listAndAssertRequiredReadOnlyTools(
+  client: ToolListClient,
+  signal: AbortSignal,
+): Promise<void> {
+  const byName = new Map<
+    string,
+    { name: string; annotations?: { readOnlyHint?: boolean | undefined } | undefined }
+  >();
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+
+  for (let page = 0; page < 5; page += 1) {
+    signal.throwIfAborted();
+    const result = await client.listTools(cursor === undefined ? undefined : { cursor }, {
+      signal,
+    });
+    signal.throwIfAborted();
+    for (const tool of result.tools) byName.set(tool.name, tool);
+    if (result.nextCursor === undefined) {
+      assertRequiredReadOnlyTools([...byName.values()]);
+      return;
+    }
+    if (seenCursors.has(result.nextCursor)) {
+      throw new AppError("MCP_UNAVAILABLE", "DataHub MCP tool discovery did not terminate.");
+    }
+    seenCursors.add(result.nextCursor);
+    cursor = result.nextCursor;
+  }
+  throw new AppError("MCP_UNAVAILABLE", "DataHub MCP tool discovery exceeded its page limit.");
 }
 
 export function appendBoundedRedactedStderr(
@@ -52,7 +133,27 @@ function boundedStderrCollector(secrets: readonly string[]): (chunk: unknown) =>
   };
 }
 
-export function toDataHubMcpToolClient(client: SdkToolClient): McpToolClient {
+function sanitizedIdentity(
+  value: string | undefined,
+  secrets: readonly string[],
+): string | undefined {
+  if (value === undefined) return undefined;
+  const sanitized = sanitizeBoundaryText(value, secrets, 100).trim();
+  if (sanitized.length === 0 || /^(?:\[REDACTED\]\s*)+$/u.test(sanitized)) return undefined;
+  return sanitized;
+}
+
+export function toDataHubMcpToolClient(
+  client: Pick<SdkToolClient, "callTool" | "close" | "getServerVersion">,
+  secrets: readonly string[] = [],
+): McpToolClient {
+  const serverVersion = client.getServerVersion?.();
+  const reportedServerName = sanitizedIdentity(serverVersion?.name, secrets);
+  const reportedServerVersion = sanitizedIdentity(serverVersion?.version, secrets);
+  const serverInfo = Object.freeze({
+    ...(reportedServerName === undefined ? {} : { reportedServerName }),
+    ...(reportedServerVersion === undefined ? {} : { reportedServerVersion }),
+  });
   return {
     async callTool(request, options) {
       const result = await client.callTool(request, CallToolResultSchema, options);
@@ -64,6 +165,9 @@ export function toDataHubMcpToolClient(client: SdkToolClient): McpToolClient {
         throw new Error("DataHub MCP returned an unsupported task result.");
       }
       return parsed.data;
+    },
+    getServerInfo() {
+      return serverInfo;
     },
     async close() {
       await client.close();
@@ -81,8 +185,11 @@ export async function connectDataHubMcp(
   transport.stderr?.on("data", boundedStderrCollector([config.datahubGmsToken]));
 
   try {
-    await client.connect(transport, signal === undefined ? undefined : { signal });
-    return toDataHubMcpToolClient(client);
+    const deadline = AbortSignal.timeout(15_000);
+    const connectionSignal = signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+    await client.connect(transport, { signal: connectionSignal });
+    await listAndAssertRequiredReadOnlyTools(client, connectionSignal);
+    return toDataHubMcpToolClient(client, [config.datahubGmsToken]);
   } catch {
     try {
       await client.close();
