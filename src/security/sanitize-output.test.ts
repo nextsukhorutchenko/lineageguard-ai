@@ -14,4 +14,17 @@ describe("output sanitization", () => {
     expect(sanitizeMarkdownTableCell(external)).toBe(safeMarkdown);
     expect(sanitizeTerminalText(external)).toBe("<b>[x](javascript:1)</b>\\u001B\\n\\u2028");
   });
+
+  it("redacts every known secret literal before formatting an output boundary", () => {
+    const external = "before longer-secret and secret after";
+    const secrets = ["secret", "longer-secret"];
+
+    expect(sanitizeMarkdownText(external, secrets)).toBe(
+      "before \\[REDACTED\\] and \\[REDACTED\\] after",
+    );
+    expect(sanitizeMarkdownTableCell(external, secrets)).toBe(
+      "before \\[REDACTED\\] and \\[REDACTED\\] after",
+    );
+    expect(sanitizeTerminalText(external, secrets)).toBe("before [REDACTED] and [REDACTED] after");
+  });
 });

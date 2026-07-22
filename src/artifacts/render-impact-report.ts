@@ -18,8 +18,8 @@ const traceArgumentKeys = {
   get_lineage: ["column", "max_hops", "max_results", "offset", "upstream", "urn"],
 } as const;
 
-function escapeTableCell(value: unknown): string {
-  return sanitizeMarkdownTableCell(value);
+function escapeTableCell(value: unknown, secrets: readonly string[]): string {
+  return sanitizeMarkdownTableCell(value, secrets);
 }
 
 function stableJson(value: unknown): string {
@@ -33,10 +33,16 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value) ?? "null";
 }
 
-function compactTable(headers: readonly string[], rows: readonly (readonly unknown[])[]): string {
+function compactTable(
+  headers: readonly string[],
+  rows: readonly (readonly unknown[])[],
+  secrets: readonly string[],
+): string {
   const header = `| ${headers.join(" | ")} |`;
   const separator = `| ${headers.map(() => "---").join(" | ")} |`;
-  const body = rows.map((row) => `| ${row.map(escapeTableCell).join(" | ")} |`);
+  const body = rows.map(
+    (row) => `| ${row.map((value) => escapeTableCell(value, secrets)).join(" | ")} |`,
+  );
   return [header, separator, ...body].join("\n");
 }
 
@@ -44,8 +50,9 @@ function alignedTable(
   headers: readonly string[],
   rows: readonly (readonly unknown[])[],
   alignments: readonly Alignment[],
+  secrets: readonly string[],
 ): string {
-  const escapedRows = rows.map((row) => row.map(escapeTableCell));
+  const escapedRows = rows.map((row) => row.map((value) => escapeTableCell(value, secrets)));
   const widths = headers.map((header, index) =>
     Math.max(header.length, 3, ...escapedRows.map((row) => row[index]?.length ?? 0)),
   );
@@ -68,10 +75,10 @@ function alignedTable(
   ].join("\n");
 }
 
-function bulletList(values: readonly string[]): string {
+function bulletList(values: readonly string[], secrets: readonly string[]): string {
   return values.length === 0
     ? "- None."
-    : values.map((value) => `- ${sanitizeMarkdownText(value)}`).join("\n");
+    : values.map((value) => `- ${sanitizeMarkdownText(value, secrets)}`).join("\n");
 }
 
 function safeTraceArguments(
@@ -85,7 +92,10 @@ function safeTraceArguments(
   );
 }
 
-export function renderImpactReport(run: ImpactReportDraft): string {
+export function renderImpactReport(
+  run: ImpactReportDraft,
+  secrets: readonly string[] = [],
+): string {
   const columnAffectedUrns = new Set(run.evidence.columnAffectedAssets.map(({ urn }) => urn));
   const affectedAssets =
     run.evidence.downstreamAssets.length === 0
@@ -99,6 +109,7 @@ export function renderImpactReport(run: ImpactReportDraft): string {
             asset.hop,
             columnAffectedUrns.has(asset.urn) ? "Column" : "Table",
           ]),
+          secrets,
         );
   const factorTable = alignedTable(
     ["Factor", "Points", "Explanation"],
@@ -108,6 +119,7 @@ export function renderImpactReport(run: ImpactReportDraft): string {
       factor.explanation,
     ]),
     ["left", "right", "left"],
+    secrets,
   );
   const traceTable = compactTable(
     ["Call ID", "Tool", "Status", "Arguments"],
@@ -117,6 +129,7 @@ export function renderImpactReport(run: ImpactReportDraft): string {
       entry.status,
       stableJson(safeTraceArguments(entry.tool, entry.arguments)),
     ]),
+    secrets,
   );
   const sections = [
     "# LineageGuard AI Impact Report",
@@ -124,11 +137,13 @@ export function renderImpactReport(run: ImpactReportDraft): string {
     compactTable(
       ["Run ID", "Created at", "Original request"],
       [[run.runId, run.createdAt, run.request]],
+      secrets,
     ),
     "## Resolved Change Intent",
     compactTable(
       ["Change", "Dataset hint", "Source column", "Target column"],
       [["Rename column", run.intent.datasetHint, run.intent.sourceColumn, run.intent.targetColumn]],
+      secrets,
     ),
     "## Selected Dataset",
     compactTable(
@@ -148,6 +163,7 @@ export function renderImpactReport(run: ImpactReportDraft): string {
               : "No",
         ],
       ],
+      secrets,
     ),
     "## Evidence Summary",
     compactTable(
@@ -160,6 +176,7 @@ export function renderImpactReport(run: ImpactReportDraft): string {
           "2 hops",
         ],
       ],
+      secrets,
     ),
     "## Affected Downstream Assets",
     affectedAssets,
@@ -167,14 +184,15 @@ export function renderImpactReport(run: ImpactReportDraft): string {
     compactTable(
       ["Score", "Risk level", "Confidence"],
       [[run.assessment.score, run.assessment.level, run.assessment.confidence]],
+      secrets,
     ),
     factorTable,
     "## Facts",
-    bulletList(run.facts),
+    bulletList(run.facts, secrets),
     "## Assumptions",
-    bulletList(run.assumptions),
+    bulletList(run.assumptions, secrets),
     "## Unknowns",
-    bulletList(run.unknowns),
+    bulletList(run.unknowns, secrets),
     "## DataHub Tool Trace",
     traceTable,
     "## Final Status",

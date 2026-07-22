@@ -1,3 +1,5 @@
+import { redact } from "./redact.js";
+
 const controlCharacter = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 
 function visibleControlCharacter(character: string): string {
@@ -11,8 +13,8 @@ function visibleControlCharacter(character: string): string {
     : `\\u${codePoint.toString(16).toUpperCase().padStart(4, "0")}`;
 }
 
-function makeControlsVisible(value: unknown): string {
-  return String(value).replace(controlCharacter, visibleControlCharacter);
+function makeControlsVisible(value: unknown, secrets: readonly string[]): string {
+  return String(redact(String(value), secrets)).replace(controlCharacter, visibleControlCharacter);
 }
 
 function encodeHtml(value: string): string {
@@ -23,14 +25,14 @@ function escapeInlineMarkdown(value: string): string {
   return value.replace(/([\\`*_[\]|])/gu, "\\$1");
 }
 
-export function sanitizeMarkdownTableCell(value: unknown): string {
-  return escapeInlineMarkdown(encodeHtml(makeControlsVisible(value)));
+export function sanitizeMarkdownTableCell(value: unknown, secrets: readonly string[] = []): string {
+  return escapeInlineMarkdown(encodeHtml(makeControlsVisible(value, secrets)));
 }
 
-export function sanitizeMarkdownText(value: unknown): string {
-  return escapeInlineMarkdown(encodeHtml(makeControlsVisible(value)));
+export function sanitizeMarkdownText(value: unknown, secrets: readonly string[] = []): string {
+  return escapeInlineMarkdown(encodeHtml(makeControlsVisible(value, secrets)));
 }
 
-export function sanitizeTerminalText(value: unknown): string {
-  return makeControlsVisible(value);
+export function sanitizeTerminalText(value: unknown, secrets: readonly string[] = []): string {
+  return makeControlsVisible(value, secrets);
 }

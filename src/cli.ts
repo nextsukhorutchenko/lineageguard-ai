@@ -124,32 +124,40 @@ function stringList(value: unknown): readonly string[] | undefined {
     : undefined;
 }
 
-function diagnosticDetails(error: AppError): string {
+function diagnosticDetails(error: AppError, secrets: readonly string[]): string {
   if (error.code === "TARGET_NOT_FOUND" && typeof error.details.searchHint === "string") {
-    return `Search hint: ${sanitizeTerminalText(error.details.searchHint)}\n`;
+    return `Search hint: ${sanitizeTerminalText(error.details.searchHint, secrets)}\n`;
   }
 
   const candidates = stringList(error.details.candidates);
   if (error.code === "NEEDS_USER_CLARIFICATION" && candidates !== undefined) {
     return `Dataset candidates:\n${candidates
-      .map((candidate) => `- ${sanitizeTerminalText(candidate)}\n`)
+      .map((candidate) => `- ${sanitizeTerminalText(candidate, secrets)}\n`)
       .join("")}`;
   }
 
   const knownFields = stringList(error.details.knownFields);
   if (error.code === "COLUMN_NOT_FOUND" && knownFields !== undefined) {
     return `Known schema fields:\n${knownFields
-      .map((field) => `- ${sanitizeTerminalText(field)}\n`)
+      .map((field) => `- ${sanitizeTerminalText(field, secrets)}\n`)
       .join("")}`;
+  }
+
+  if (error.code === "ARTIFACT_WRITE_FAILED" && typeof error.details.attemptedPath === "string") {
+    return `Attempted report path: ${sanitizeTerminalText(error.details.attemptedPath, secrets)}\n`;
   }
 
   return "";
 }
 
-function writeAppError(error: AppError, stderr: TextWriter): number {
+function writeAppError(
+  error: AppError,
+  stderr: TextWriter,
+  secrets: readonly string[] = [],
+): number {
   const recovery = error.code === "INVALID_REQUEST" ? undefined : guidance[error.code];
   stderr.write(
-    `Status: ${error.code}\n${sanitizeTerminalText(error.message)}\n${diagnosticDetails(error)}${
+    `Status: ${error.code}\n${sanitizeTerminalText(error.message, secrets)}\n${diagnosticDetails(error, secrets)}${
       recovery === undefined ? "" : `Recovery: ${recovery}\n`
     }`,
   );
@@ -234,6 +242,7 @@ export async function runCli(
     );
     return 3;
   }
+  const outputSecrets = [config.datahubGmsToken];
 
   try {
     const abortController = new AbortController();
@@ -286,6 +295,7 @@ export async function runCli(
           runId: createRunId(dependencies.clock()),
           runsRoot: arguments_.runsRoot ?? config.runsRoot,
           signal: abortController.signal,
+          secrets: outputSecrets,
         })
         .then(
           (run) => ({ kind: "completed" as const, run }),
@@ -303,7 +313,7 @@ export async function runCli(
       }
       if (outcome.kind === "failed") {
         if (outcome.error instanceof AppError) {
-          return writeAppError(outcome.error, dependencies.stderr);
+          return writeAppError(outcome.error, dependencies.stderr, outputSecrets);
         }
         dependencies.stderr.write(
           "Status: MCP_UNAVAILABLE\nThe analysis failed at an external integration boundary.\n",
@@ -312,7 +322,7 @@ export async function runCli(
       }
 
       dependencies.stdout.write(
-        `Status: ${outcome.run.status}\nRun ID: ${sanitizeTerminalText(outcome.run.runId)}\nReport: ${sanitizeTerminalText(outcome.run.artifactPath)}\n`,
+        `Status: ${outcome.run.status}\nRun ID: ${sanitizeTerminalText(outcome.run.runId, outputSecrets)}\nReport: ${sanitizeTerminalText(outcome.run.artifactPath, outputSecrets)}\n`,
       );
       return 0;
     } finally {
@@ -323,7 +333,7 @@ export async function runCli(
     }
   } catch (error) {
     if (error instanceof AppError) {
-      return writeAppError(error, dependencies.stderr);
+      return writeAppError(error, dependencies.stderr, outputSecrets);
     }
     dependencies.stderr.write(
       "Status: MCP_UNAVAILABLE\nThe MCP integration could not be initialized.\n",

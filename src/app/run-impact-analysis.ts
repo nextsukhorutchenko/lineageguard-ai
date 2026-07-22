@@ -21,6 +21,7 @@ export interface RunImpactAnalysisDependencies {
   readonly runId: string;
   readonly runsRoot: string;
   readonly signal: AbortSignal;
+  readonly secrets: readonly string[];
 }
 
 export interface ImpactReportDraft {
@@ -48,7 +49,9 @@ export class ImpactReportPersistenceError extends AppError {
     readonly report: ImpactReportDraft,
     readonly attemptedPath: string,
   ) {
-    super("ARTIFACT_WRITE_FAILED", "The impact report could not be persisted.");
+    super("ARTIFACT_WRITE_FAILED", "The impact report could not be persisted.", {
+      attemptedPath,
+    });
     this.name = "ImpactReportPersistenceError";
   }
 }
@@ -89,6 +92,10 @@ function buildFacts(evidence: NormalizedEvidence): readonly string[] {
     `Selected dataset ${evidence.targetDataset.urn} was returned by DataHub.`,
     `Source column ${evidence.sourceColumn.fieldPath} is present in schema for ${evidence.targetDataset.urn}.`,
   ];
+
+  for (const urn of evidence.searchCandidateUrns) {
+    facts.push(`DataHub search returned candidate ${urn}.`);
+  }
 
   if (evidence.targetDataset.platform !== undefined) {
     facts.push(`Selected dataset platform is ${evidence.targetDataset.platform}.`);
@@ -143,6 +150,13 @@ function buildUnknowns(evidence: NormalizedEvidence): readonly string[] {
   }
   if (evidence.targetDataset.environment === undefined) {
     unknowns.push("Selected dataset environment metadata was not available.");
+  }
+  for (const asset of evidence.unmatchedColumnAssets) {
+    const lineageColumns =
+      asset.lineageColumns.length === 0 ? "none" : asset.lineageColumns.join(", ");
+    unknowns.push(
+      `Column-lineage asset ${asset.urn} was absent from table-level lineage and was not counted as confirmed; returned lineage columns: ${lineageColumns}.`,
+    );
   }
 
   return unknowns;
@@ -200,6 +214,7 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
     deps.signal.throwIfAborted();
     const evidence = normalizeEvidence({
       target,
+      searchCandidates: candidates,
       fields,
       sourceColumn,
       tableLineage,
@@ -216,7 +231,7 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
       assessment,
     });
     deps.signal.throwIfAborted();
-    const markdown = renderImpactReport(report);
+    const markdown = renderImpactReport(report, deps.secrets);
     deps.signal.throwIfAborted();
     const attemptedPath = resolve(deps.runsRoot, report.runId, "impact-report.md");
     let artifactPath: string;

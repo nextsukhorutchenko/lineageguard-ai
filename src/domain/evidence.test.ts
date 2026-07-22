@@ -23,9 +23,67 @@ const lineage = (
 ): LineageAsset => ({ urn, hop, lineageColumns });
 
 describe("evidence normalization", () => {
+  it("preserves sorted search candidates and deterministically merges unmatched column lineage", () => {
+    const searchCandidates = [
+      { urn: "urn:candidate:z", name: "z" },
+      { urn: "urn:candidate:a", name: "a" },
+      { urn: "urn:candidate:z", name: "z duplicate" },
+    ];
+    const columnLineage = [
+      {
+        ...lineage("urn:column:z", 2, ["derived_customer_id"]),
+        name: "zeta",
+      },
+      {
+        ...lineage("urn:column:a", 1, ["customer_id"]),
+        platform: "snowflake",
+      },
+      {
+        ...lineage("urn:column:z", 1, ["customer_id"]),
+        name: "alpha",
+        platform: "dbt",
+      },
+    ];
+    const input = {
+      target: candidate,
+      searchCandidates,
+      fields: [field("customer_id")],
+      sourceColumn: field("customer_id"),
+      tableLineage: [lineage("urn:table:a", 1)],
+      columnLineage,
+      trace: [],
+    };
+
+    const result = normalizeEvidence(input);
+    const reversed = normalizeEvidence({
+      ...input,
+      searchCandidates: [...searchCandidates].reverse(),
+      columnLineage: [...columnLineage].reverse(),
+    });
+
+    expect(result.searchCandidateUrns).toEqual(["urn:candidate:a", "urn:candidate:z"]);
+    expect(result.unmatchedColumnAssets).toEqual([
+      {
+        urn: "urn:column:a",
+        platform: "snowflake",
+        hop: 1,
+        lineageColumns: ["customer_id"],
+      },
+      {
+        urn: "urn:column:z",
+        name: "alpha",
+        platform: "dbt",
+        hop: 1,
+        lineageColumns: ["customer_id", "derived_customer_id"],
+      },
+    ]);
+    expect(reversed).toEqual(result);
+  });
+
   it("sorts assets and fields deterministically", () => {
     const result = normalizeEvidence({
       target: candidate,
+      searchCandidates: [candidate],
       fields: [field("z_col"), field("customer_id"), field("a_col")],
       sourceColumn: field("customer_id"),
       tableLineage: [lineage("urn:z", 2), lineage("urn:a", 1)],
@@ -44,6 +102,7 @@ describe("evidence normalization", () => {
   it("deduplicates assets by URN and retains the lowest hop", () => {
     const result = normalizeEvidence({
       target: candidate,
+      searchCandidates: [candidate],
       fields: [field("customer_id")],
       sourceColumn: field("customer_id"),
       tableLineage: [
@@ -69,6 +128,7 @@ describe("evidence normalization", () => {
   it("reconciles column evidence by exact downstream URN and exposes disjoint gaps", () => {
     const result = normalizeEvidence({
       target: candidate,
+      searchCandidates: [candidate],
       fields: [field("customer_id")],
       sourceColumn: field("customer_id"),
       tableLineage: [lineage("urn:table:a", 1), lineage("urn:table:b", 2)],
@@ -90,6 +150,7 @@ describe("evidence normalization", () => {
   it("records only genuinely absent target and lineage metadata", () => {
     const result = normalizeEvidence({
       target: { urn: "urn:li:dataset:opaque", name: "orders" },
+      searchCandidates: [{ urn: "urn:li:dataset:opaque", name: "orders" }],
       fields: [field("customer_id")],
       sourceColumn: field("customer_id"),
       tableLineage: [],

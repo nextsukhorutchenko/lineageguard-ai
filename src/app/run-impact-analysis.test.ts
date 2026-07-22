@@ -27,6 +27,13 @@ const COLUMN_DOWNSTREAM: LineageAsset = {
   ...DOWNSTREAM,
   lineageColumns: ["customer_id"],
 };
+const UNMATCHED_COLUMN_DOWNSTREAM: LineageAsset = {
+  urn: "urn:li:dataset:(urn:li:dataPlatform:dbt,unmatched_customer_rollup,PROD)",
+  name: "unmatched_customer_rollup",
+  platform: "dbt",
+  hop: 2,
+  lineageColumns: ["customer_id", "customer_key"],
+};
 const FIELDS: readonly SchemaField[] = [
   { fieldPath: "order_id", nativeDataType: "NUMBER" },
   { fieldPath: "customer_id", nativeDataType: "NUMBER", nullable: false },
@@ -122,6 +129,7 @@ async function runWith(
   catalog: FakeCatalog,
   runsRoot: string,
   signal: AbortSignal = new AbortController().signal,
+  secrets: readonly string[] = [],
 ) {
   return runImpactAnalysis({
     request: REQUEST,
@@ -130,6 +138,7 @@ async function runWith(
     runId: RUN_ID,
     runsRoot,
     signal,
+    secrets,
   });
 }
 
@@ -195,6 +204,68 @@ describe("runImpactAnalysis", () => {
     expect(run.unknowns).toContain(
       "Column-level impact is unknown; only table-level downstream lineage was returned.",
     );
+  });
+
+  it("preserves search candidates and unmatched column-lineage relationships", async () => {
+    const otherCandidate = {
+      urn: "urn:li:dataset:(urn:li:dataPlatform:snowflake,other_orders,PROD)",
+      name: "other_orders",
+    };
+    const catalog = new FakeCatalog({
+      candidates: [otherCandidate, TARGET],
+      columnLineage: [COLUMN_DOWNSTREAM, UNMATCHED_COLUMN_DOWNSTREAM],
+    });
+
+    const run = await runWith(catalog, await createRunsRoot());
+    const report = await readFile(run.artifactPath, "utf8");
+
+    expect(run.evidence.searchCandidateUrns).toEqual([otherCandidate.urn, TARGET.urn].sort());
+    expect(run.evidence.unmatchedColumnAssets).toEqual([UNMATCHED_COLUMN_DOWNSTREAM]);
+    expect(run.facts).toContain(`DataHub search returned candidate ${otherCandidate.urn}.`);
+    expect(run.unknowns).toContain(
+      `Column-lineage asset ${UNMATCHED_COLUMN_DOWNSTREAM.urn} was absent from table-level lineage and was not counted as confirmed; returned lineage columns: customer_id, customer_key.`,
+    );
+    expect(report).toContain(UNMATCHED_COLUMN_DOWNSTREAM.urn.replaceAll("_", "\\_"));
+  });
+
+  it("redacts a known secret from persisted Markdown without mutating analysis identities", async () => {
+    const secret = "known-artifact-secret";
+    const target: DatasetCandidate = {
+      urn: `urn:li:dataset:(urn:li:dataPlatform:snowflake,orders-${secret},PROD)`,
+      name: `orders-${secret}`,
+      platform: "snowflake",
+    };
+    const downstream: LineageAsset = {
+      urn: `urn:li:dataset:(urn:li:dataPlatform:dbt,customer-${secret},PROD)`,
+      name: `customer-${secret}`,
+      platform: "dbt",
+      hop: 1,
+      lineageColumns: [],
+    };
+    const request = `Rename column customer_id to customer_key in dataset snowflake:orders-${secret}`;
+    const catalog = new FakeCatalog({
+      candidates: [target],
+      tableLineage: [downstream],
+      columnLineage: [{ ...downstream, lineageColumns: ["customer_id", secret] }],
+    });
+    const runsRoot = await createRunsRoot();
+
+    const run = await runImpactAnalysis({
+      request,
+      catalog,
+      clock: () => new Date("2026-07-22T12:00:00.000Z"),
+      runId: RUN_ID,
+      runsRoot,
+      signal: new AbortController().signal,
+      secrets: [secret],
+    });
+    const report = await readFile(run.artifactPath, "utf8");
+
+    expect(run.request).toContain(secret);
+    expect(run.evidence.targetDataset.urn).toContain(secret);
+    expect(run.evidence.downstreamAssets[0]?.urn).toContain(secret);
+    expect(report).not.toContain(secret);
+    expect(report).toContain("\\[REDACTED\\]");
   });
 
   it("writes a metadata-limited report when no downstream lineage is returned", async () => {
@@ -299,6 +370,7 @@ describe("runImpactAnalysis", () => {
         runId: RUN_ID,
         runsRoot: await createRunsRoot(),
         signal: new AbortController().signal,
+        secrets: [],
       }),
     ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
     expect(catalog.operations).toEqual(["close"]);
@@ -363,6 +435,7 @@ describe("runImpactAnalysis", () => {
       name: "ImpactReportPersistenceError",
       code: "ARTIFACT_WRITE_FAILED",
       attemptedPath: join(blockedRoot, RUN_ID, "impact-report.md"),
+      details: { attemptedPath: join(blockedRoot, RUN_ID, "impact-report.md") },
       report: {
         runId: RUN_ID,
         request: REQUEST,
@@ -395,6 +468,7 @@ describe("runImpactAnalysis", () => {
       runId: RUN_ID,
       runsRoot,
       signal: controller.signal,
+      secrets: [],
     });
 
     await expect(operation).rejects.toMatchObject({ name: "AbortError" });

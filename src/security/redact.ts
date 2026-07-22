@@ -4,6 +4,7 @@ export function redact(value: unknown, secrets: readonly string[]): unknown {
   if (typeof value === "string") {
     return secrets
       .filter((secret) => secret.length > 0)
+      .toSorted((left, right) => right.length - left.length || left.localeCompare(right, "en-US"))
       .reduce((text, secret) => text.replaceAll(secret, "[REDACTED]"), value);
   }
 

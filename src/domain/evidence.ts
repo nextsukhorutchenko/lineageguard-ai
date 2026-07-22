@@ -27,10 +27,12 @@ export type EvidenceLevel = "column" | "table" | "none";
 
 export interface NormalizedEvidence {
   readonly targetDataset: DatasetCandidate;
+  readonly searchCandidateUrns: readonly string[];
   readonly schemaFields: readonly SchemaField[];
   readonly sourceColumn: SchemaField;
   readonly downstreamAssets: readonly LineageAsset[];
   readonly columnAffectedAssets: readonly LineageAsset[];
+  readonly unmatchedColumnAssets: readonly LineageAsset[];
   readonly evidenceLevel: EvidenceLevel;
   readonly metadataGaps: readonly string[];
   readonly trace: readonly ToolTraceEntry[];
@@ -38,6 +40,7 @@ export interface NormalizedEvidence {
 
 export interface NormalizeEvidenceInput {
   readonly target: DatasetCandidate;
+  readonly searchCandidates: readonly DatasetCandidate[];
   readonly fields: readonly SchemaField[];
   readonly sourceColumn: SchemaField;
   readonly tableLineage: readonly LineageAsset[];
@@ -51,16 +54,47 @@ const normalizeFieldName = (fieldPath: string): string =>
   fieldPath.normalize("NFKC").toLocaleLowerCase("en-US");
 
 const deduplicateAssets = (assets: readonly LineageAsset[]): readonly LineageAsset[] => {
-  const assetsByUrn = new Map<string, LineageAsset>();
+  const assetsByUrn = new Map<
+    string,
+    {
+      hop: number;
+      lineageColumns: Set<string>;
+      names: Set<string>;
+      platforms: Set<string>;
+    }
+  >();
 
   for (const asset of assets) {
     const existing = assetsByUrn.get(asset.urn);
-    if (!existing || asset.hop < existing.hop) {
-      assetsByUrn.set(asset.urn, asset);
+    if (existing === undefined) {
+      assetsByUrn.set(asset.urn, {
+        hop: asset.hop,
+        lineageColumns: new Set(asset.lineageColumns),
+        names: new Set(asset.name === undefined ? [] : [asset.name]),
+        platforms: new Set(asset.platform === undefined ? [] : [asset.platform]),
+      });
+      continue;
     }
+
+    existing.hop = Math.min(existing.hop, asset.hop);
+    for (const column of asset.lineageColumns) existing.lineageColumns.add(column);
+    if (asset.name !== undefined) existing.names.add(asset.name);
+    if (asset.platform !== undefined) existing.platforms.add(asset.platform);
   }
 
-  return [...assetsByUrn.values()].sort((left, right) => compareEnglish(left.urn, right.urn));
+  return [...assetsByUrn.entries()]
+    .sort(([left], [right]) => compareEnglish(left, right))
+    .map(([urn, asset]) => {
+      const name = [...asset.names].sort(compareEnglish)[0];
+      const platform = [...asset.platforms].sort(compareEnglish)[0];
+      return {
+        urn,
+        hop: asset.hop,
+        lineageColumns: [...asset.lineageColumns].sort(compareEnglish),
+        ...(name === undefined ? {} : { name }),
+        ...(platform === undefined ? {} : { platform }),
+      };
+    });
 };
 
 export function requireSourceColumn(
@@ -81,6 +115,9 @@ export function requireSourceColumn(
 }
 
 export function normalizeEvidence(input: NormalizeEvidenceInput): NormalizedEvidence {
+  const searchCandidateUrns = [...new Set(input.searchCandidates.map(({ urn }) => urn))].sort(
+    compareEnglish,
+  );
   const schemaFields = [...input.fields].sort((left, right) =>
     compareEnglish(left.fieldPath, right.fieldPath),
   );
@@ -88,7 +125,8 @@ export function normalizeEvidence(input: NormalizeEvidenceInput): NormalizedEvid
   const returnedColumnAssets = deduplicateAssets(input.columnLineage);
   const downstreamUrns = new Set(downstreamAssets.map(({ urn }) => urn));
   const columnAffectedAssets = returnedColumnAssets.filter(({ urn }) => downstreamUrns.has(urn));
-  const unmatchedColumnCount = returnedColumnAssets.length - columnAffectedAssets.length;
+  const unmatchedColumnAssets = returnedColumnAssets.filter(({ urn }) => !downstreamUrns.has(urn));
+  const unmatchedColumnCount = unmatchedColumnAssets.length;
   const evidenceLevel: EvidenceLevel =
     columnAffectedAssets.length > 0 ? "column" : downstreamAssets.length > 0 ? "table" : "none";
   const metadataGaps: string[] = [];
@@ -114,10 +152,12 @@ export function normalizeEvidence(input: NormalizeEvidenceInput): NormalizedEvid
 
   return {
     targetDataset: input.target,
+    searchCandidateUrns,
     schemaFields,
     sourceColumn: input.sourceColumn,
     downstreamAssets,
     columnAffectedAssets,
+    unmatchedColumnAssets,
     evidenceLevel,
     metadataGaps,
     trace: input.trace,

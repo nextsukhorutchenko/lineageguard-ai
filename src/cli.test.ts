@@ -165,6 +165,7 @@ describe("runCli", () => {
       );
       expect(test.stderr).toEqual([]);
       expect(test.received.analysis).toMatchObject({ request: REQUEST, runsRoot: "reports" });
+      expect(test.received.analysis?.secrets).toEqual([ENVIRONMENT.DATAHUB_GMS_TOKEN]);
       expect(test.received.analysis?.signal).toBe(test.received.catalogSignal);
       expect(test.received.config).toMatchObject({ runsRoot: "runs" });
     },
@@ -221,7 +222,12 @@ describe("runCli", () => {
     },
     {
       code: "ARTIFACT_WRITE_FAILED",
+      details: {
+        attemptedPath: `C:\\runs\\${ENVIRONMENT.DATAHUB_GMS_TOKEN}\u001b[2J\nforged\\impact-report.md`,
+      },
       exitCode: 4,
+      diagnostic:
+        "Attempted report path: C:\\runs\\[REDACTED]\\u001B[2J\\nforged\\impact-report.md\n",
       recovery:
         "Verify that the configured runs directory is writable and has no symbolic-link or junction ancestors.",
     },
@@ -273,6 +279,43 @@ describe("runCli", () => {
     expect(diagnostic).toContain("\\u001B[31m\\nRecovery: forged");
   });
 
+  it("redacts the configured token from successful terminal output", async () => {
+    const token = ENVIRONMENT.DATAHUB_GMS_TOKEN;
+    const test = harness(async () => ({
+      status: "COMPLETED",
+      runId: token,
+      artifactPath: `C:\\runs\\${token}\\impact-report.md`,
+    }));
+
+    const exitCode = await runCli(["--request", REQUEST], test.dependencies);
+
+    expect(exitCode).toBe(0);
+    expect(test.stdout.join("")).toBe(
+      "Status: COMPLETED\nRun ID: [REDACTED]\nReport: C:\\runs\\[REDACTED]\\impact-report.md\n",
+    );
+    expect(test.stdout.join("")).not.toContain(token);
+  });
+
+  it("redacts the configured token from error messages and typed diagnostics", async () => {
+    const token = ENVIRONMENT.DATAHUB_GMS_TOKEN;
+    const test = harness(async () => {
+      throw new AppError("ARTIFACT_WRITE_FAILED", `Could not write ${token}.`, {
+        attemptedPath: `C:\\runs\\${token}\\impact-report.md`,
+      });
+    });
+
+    const exitCode = await runCli(["--request", REQUEST], test.dependencies);
+
+    expect(exitCode).toBe(4);
+    expect(test.stderr.join("")).toBe(
+      "Status: ARTIFACT_WRITE_FAILED\n" +
+        "Could not write [REDACTED].\n" +
+        "Attempted report path: C:\\runs\\[REDACTED]\\impact-report.md\n" +
+        "Recovery: Verify that the configured runs directory is writable and has no symbolic-link or junction ancestors.\n",
+    );
+    expect(test.stderr.join("")).not.toContain(token);
+  });
+
   it("returns stable configuration guidance without exposing validation details", async () => {
     const test = harness();
     const dependencies = { ...test.dependencies, environment: { DATAHUB_GMS_TOKEN: "secret" } };
@@ -286,22 +329,28 @@ describe("runCli", () => {
     expect(test.received.config).toBeUndefined();
   });
 
-  it("rejects a malformed request before configuration or catalog acquisition", async () => {
-    const test = harness(runImpactAnalysisReal);
-    const dependencies = { ...test.dependencies, environment: {} };
+  it.each([
+    "Drop column customer_id from dataset snowflake:orders",
+    "Rename column customer_id to customer_key in dataset snowflake:orders, drop column email",
+    "Rename column customer_id to customer_key in dataset snowflake:orders, alter column email",
+    "Rename column customer_id to customer_key in dataset snowflake:orders and remove email",
+    "Rename column customer_id to customer_key in dataset snowflake:orders (and remove email)",
+  ])(
+    "rejects a malformed request before configuration or catalog acquisition: %s",
+    async (request) => {
+      const test = harness(runImpactAnalysisReal);
+      const dependencies = { ...test.dependencies, environment: {} };
 
-    const exitCode = await runCli(
-      ["--request", "Drop column customer_id from dataset snowflake:orders"],
-      dependencies,
-    );
+      const exitCode = await runCli(["--request", request], dependencies);
 
-    expect(exitCode).toBe(2);
-    expect(test.catalog.closeCount).toBe(0);
-    expect(test.received.config).toBeUndefined();
-    expect(test.stderr.join("")).toBe(
-      "Status: INVALID_REQUEST\nSupported format: Rename column <source> to <target> in dataset <dataset hint>.\n",
-    );
-  });
+      expect(exitCode).toBe(2);
+      expect(test.catalog.closeCount).toBe(0);
+      expect(test.received.config).toBeUndefined();
+      expect(test.stderr.join("")).toBe(
+        "Status: INVALID_REQUEST\nSupported format: Rename column <source> to <target> in dataset <dataset hint>.\n",
+      );
+    },
+  );
 
   it("closes the active catalog and exits 130 after SIGINT", async () => {
     let analysisStarted!: () => void;

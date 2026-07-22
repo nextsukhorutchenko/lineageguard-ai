@@ -259,6 +259,160 @@ describe("DataHubMcpCatalog", () => {
     ]);
   });
 
+  it.each([
+    {
+      invariant: "returned count equals the page field count",
+      page: {
+        urn: DATASET_URN,
+        fields: [{ fieldPath: "customer_id" }],
+        totalFields: 2,
+        returned: 2,
+        remainingCount: 0,
+      },
+    },
+    {
+      invariant: "offset plus returned and remaining equals total",
+      page: {
+        urn: DATASET_URN,
+        fields: [{ fieldPath: "customer_id" }],
+        totalFields: 2,
+        returned: 1,
+        remainingCount: 0,
+      },
+    },
+    {
+      invariant: "page field count stays within the requested limit",
+      page: {
+        urn: DATASET_URN,
+        fields: Array.from({ length: 101 }, (_, index) => ({ fieldPath: `field_${index}` })),
+        totalFields: 101,
+        returned: 101,
+        remainingCount: 0,
+      },
+    },
+  ])("fails closed when schema $invariant", async ({ page }) => {
+    const client = new RecordingMcpClient([jsonResult(page)]);
+    const catalog = new DataHubMcpCatalog(client);
+
+    await expect(catalog.listSchemaFields(DATASET_URN)).rejects.toMatchObject({
+      code: "DATAHUB_UNAVAILABLE",
+      details: {},
+    });
+    expect(client.calls).toHaveLength(1);
+    expect(catalog.getTrace().map(({ status }) => status)).toEqual(["error"]);
+  });
+
+  it("fails closed when schema totalFields changes between pages", async () => {
+    const client = new RecordingMcpClient([
+      jsonResult({
+        urn: DATASET_URN,
+        fields: [{ fieldPath: "customer_id" }],
+        totalFields: 2,
+        returned: 1,
+        remainingCount: 1,
+      }),
+      jsonResult({
+        urn: DATASET_URN,
+        fields: [{ fieldPath: "order_id" }],
+        totalFields: 3,
+        returned: 1,
+        remainingCount: 1,
+      }),
+      jsonResult({
+        urn: DATASET_URN,
+        fields: [{ fieldPath: "created_at" }],
+        totalFields: 3,
+        returned: 1,
+        remainingCount: 0,
+      }),
+    ]);
+    const catalog = new DataHubMcpCatalog(client);
+
+    await expect(catalog.listSchemaFields(DATASET_URN)).rejects.toMatchObject({
+      code: "DATAHUB_UNAVAILABLE",
+    });
+    expect(client.calls).toHaveLength(2);
+    expect(catalog.getTrace().map(({ status }) => status)).toEqual(["ok", "error"]);
+  });
+
+  it("fails closed on a repeated positive schema page without requesting forever", async () => {
+    const repeated = jsonResult({
+      urn: DATASET_URN,
+      fields: [{ fieldPath: "customer_id" }],
+      totalFields: 3,
+      returned: 1,
+      remainingCount: 2,
+    });
+    const client = new RecordingMcpClient([
+      repeated,
+      repeated,
+      jsonResult({
+        urn: DATASET_URN,
+        fields: [{ fieldPath: "order_id" }],
+        totalFields: 3,
+        returned: 1,
+        remainingCount: 1,
+      }),
+      jsonResult({
+        urn: DATASET_URN,
+        fields: [{ fieldPath: "created_at" }],
+        totalFields: 3,
+        returned: 1,
+        remainingCount: 0,
+      }),
+    ]);
+    const catalog = new DataHubMcpCatalog(client);
+
+    await expect(catalog.listSchemaFields(DATASET_URN)).rejects.toMatchObject({
+      code: "DATAHUB_UNAVAILABLE",
+    });
+    expect(client.calls).toHaveLength(2);
+    expect(catalog.getTrace().map(({ status }) => status)).toEqual(["ok", "error"]);
+  });
+
+  it("bounds the accepted schema field count", async () => {
+    const client = new RecordingMcpClient([
+      jsonResult({
+        urn: DATASET_URN,
+        fields: [{ fieldPath: "customer_id" }],
+        totalFields: 10_001,
+        returned: 1,
+        remainingCount: 10_000,
+      }),
+    ]);
+    const catalog = new DataHubMcpCatalog(client);
+
+    await expect(catalog.listSchemaFields(DATASET_URN)).rejects.toMatchObject({
+      code: "DATAHUB_UNAVAILABLE",
+    });
+    expect(client.calls).toHaveLength(1);
+    expect(catalog.getTrace().map(({ status }) => status)).toEqual(["error"]);
+  });
+
+  it("bounds schema pagination even when every page reports progress", async () => {
+    const client = new RecordingMcpClient(
+      Array.from({ length: 101 }, (_, index) =>
+        jsonResult({
+          urn: DATASET_URN,
+          fields: [{ fieldPath: `field_${index}` }],
+          totalFields: 101,
+          returned: 1,
+          remainingCount: 100 - index,
+        }),
+      ),
+    );
+    const catalog = new DataHubMcpCatalog(client);
+
+    await expect(catalog.listSchemaFields(DATASET_URN)).rejects.toMatchObject({
+      code: "DATAHUB_UNAVAILABLE",
+    });
+    expect(client.calls).toHaveLength(100);
+    expect(catalog.getTrace().at(-1)).toMatchObject({
+      tool: "list_schema_fields",
+      status: "error",
+    });
+  });
+
   it("fails closed when any schema page identifies a different dataset URN", async () => {
     const mismatchedUrn =
       "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.other_table,PROD)";

@@ -9,6 +9,10 @@ import { lineageResponseSchema, schemaResponseSchema, searchResponseSchema } fro
 
 type ReadToolName = ToolTraceEntry["tool"];
 
+const SCHEMA_PAGE_SIZE = 100;
+const MAX_SCHEMA_PAGES = 100;
+const MAX_SCHEMA_FIELDS = 10_000;
+
 export interface ToolCallRequest {
   readonly name: ReadToolName;
   readonly arguments: Record<string, unknown>;
@@ -73,22 +77,41 @@ export class DataHubMcpCatalog implements DataHubCatalog {
   ): Promise<readonly SchemaField[]> {
     const fields: SchemaField[] = [];
     let offset = 0;
+    let pageCount = 0;
+    let expectedTotal: number | undefined;
+    let previousRemaining: number | undefined;
 
     while (true) {
+      pageCount += 1;
       const parsed = await this.call(
         {
           name: "list_schema_fields",
-          arguments: { urn: datasetUrn, limit: 100, offset },
+          arguments: { urn: datasetUrn, limit: SCHEMA_PAGE_SIZE, offset },
         },
         (response) => {
           const schemaPage = schemaResponseSchema.parse(response);
           if (schemaPage.urn !== datasetUrn) {
             throw new Error("DataHub returned schema fields for a different dataset URN.");
           }
+          if (
+            schemaPage.returned !== schemaPage.fields.length ||
+            schemaPage.returned > SCHEMA_PAGE_SIZE ||
+            schemaPage.totalFields > MAX_SCHEMA_FIELDS ||
+            (expectedTotal !== undefined && schemaPage.totalFields !== expectedTotal) ||
+            offset + schemaPage.returned + schemaPage.remainingCount !== schemaPage.totalFields ||
+            (previousRemaining !== undefined && schemaPage.remainingCount >= previousRemaining) ||
+            (schemaPage.remainingCount > 0 && schemaPage.returned === 0) ||
+            (pageCount >= MAX_SCHEMA_PAGES && schemaPage.remainingCount > 0)
+          ) {
+            throw new Error("DataHub returned inconsistent or unbounded schema pagination.");
+          }
           return schemaPage;
         },
         options.signal,
       );
+
+      expectedTotal ??= parsed.totalFields;
+      previousRemaining = parsed.remainingCount;
 
       for (const field of parsed.fields) {
         let normalized: SchemaField = { fieldPath: field.fieldPath };
@@ -99,9 +122,6 @@ export class DataHubMcpCatalog implements DataHubCatalog {
       }
 
       if (parsed.remainingCount === 0) return fields;
-      if (parsed.returned === 0) {
-        throw this.unavailable();
-      }
       offset += parsed.returned;
     }
   }

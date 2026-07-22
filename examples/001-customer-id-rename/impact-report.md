@@ -71,6 +71,18 @@
 
 - Selected dataset urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order\_entry\_db.analytics.order\_details,PROD) was returned by DataHub.
 - Source column customer\_id is present in schema for urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order\_entry\_db.analytics.order\_details,PROD).
+- DataHub search returned candidate urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.ORDER\_ENTRY\_DB.analytics.order\_details,PROD).
+- DataHub search returned candidate urn:li:dataset:(urn:li:dataPlatform:looker,b2fd91.order-entry-looker.view.order\_details,PROD).
+- DataHub search returned candidate urn:li:dataset:(urn:li:dataPlatform:looker,b2fd91.order-entry.explore.order\_details,PROD).
+- DataHub search returned candidate urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub\_order\_entries.Customer\_Analytics\_Measures,PROD).
+- DataHub search returned candidate urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub\_order\_entries.Essential\_KPI\_Measures,PROD).
+- DataHub search returned candidate urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub\_order\_entries.Geographic\_Measures,PROD).
+- DataHub search returned candidate urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub\_order\_entries.ORDER\_DETAILS,PROD).
+- DataHub search returned candidate urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub\_order\_entries.Product\_Perfromance\_Measures,PROD).
+- DataHub search returned candidate urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub\_order\_entries.Time\_Inteligence\_Measures,PROD).
+- DataHub search returned candidate urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order\_entry\_db.analytics.order\_details\_replica,PROD).
+- DataHub search returned candidate urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order\_entry\_db.analytics.order\_details,PROD).
+- DataHub search returned candidate urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order\_entry\_db.order\_entry.regions,PROD).
 - Selected dataset platform is snowflake.
 - Selected dataset environment is PROD.
 - Downstream asset urn:li:chart:(powerbi,b2fd91.pages.66666666-7777-8888-9999-000000000000.217abe0d5c1cd421c384) was returned at hop 2.

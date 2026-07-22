@@ -16,6 +16,7 @@ const evidence = ({
     name: "analytics.orders",
     platform: "snowflake",
   },
+  searchCandidateUrns: ["urn:li:dataset:(urn:li:dataPlatform:snowflake,analytics.orders,PROD)"],
   schemaFields: [{ fieldPath: "customer_id" }],
   sourceColumn: { fieldPath: "customer_id" },
   downstreamAssets: Array.from({ length: downstream }, (_, index) => ({
@@ -28,6 +29,7 @@ const evidence = ({
     hop: 0,
     lineageColumns: ["customer_id"],
   })),
+  unmatchedColumnAssets: [],
   evidenceLevel: columnAffected > 0 ? "column" : downstream > 0 ? "table" : "none",
   metadataGaps: [],
   trace: [],

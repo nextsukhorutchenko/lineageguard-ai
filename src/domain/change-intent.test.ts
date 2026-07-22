@@ -16,11 +16,36 @@ describe("parseChangeIntent", () => {
     });
   });
 
+  it("accepts an exact canonical DataHub URN containing structural commas", () => {
+    expect(
+      parseChangeIntent(
+        "Rename column customer_id to customer_key in dataset urn:li:dataset:(urn:li:dataPlatform:snowflake,analytics.orders,PROD)",
+      ),
+    ).toMatchObject({
+      datasetHint: "urn:li:dataset:(urn:li:dataPlatform:snowflake,analytics.orders,PROD)",
+    });
+  });
+
+  it("accepts action-like words inside a canonical DataHub dataset-name component", () => {
+    const datasetHint =
+      "urn:li:dataset:(urn:li:dataPlatform:snowflake,analytics.orders and remove history,PROD)";
+
+    expect(
+      parseChangeIntent(`Rename column customer_id to customer_key in dataset ${datasetHint}`),
+    ).toMatchObject({ datasetHint });
+  });
+
   it.each([
     "Drop column customer_id in dataset snowflake:orders",
     "Rename customer_id in dataset snowflake:orders",
     "Rename column customer_id to customer_key and drop email in dataset snowflake:orders",
     "Rename column customer_id to customer_key in dataset snowflake:orders; drop column email",
+    "Rename column customer_id to customer_key in dataset snowflake:orders, drop column email",
+    "Rename column customer_id to customer_key in dataset snowflake:orders, alter column email",
+    "Rename column customer_id to customer_key in dataset snowflake:orders and remove email",
+    "Rename column customer_id to customer_key in dataset snowflake:orders (and remove email)",
+    "Rename column customer_id to customer_key in dataset urn:li:dataset:(urn:li:dataPlatform:snowflake,orders,PROD, drop column email)",
+    "Rename column customer_id to customer_key in dataset urn:li:dataset:(urn:li:dataPlatform:snowflake,orders,PROD, drop column email",
     "Rename column customer_id to customer_key in dataset snowflake:orders. Drop column email",
     "Rename column customer_id to customer_key in dataset snowflake:orders\nDrop column email",
   ])("rejects unsupported or incomplete input: %s", (request) => {

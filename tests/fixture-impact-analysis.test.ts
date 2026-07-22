@@ -90,6 +90,7 @@ async function runFixturePipeline() {
     runId: RUN_ID,
     runsRoot,
     signal: new AbortController().signal,
+    secrets: [],
   });
   return { run, markdown: await readFile(run.artifactPath, "utf8") };
 }
@@ -114,6 +115,12 @@ describe("fixture-backed impact analysis", () => {
     });
     expect(first.run.evidence.downstreamAssets).toHaveLength(24);
     expect(first.run.evidence.columnAffectedAssets).toHaveLength(11);
+    expect(first.run.evidence.searchCandidateUrns).toEqual(
+      (await readFixture<readonly DatasetCandidate[]>("search-order-details.json"))
+        .map(({ urn }) => urn)
+        .sort((left, right) => left.localeCompare(right, "en-US")),
+    );
+    expect(first.run.evidence.unmatchedColumnAssets).toEqual([]);
     expect(first.run.evidence.metadataGaps).toContain(
       "Column-level lineage is unavailable for 13 of 24 table-level downstream assets.",
     );

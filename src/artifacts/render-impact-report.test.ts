@@ -9,6 +9,7 @@ const DOWNSTREAM_URN = "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_o
 
 const columnEvidence: NormalizedEvidence = {
   targetDataset: { urn: TARGET_URN, name: "orders|daily", platform: "snow`flake" },
+  searchCandidateUrns: [TARGET_URN],
   schemaFields: [{ fieldPath: "customer_id", nativeDataType: "NUMBER\r\n(38,0)", nullable: false }],
   sourceColumn: {
     fieldPath: "customer_id",
@@ -33,6 +34,7 @@ const columnEvidence: NormalizedEvidence = {
       lineageColumns: ["customer_id"],
     },
   ],
+  unmatchedColumnAssets: [],
   evidenceLevel: "column",
   metadataGaps: [],
   trace: [
@@ -365,5 +367,66 @@ describe("renderImpactReport", () => {
     expect(report).toContain("&lt;script&gt;");
     expect(report).toContain("\\u001B");
     expect(report).toContain("\\[click\\](javascript:alert(1))");
+  });
+
+  it("redacts known secrets from every report section without mutating evidence identities", () => {
+    const secret = "known-output-secret";
+    const secretTargetUrn = `${TARGET_URN}-${secret}`;
+    const secretDownstreamUrn = `${DOWNSTREAM_URN}-${secret}`;
+    const evidence: NormalizedEvidence = {
+      ...columnEvidence,
+      targetDataset: { ...columnEvidence.targetDataset, urn: secretTargetUrn, name: secret },
+      searchCandidateUrns: [secretTargetUrn],
+      downstreamAssets: [
+        {
+          urn: secretDownstreamUrn,
+          name: secret,
+          platform: secret,
+          hop: 1,
+          lineageColumns: [secret],
+        },
+      ],
+      columnAffectedAssets: [
+        {
+          urn: secretDownstreamUrn,
+          name: secret,
+          platform: secret,
+          hop: 1,
+          lineageColumns: [secret],
+        },
+      ],
+      unmatchedColumnAssets: [
+        {
+          urn: `urn:unmatched:${secret}`,
+          hop: 2,
+          lineageColumns: [secret],
+        },
+      ],
+      trace: [
+        {
+          callId: `mcp-${secret}`,
+          tool: "search",
+          arguments: { query: `/q ${secret}` },
+          status: "ok",
+        },
+      ],
+    };
+    const run = createRun({
+      runId: `run-${secret}`,
+      request: `Rename column customer_id to customer_key in dataset ${secret}`,
+      intent: { ...createRun().intent, datasetHint: secret },
+      evidence,
+      facts: [`Selected dataset ${secretTargetUrn} contains ${secret}.`],
+      assumptions: [`Assume ${secret}.`],
+      unknowns: [`Unknown ${secret}.`],
+    });
+
+    const report = renderImpactReport(run, [secret]);
+
+    expect(report).not.toContain(secret);
+    expect(report.match(/\\\[REDACTED\\\]/g)?.length).toBeGreaterThan(8);
+    expect(run.request).toContain(secret);
+    expect(run.evidence.targetDataset.urn).toBe(secretTargetUrn);
+    expect(run.evidence.downstreamAssets[0]?.urn).toBe(secretDownstreamUrn);
   });
 });

@@ -6,10 +6,15 @@ const renamePattern = new RegExp(
   `^rename\\s+(?:the\\s+)?column\\s+(${identifier})\\s+to\\s+(${identifier})\\s+in\\s+(?:the\\s+)?dataset\\s+(.+?)\\.?$`,
   "i",
 );
-const secondChangePattern = /\b(and|also|then)\s+(rename|drop|add|change)\b/i;
 const unsafeDatasetHintPattern = /[;\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+const canonicalDatasetHintPattern =
+  /^urn:li:dataset:\(urn:li:dataPlatform:[^(),]+,[^(),]+,[^(),]+\)$/u;
 const secondaryDatasetClausePattern =
-  /(?:^|[.!?]\s+|\b(?:and|also|then)\s+)(?:rename|drop|add|alter|change)\b/i;
+  /(?:,\s*|[([{]\s*|[.!?]\s+|\b(?:and|also|then)\s+)(?:rename|drop|add|alter|change|remove|delete)\b/i;
+
+function secondaryClauseInspectionText(value: string): string {
+  return canonicalDatasetHintPattern.test(value) ? "urn:li:dataset:()" : value;
+}
 
 export const changeIntentSchema = z.object({
   kind: z.literal("rename_column"),
@@ -26,8 +31,7 @@ export function parseChangeIntent(request: string): ChangeIntent {
     !match ||
     datasetHint === undefined ||
     unsafeDatasetHintPattern.test(datasetHint) ||
-    secondaryDatasetClausePattern.test(datasetHint) ||
-    secondChangePattern.test(request)
+    secondaryDatasetClausePattern.test(secondaryClauseInspectionText(datasetHint))
   ) {
     throw new AppError(
       "INVALID_REQUEST",
