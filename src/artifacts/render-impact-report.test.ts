@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AnalysisRun } from "../app/run-impact-analysis.js";
+import type { ImpactReportDraft } from "../app/run-impact-analysis.js";
 import type { NormalizedEvidence } from "../domain/evidence.js";
 import type { ImpactAssessment } from "../domain/impact-assessment.js";
 import { renderImpactReport } from "./render-impact-report.js";
@@ -63,7 +63,7 @@ const assessment: ImpactAssessment = {
   ],
 };
 
-function createRun(overrides: Partial<AnalysisRun> = {}): AnalysisRun {
+function createRun(overrides: Partial<ImpactReportDraft> = {}): ImpactReportDraft {
   return {
     runId: "20260722T120000Z-0123abcd",
     createdAt: "2026-07-22T12:00:00.000Z",
@@ -86,7 +86,6 @@ function createRun(overrides: Partial<AnalysisRun> = {}): AnalysisRun {
     ],
     unknowns: ["Selected dataset environment metadata was not available."],
     status: "COMPLETED",
-    artifactPath: "runs/20260722T120000Z-0123abcd/impact-report.md",
     ...overrides,
   };
 }

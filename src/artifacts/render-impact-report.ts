@@ -1,4 +1,4 @@
-import type { AnalysisRun } from "../app/run-impact-analysis.js";
+import type { ImpactReportDraft } from "../app/run-impact-analysis.js";
 import type { RiskFactor } from "../domain/impact-assessment.js";
 
 type Alignment = "left" | "right";
@@ -86,7 +86,7 @@ function safeTraceArguments(
   );
 }
 
-export function renderImpactReport(run: AnalysisRun): string {
+export function renderImpactReport(run: ImpactReportDraft): string {
   const columnAffectedUrns = new Set(run.evidence.columnAffectedAssets.map(({ urn }) => urn));
   const affectedAssets =
     run.evidence.downstreamAssets.length === 0

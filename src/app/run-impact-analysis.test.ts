@@ -1,11 +1,12 @@
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import type { DataHubCatalog } from "../datahub/catalog.js";
 import type { LineageAsset, SchemaField, ToolTraceEntry } from "../domain/evidence.js";
 import type { DatasetCandidate } from "../domain/resolve-dataset.js";
 import { AppError } from "../errors/app-error.js";
+import * as impactAnalysisModule from "./run-impact-analysis.js";
 import { runImpactAnalysis } from "./run-impact-analysis.js";
 
 const RUN_ID = "20260722T120000Z-0123abcd";
@@ -134,6 +135,7 @@ describe("runImpactAnalysis", () => {
 
     const run = await runWith(catalog, runsRoot);
 
+    expectTypeOf(run.artifactPath).toEqualTypeOf<string>();
     expect(run).toMatchObject({
       runId: RUN_ID,
       createdAt: "2026-07-22T12:00:00.000Z",
@@ -251,5 +253,9 @@ describe("runImpactAnalysis", () => {
     });
     expect(catalog.operations).toEqual(["searchDatasets", "close"]);
     expect(catalog.closeCount).toBe(1);
+  });
+
+  it("does not expose the pre-write report builder as public application API", () => {
+    expect(impactAnalysisModule).not.toHaveProperty("buildAnalysisRun");
   });
 });

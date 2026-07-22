@@ -20,7 +20,7 @@ export interface RunImpactAnalysisDependencies {
   readonly runsRoot: string;
 }
 
-export interface AnalysisRun {
+export interface ImpactReportDraft {
   readonly runId: string;
   readonly createdAt: string;
   readonly request: string;
@@ -34,14 +34,19 @@ export interface AnalysisRun {
     RunStatus,
     "COMPLETED" | "COMPLETED_WITH_LIMITATIONS" | "INSUFFICIENT_METADATA"
   >;
-  readonly artifactPath?: string;
 }
 
-interface BuildAnalysisRunInput extends RunImpactAnalysisDependencies {
+export interface AnalysisRun extends ImpactReportDraft {
+  readonly artifactPath: string;
+}
+
+interface BuildImpactReportDraftInput {
+  readonly request: string;
+  readonly clock: () => Date;
+  readonly runId: string;
   readonly intent: ChangeIntent;
   readonly evidence: NormalizedEvidence;
   readonly assessment: ImpactAssessment;
-  readonly status: AnalysisRun["status"];
 }
 
 const assumptions = [
@@ -108,7 +113,15 @@ function buildUnknowns(evidence: NormalizedEvidence): readonly string[] {
   return unknowns;
 }
 
-export function buildAnalysisRun(input: BuildAnalysisRunInput): AnalysisRun {
+function deriveStatus(evidence: NormalizedEvidence): ImpactReportDraft["status"] {
+  return evidence.downstreamAssets.length === 0
+    ? "INSUFFICIENT_METADATA"
+    : evidence.evidenceLevel === "column"
+      ? "COMPLETED"
+      : "COMPLETED_WITH_LIMITATIONS";
+}
+
+function buildImpactReportDraft(input: BuildImpactReportDraftInput): ImpactReportDraft {
   return {
     runId: input.runId,
     createdAt: input.clock().toISOString(),
@@ -119,7 +132,7 @@ export function buildAnalysisRun(input: BuildAnalysisRunInput): AnalysisRun {
     facts: buildFacts(input.evidence),
     assumptions,
     unknowns: buildUnknowns(input.evidence),
-    status: input.status,
+    status: deriveStatus(input.evidence),
   };
 }
 
@@ -145,21 +158,22 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
       trace: deps.catalog.getTrace(),
     });
     const assessment = assessImpact(evidence);
-    const status: AnalysisRun["status"] =
-      evidence.downstreamAssets.length === 0
-        ? "INSUFFICIENT_METADATA"
-        : evidence.evidenceLevel === "column"
-          ? "COMPLETED"
-          : "COMPLETED_WITH_LIMITATIONS";
-    const run = buildAnalysisRun({ ...deps, intent, evidence, assessment, status });
-    const markdown = renderImpactReport(run);
+    const report = buildImpactReportDraft({
+      request: deps.request,
+      clock: deps.clock,
+      runId: deps.runId,
+      intent,
+      evidence,
+      assessment,
+    });
+    const markdown = renderImpactReport(report);
     const artifactPath = await writeRunArtifact({
       runsRoot: deps.runsRoot,
-      runId: run.runId,
+      runId: report.runId,
       filename: "impact-report.md",
       content: markdown,
     });
-    return { ...run, artifactPath };
+    return { ...report, artifactPath };
   } finally {
     await deps.catalog.close();
   }
