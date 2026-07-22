@@ -96,9 +96,8 @@ interface CollectorScenarioResult {
   readonly complete: boolean;
   readonly reasonCodes: readonly RequiredIncompleteReasonCode[];
   readonly itemCount: number;
+  readonly itemKeys: readonly string[];
   readonly calls: number;
-  readonly maxItems: number;
-  readonly maxCalls: number;
 }
 
 async function runSearchStopScenario(
@@ -132,9 +131,8 @@ async function runSearchStopScenario(
     complete: result.completeness.complete,
     reasonCodes: result.completeness.reasonCodes,
     itemCount: result.items.length,
+    itemKeys: result.items.map(({ urn }) => urn),
     calls: client.calls.length,
-    maxItems: 1_000,
-    maxCalls: 20,
   };
 }
 
@@ -168,9 +166,8 @@ async function runSchemaStopScenario(
     complete: result.completeness.complete,
     reasonCodes: result.completeness.reasonCodes,
     itemCount: result.items.length,
+    itemKeys: result.items.map(({ fieldPath }) => fieldPath),
     calls: client.calls.length,
-    maxItems: 10_000,
-    maxCalls: 100,
   };
 }
 
@@ -211,9 +208,8 @@ async function runLineageStopScenario(
     complete: result.completeness.complete,
     reasonCodes: result.completeness.reasonCodes,
     itemCount: result.items.length,
+    itemKeys: result.items.map(({ urn }) => urn),
     calls: client.calls.length,
-    maxItems: 100,
-    maxCalls: 20,
   };
 }
 
@@ -410,52 +406,306 @@ describe("Task 1A bounded evidence collection", () => {
     });
   });
 
-  const stopMatrix: readonly {
+  it("merges duplicate lineage evidence deterministically regardless of response order", async () => {
+    const duplicateUrn = "urn:li:dataset:(duplicate-evidence)";
+    const records = [
+      {
+        entity: { urn: duplicateUrn, name: "", platform: { name: "" } },
+        degree: 2,
+        lineageColumns: ["order_id"],
+      },
+      {
+        entity: { urn: duplicateUrn, name: "zeta", platform: { name: "snowflake" } },
+        degree: 1,
+        lineageColumns: ["customer_key"],
+      },
+      {
+        entity: { urn: duplicateUrn, name: "alpha", platform: { name: "dbt" } },
+        degree: 1,
+        lineageColumns: ["customer_id", "customer_key"],
+      },
+    ];
+    const collect = async (searchResults: typeof records) =>
+      new DataHubMcpCatalog(
+        new RecordingMcpClient([
+          jsonResult({
+            downstreams: {
+              searchResults,
+              offset: 0,
+              returned: searchResults.length,
+              hasMore: false,
+              truncatedDueToTokenBudget: false,
+            },
+          }),
+        ]),
+      ).getDownstreamLineage(DATASET_URN, { maxHops: 2 });
+
+    const forward = await collect(records);
+    const reversed = await collect([...records].reverse());
+    const emptyOnly = await collect([records[0]!]);
+
+    expect(reversed).toEqual(forward);
+    expect(forward.items).toEqual([
+      {
+        urn: duplicateUrn,
+        name: "alpha",
+        platform: "dbt",
+        hop: 1,
+        lineageColumns: ["customer_id", "customer_key", "order_id"],
+      },
+    ]);
+    expect(emptyOnly.items).toEqual([
+      {
+        urn: duplicateUrn,
+        hop: 2,
+        lineageColumns: ["order_id"],
+      },
+    ]);
+  });
+
+  const sortedKeys = (values: readonly string[]): readonly string[] =>
+    [...values].sort((left, right) => left.localeCompare(right, "en-US"));
+  const searchPageItems = sortedKeys(
+    Array.from({ length: 20 }, (_, index) => `urn:li:dataset:(search-${index})`),
+  );
+  const searchItemLimitItems = sortedKeys(
+    Array.from({ length: 50 }, (_, index) => `urn:li:dataset:(search-${index})`),
+  );
+  const schemaPageItems = sortedKeys(Array.from({ length: 100 }, (_, index) => `field_${index}`));
+  const lineagePageItems = sortedKeys(
+    Array.from({ length: 20 }, (_, index) => `urn:li:dataset:(lineage-${index})`),
+  );
+  const lineageItemLimitItems = sortedKeys(
+    Array.from({ length: 100 }, (_, index) => `urn:li:dataset:(lineage-${index})`),
+  );
+  const searchPair = sortedKeys(["urn:li:dataset:(search-a)", "urn:li:dataset:(search-b)"]);
+  const lineagePair = sortedKeys(["urn:li:dataset:(lineage-a)", "urn:li:dataset:(lineage-b)"]);
+
+  interface StopMatrixRow {
     readonly collector: string;
-    readonly reason: RequiredIncompleteReasonCode;
+    readonly trigger: RequiredIncompleteReasonCode;
+    readonly expectedReasonCodes: readonly RequiredIncompleteReasonCode[];
+    readonly expectedCalls: number;
+    readonly maxCalls: number;
+    readonly expectedItemKeys: readonly string[];
+    readonly maxItems: number;
     readonly run: () => Promise<CollectorScenarioResult>;
-  }[] = [
-    ...(
-      [
-        "HAS_MORE",
-        "PAGE_LIMIT_REACHED",
-        "ITEM_LIMIT_REACHED",
-        "REPEATED_PAGE",
-        "NO_PROGRESS",
-        "INCONSISTENT_PAGINATION",
-      ] as const
-    ).flatMap((reason) => [
-      { collector: "search", reason, run: () => runSearchStopScenario(reason) },
-      { collector: "schema", reason, run: () => runSchemaStopScenario(reason) },
-    ]),
-    ...(
-      [
-        "HAS_MORE",
-        "TOKEN_BUDGET_TRUNCATION",
-        "PAGE_LIMIT_REACHED",
-        "ITEM_LIMIT_REACHED",
-        "REPEATED_PAGE",
-        "NO_PROGRESS",
-        "INCONSISTENT_PAGINATION",
-      ] as const
-    ).flatMap((reason) => [
-      { collector: "table lineage", reason, run: () => runLineageStopScenario(reason, undefined) },
+  }
+
+  const searchRows: readonly StopMatrixRow[] = [
+    {
+      collector: "search",
+      trigger: "HAS_MORE",
+      expectedReasonCodes: ["HAS_MORE", "PAGE_LIMIT_REACHED"],
+      expectedCalls: 20,
+      maxCalls: 20,
+      expectedItemKeys: searchPageItems,
+      maxItems: 1_000,
+      run: () => runSearchStopScenario("HAS_MORE"),
+    },
+    {
+      collector: "search",
+      trigger: "PAGE_LIMIT_REACHED",
+      expectedReasonCodes: ["HAS_MORE", "PAGE_LIMIT_REACHED"],
+      expectedCalls: 20,
+      maxCalls: 20,
+      expectedItemKeys: searchPageItems,
+      maxItems: 1_000,
+      run: () => runSearchStopScenario("PAGE_LIMIT_REACHED"),
+    },
+    {
+      collector: "search",
+      trigger: "ITEM_LIMIT_REACHED",
+      expectedReasonCodes: ["HAS_MORE", "ITEM_LIMIT_REACHED"],
+      expectedCalls: 1,
+      maxCalls: 20,
+      expectedItemKeys: searchItemLimitItems,
+      maxItems: 1_000,
+      run: () => runSearchStopScenario("ITEM_LIMIT_REACHED"),
+    },
+    {
+      collector: "search",
+      trigger: "REPEATED_PAGE",
+      expectedReasonCodes: ["HAS_MORE", "REPEATED_PAGE"],
+      expectedCalls: 2,
+      maxCalls: 20,
+      expectedItemKeys: searchPair,
+      maxItems: 1_000,
+      run: () => runSearchStopScenario("REPEATED_PAGE"),
+    },
+    {
+      collector: "search",
+      trigger: "NO_PROGRESS",
+      expectedReasonCodes: ["NO_PROGRESS"],
+      expectedCalls: 2,
+      maxCalls: 20,
+      expectedItemKeys: searchPair,
+      maxItems: 1_000,
+      run: () => runSearchStopScenario("NO_PROGRESS"),
+    },
+    {
+      collector: "search",
+      trigger: "INCONSISTENT_PAGINATION",
+      expectedReasonCodes: ["INCONSISTENT_PAGINATION"],
+      expectedCalls: 2,
+      maxCalls: 20,
+      expectedItemKeys: ["urn:li:dataset:(search-a)"],
+      maxItems: 1_000,
+      run: () => runSearchStopScenario("INCONSISTENT_PAGINATION"),
+    },
+  ];
+  const schemaRows: readonly StopMatrixRow[] = [
+    {
+      collector: "schema",
+      trigger: "HAS_MORE",
+      expectedReasonCodes: ["HAS_MORE", "PAGE_LIMIT_REACHED"],
+      expectedCalls: 100,
+      maxCalls: 100,
+      expectedItemKeys: schemaPageItems,
+      maxItems: 10_000,
+      run: () => runSchemaStopScenario("HAS_MORE"),
+    },
+    {
+      collector: "schema",
+      trigger: "PAGE_LIMIT_REACHED",
+      expectedReasonCodes: ["HAS_MORE", "PAGE_LIMIT_REACHED"],
+      expectedCalls: 100,
+      maxCalls: 100,
+      expectedItemKeys: schemaPageItems,
+      maxItems: 10_000,
+      run: () => runSchemaStopScenario("PAGE_LIMIT_REACHED"),
+    },
+    {
+      collector: "schema",
+      trigger: "ITEM_LIMIT_REACHED",
+      expectedReasonCodes: ["HAS_MORE", "ITEM_LIMIT_REACHED"],
+      expectedCalls: 1,
+      maxCalls: 100,
+      expectedItemKeys: schemaPageItems,
+      maxItems: 10_000,
+      run: () => runSchemaStopScenario("ITEM_LIMIT_REACHED"),
+    },
+    {
+      collector: "schema",
+      trigger: "REPEATED_PAGE",
+      expectedReasonCodes: ["HAS_MORE", "REPEATED_PAGE"],
+      expectedCalls: 2,
+      maxCalls: 100,
+      expectedItemKeys: ["a", "b"],
+      maxItems: 10_000,
+      run: () => runSchemaStopScenario("REPEATED_PAGE"),
+    },
+    {
+      collector: "schema",
+      trigger: "NO_PROGRESS",
+      expectedReasonCodes: ["NO_PROGRESS"],
+      expectedCalls: 2,
+      maxCalls: 100,
+      expectedItemKeys: ["a", "b"],
+      maxItems: 10_000,
+      run: () => runSchemaStopScenario("NO_PROGRESS"),
+    },
+    {
+      collector: "schema",
+      trigger: "INCONSISTENT_PAGINATION",
+      expectedReasonCodes: ["INCONSISTENT_PAGINATION"],
+      expectedCalls: 2,
+      maxCalls: 100,
+      expectedItemKeys: ["a"],
+      maxItems: 10_000,
+      run: () => runSchemaStopScenario("INCONSISTENT_PAGINATION"),
+    },
+  ];
+  const lineageScenarios: readonly Omit<StopMatrixRow, "collector" | "run">[] = [
+    {
+      trigger: "HAS_MORE",
+      expectedReasonCodes: ["HAS_MORE", "PAGE_LIMIT_REACHED"],
+      expectedCalls: 20,
+      maxCalls: 20,
+      expectedItemKeys: lineagePageItems,
+      maxItems: 100,
+    },
+    {
+      trigger: "TOKEN_BUDGET_TRUNCATION",
+      expectedReasonCodes: ["TOKEN_BUDGET_TRUNCATION"],
+      expectedCalls: 1,
+      maxCalls: 20,
+      expectedItemKeys: ["urn:li:dataset:(lineage-a)"],
+      maxItems: 100,
+    },
+    {
+      trigger: "PAGE_LIMIT_REACHED",
+      expectedReasonCodes: ["HAS_MORE", "PAGE_LIMIT_REACHED"],
+      expectedCalls: 20,
+      maxCalls: 20,
+      expectedItemKeys: lineagePageItems,
+      maxItems: 100,
+    },
+    {
+      trigger: "ITEM_LIMIT_REACHED",
+      expectedReasonCodes: ["ITEM_LIMIT_REACHED"],
+      expectedCalls: 1,
+      maxCalls: 20,
+      expectedItemKeys: lineageItemLimitItems,
+      maxItems: 100,
+    },
+    {
+      trigger: "REPEATED_PAGE",
+      expectedReasonCodes: ["REPEATED_PAGE"],
+      expectedCalls: 2,
+      maxCalls: 20,
+      expectedItemKeys: lineagePair,
+      maxItems: 100,
+    },
+    {
+      trigger: "NO_PROGRESS",
+      expectedReasonCodes: ["NO_PROGRESS"],
+      expectedCalls: 2,
+      maxCalls: 20,
+      expectedItemKeys: lineagePair,
+      maxItems: 100,
+    },
+    {
+      trigger: "INCONSISTENT_PAGINATION",
+      expectedReasonCodes: ["INCONSISTENT_PAGINATION"],
+      expectedCalls: 1,
+      maxCalls: 20,
+      expectedItemKeys: [],
+      maxItems: 100,
+    },
+  ];
+  const stopMatrix: readonly StopMatrixRow[] = [
+    ...searchRows,
+    ...schemaRows,
+    ...lineageScenarios.flatMap((scenario) => [
+      {
+        collector: "table lineage",
+        ...scenario,
+        run: () => runLineageStopScenario(scenario.trigger, undefined),
+      },
       {
         collector: "column lineage",
-        reason,
-        run: () => runLineageStopScenario(reason, "customer_id"),
+        ...scenario,
+        run: () => runLineageStopScenario(scenario.trigger, "customer_id"),
       },
     ]),
   ];
 
-  it.each(stopMatrix)("$collector stops boundedly with $reason", async ({ reason, run }) => {
-    const result = await run();
+  it.each(stopMatrix)(
+    "$collector stops boundedly with $trigger",
+    async ({ expectedReasonCodes, expectedCalls, maxCalls, expectedItemKeys, maxItems, run }) => {
+      const result = await run();
 
-    expect(result.complete).toBe(false);
-    expect(result.reasonCodes).toContain(reason);
-    expect(result.itemCount).toBeLessThanOrEqual(result.maxItems);
-    expect(result.calls).toBeLessThanOrEqual(result.maxCalls);
-  });
+      expect(result.complete).toBe(false);
+      expect(result.reasonCodes).toEqual(expectedReasonCodes);
+      expect(result.calls).toBe(expectedCalls);
+      expect(result.calls).toBeLessThanOrEqual(maxCalls);
+      expect(result.itemCount).toBe(expectedItemKeys.length);
+      expect(result.itemCount).toBeLessThanOrEqual(maxItems);
+      expect(result.itemKeys).toEqual(expectedItemKeys);
+      expect(new Set(result.itemKeys).size).toBe(result.itemKeys.length);
+    },
+  );
 
   it("normalizes get_entities in batches of ten and records missing optional metadata", async () => {
     const urns = Array.from({ length: 11 }, (_, index) => `urn:li:dataset:(asset-${index})`);

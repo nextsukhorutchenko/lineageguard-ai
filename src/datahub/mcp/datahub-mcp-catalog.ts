@@ -86,6 +86,30 @@ function boundedStrings(values: readonly string[], maxLength: number): readonly 
     .slice(0, 20);
 }
 
+function deterministicNonEmpty(
+  left: string | undefined,
+  right: string | undefined,
+): string | undefined {
+  const candidates = [left, right].filter(
+    (value): value is string => value !== undefined && value.trim().length > 0,
+  );
+  return candidates.sort(compareEnglish)[0];
+}
+
+function mergeLineageAssets(left: LineageAsset | undefined, right: LineageAsset): LineageAsset {
+  const name = deterministicNonEmpty(left?.name, right.name);
+  const platform = deterministicNonEmpty(left?.platform, right.platform);
+  return {
+    urn: right.urn,
+    hop: left === undefined ? right.hop : Math.min(left.hop, right.hop),
+    lineageColumns: [...new Set([...(left?.lineageColumns ?? []), ...right.lineageColumns])].sort(
+      compareEnglish,
+    ),
+    ...(name === undefined ? {} : { name }),
+    ...(platform === undefined ? {} : { platform }),
+  };
+}
+
 export class DataHubMcpCatalog implements DataHubCatalog {
   readonly #trace: Array<ToolTraceEntry | undefined> = [];
   #nextCallNumber = 1;
@@ -329,8 +353,8 @@ export class DataHubMcpCatalog implements DataHubCatalog {
       }
       fingerprints.add(fingerprint);
       const before = assets.size;
+      const pageAssets = new Map<string, LineageAsset>();
       for (const result of results) {
-        const existing = assets.get(result.entity.urn);
         let asset: LineageAsset = {
           urn: result.entity.urn,
           hop: result.degree,
@@ -338,8 +362,17 @@ export class DataHubMcpCatalog implements DataHubCatalog {
         };
         asset = withOptional(asset, "name", result.entity.name);
         asset = withOptional(asset, "platform", result.entity.platform?.name);
-        if (existing !== undefined && asset.hop < existing.hop) assets.set(asset.urn, asset);
-        if (existing === undefined && assets.size < MAX_LINEAGE_ITEMS) assets.set(asset.urn, asset);
+        pageAssets.set(asset.urn, mergeLineageAssets(pageAssets.get(asset.urn), asset));
+      }
+      for (const asset of [...pageAssets.values()].sort((left, right) =>
+        compareEnglish(left.urn, right.urn),
+      )) {
+        const existing = assets.get(asset.urn);
+        if (existing !== undefined) {
+          assets.set(asset.urn, mergeLineageAssets(existing, asset));
+        } else if (assets.size < MAX_LINEAGE_ITEMS) {
+          assets.set(asset.urn, asset);
+        }
       }
       let mustStop = false;
       if (returnedCount >= MAX_LINEAGE_ITEMS || assets.size >= MAX_LINEAGE_ITEMS) {

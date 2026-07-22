@@ -62,6 +62,7 @@ interface FakeCatalogOptions {
   readonly columnReasons?: readonly RequiredIncompleteReasonCode[];
   readonly entityContextReasons?: readonly EntityContextIncompleteReasonCode[];
   readonly entityContextError?: Error;
+  readonly onEntityContext?: (signal: AbortSignal | undefined) => void;
 }
 
 function collection<T, R extends string>(
@@ -156,8 +157,11 @@ class FakeCatalog implements DataHubCatalog {
 
   async getEntityContext(
     urns: readonly string[],
+    options: { readonly signal?: AbortSignal } = {},
   ): Promise<CollectionResult<EntityContext, EntityContextIncompleteReasonCode>> {
     this.operations.push("getEntityContext");
+    this.#options.onEntityContext?.(options.signal);
+    options.signal?.throwIfAborted();
     if (this.#options.entityContextError) throw this.#options.entityContextError;
     const entities = urns.map((urn) => ({
       urn,
@@ -633,12 +637,30 @@ describe("runImpactAnalysis", () => {
   });
 
   it("treats an aborted get_entities transport call as terminal and closes once", async () => {
+    const controller = new AbortController();
+    let clockCalls = 0;
     const catalog = new FakeCatalog({
-      entityContextError: new AppError("DATAHUB_UNAVAILABLE", "Entity context transport failed."),
+      onEntityContext(signal) {
+        expect(signal).toBe(controller.signal);
+        controller.abort();
+      },
     });
     const runsRoot = await createRunsRoot();
 
-    await expect(runWith(catalog, runsRoot)).rejects.toMatchObject({ code: "DATAHUB_UNAVAILABLE" });
+    const operation = runImpactAnalysis({
+      request: REQUEST,
+      catalog,
+      clock: () => {
+        clockCalls += 1;
+        return new Date("2026-07-22T12:00:00.000Z");
+      },
+      runId: RUN_ID,
+      runsRoot,
+      signal: controller.signal,
+      secrets: [],
+    });
+
+    await expect(operation).rejects.toMatchObject({ name: "AbortError" });
     expect(catalog.operations).toEqual([
       "searchDatasets",
       "listSchemaFields",
@@ -648,7 +670,19 @@ describe("runImpactAnalysis", () => {
       "close",
     ]);
     expect(catalog.closeCount).toBe(1);
+    expect(clockCalls).toBe(0);
     await expect(access(join(runsRoot, RUN_ID, "impact-report.md"))).rejects.toThrow();
+  });
+
+  it("treats a non-aborted get_entities transport failure as DATAHUB_UNAVAILABLE", async () => {
+    const catalog = new FakeCatalog({
+      entityContextError: new AppError("DATAHUB_UNAVAILABLE", "Entity context transport failed."),
+    });
+
+    await expect(runWith(catalog, await createRunsRoot())).rejects.toMatchObject({
+      code: "DATAHUB_UNAVAILABLE",
+    });
+    expect(catalog.closeCount).toBe(1);
   });
 
   it("allows one exact candidate from incomplete search but never infers absence", async () => {
