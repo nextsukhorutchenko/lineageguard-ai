@@ -21,13 +21,13 @@ Run these commands from the repository root. They create a local Python 3.11 env
 
 ```powershell
 py -3.11 -m venv .venv
-\.venv\Scripts\python.exe -m pip install --upgrade pip wheel setuptools
-\.venv\Scripts\python.exe -m pip install acryl-datahub==1.6.0.15
-\.venv\Scripts\datahub.exe version
-\.venv\Scripts\datahub.exe docker quickstart --version v1.6.0 --pull-images
+.\.venv\Scripts\python.exe -m pip install --upgrade pip wheel setuptools
+.\.venv\Scripts\python.exe -m pip install acryl-datahub==1.6.0.15
+.\.venv\Scripts\datahub.exe version
+.\.venv\Scripts\datahub.exe docker quickstart --version v1.6.0 --pull-images
 Invoke-RestMethod http://localhost:8080/health
 $env:PYTHONUTF8 = "1"
-\.venv\Scripts\datahub.exe init --username datahub --password datahub
+.\.venv\Scripts\datahub.exe init --username datahub --password datahub
 ```
 
 ## Load the Official Datapack on Windows
