@@ -8,28 +8,24 @@
     "name": "order_details"
   },
   {
-    "urn": "urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub_order_entries.ORDER_DETAILS,PROD)",
-    "name": "ORDER_DETAILS"
-  },
-  {
-    "urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.order_details,PROD)",
-    "name": "ORDER_DETAILS"
-  },
-  {
-    "urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.order_details_replica,PROD)",
-    "name": "ORDER_DETAILS_REPLICA"
-  },
-  {
     "urn": "urn:li:dataset:(urn:li:dataPlatform:looker,b2fd91.order-entry.explore.order_details,PROD)",
     "name": "Order Details"
   },
   {
-    "urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.order_entry.regions,PROD)",
-    "name": "REGIONS"
+    "urn": "urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub_order_entries.Customer_Analytics_Measures,PROD)",
+    "name": "Customer Analytics Measures"
   },
   {
     "urn": "urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub_order_entries.Essential_KPI_Measures,PROD)",
     "name": "Essential KPI Measures"
+  },
+  {
+    "urn": "urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub_order_entries.Geographic_Measures,PROD)",
+    "name": "Geographic Measures"
+  },
+  {
+    "urn": "urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub_order_entries.ORDER_DETAILS,PROD)",
+    "name": "ORDER_DETAILS"
   },
   {
     "urn": "urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub_order_entries.Product_Perfromance_Measures,PROD)",
@@ -40,11 +36,15 @@
     "name": "Time Inteligence Measures"
   },
   {
-    "urn": "urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub_order_entries.Geographic_Measures,PROD)",
-    "name": "Geographic Measures"
+    "urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.order_details_replica,PROD)",
+    "name": "ORDER_DETAILS_REPLICA"
   },
   {
-    "urn": "urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub_order_entries.Customer_Analytics_Measures,PROD)",
-    "name": "Customer Analytics Measures"
+    "urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.order_details,PROD)",
+    "name": "ORDER_DETAILS"
+  },
+  {
+    "urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.order_entry.regions,PROD)",
+    "name": "REGIONS"
   }
 ]

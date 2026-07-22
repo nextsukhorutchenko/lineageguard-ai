@@ -1,12 +1,5 @@
 [
   {
-    "urn": "urn:li:dataset:(urn:li:dataPlatform:looker,b2fd91.order-entry.explore.order_details,PROD)",
-    "hop": 2,
-    "lineageColumns": ["order_details.customer_id"],
-    "name": "Order Details",
-    "platform": "looker"
-  },
-  {
     "urn": "urn:li:dataset:(urn:li:dataPlatform:dbt,b2fd91.ORDER_ENTRY_DB.analytics.order_history,PROD)",
     "hop": 1,
     "lineageColumns": ["customer_id"],
@@ -21,23 +14,16 @@
     "platform": "looker"
   },
   {
-    "urn": "urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub_order_entries.ORDER_DETAILS,PROD)",
-    "hop": 1,
-    "lineageColumns": ["CUSTOMER_ID"],
-    "name": "ORDER_DETAILS",
-    "platform": "powerbi"
-  },
-  {
-    "urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.order_history,PROD)",
-    "hop": 1,
-    "lineageColumns": ["customer_id"],
-    "name": "ORDER_HISTORY",
-    "platform": "snowflake"
+    "urn": "urn:li:dataset:(urn:li:dataPlatform:looker,b2fd91.order-entry.explore.order_details,PROD)",
+    "hop": 2,
+    "lineageColumns": ["order_details.customer_id"],
+    "name": "Order Details",
+    "platform": "looker"
   },
   {
     "urn": "urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub_order_entries.Customer_Analytics_Measures,PROD)",
     "hop": 1,
-    "lineageColumns": ["CUSTOMER_ID", "Customer LTV"],
+    "lineageColumns": ["Customer LTV", "CUSTOMER_ID"],
     "name": "Customer Analytics Measures",
     "platform": "powerbi"
   },
@@ -53,6 +39,13 @@
     "hop": 1,
     "lineageColumns": ["CUSTOMER_ID"],
     "name": "Geographic Measures",
+    "platform": "powerbi"
+  },
+  {
+    "urn": "urn:li:dataset:(urn:li:dataPlatform:powerbi,b2fd91.datahub_order_entries.ORDER_DETAILS,PROD)",
+    "hop": 1,
+    "lineageColumns": ["CUSTOMER_ID"],
+    "name": "ORDER_DETAILS",
     "platform": "powerbi"
   },
   {
@@ -74,6 +67,13 @@
     "hop": 1,
     "lineageColumns": ["customer_id"],
     "name": "ORDER_DETAILS_REPLICA",
+    "platform": "snowflake"
+  },
+  {
+    "urn": "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.order_history,PROD)",
+    "hop": 1,
+    "lineageColumns": ["customer_id"],
+    "name": "ORDER_HISTORY",
     "platform": "snowflake"
   }
 ]

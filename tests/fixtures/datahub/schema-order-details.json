@@ -1,15 +1,5 @@
 [
   {
-    "fieldPath": "cust_email",
-    "nativeDataType": "VARCHAR(16777216)",
-    "nullable": true
-  },
-  {
-    "fieldPath": "phone_number",
-    "nativeDataType": "VARCHAR(16777216)",
-    "nullable": true
-  },
-  {
     "fieldPath": "billing_address_line1",
     "nativeDataType": "VARCHAR(16777216)",
     "nullable": true
@@ -57,6 +47,11 @@
   {
     "fieldPath": "cost_of_delivery",
     "nativeDataType": "FLOAT",
+    "nullable": true
+  },
+  {
+    "fieldPath": "cust_email",
+    "nativeDataType": "VARCHAR(16777216)",
     "nullable": true
   },
   {
@@ -156,6 +151,11 @@
   },
   {
     "fieldPath": "payment_method_code",
+    "nativeDataType": "VARCHAR(16777216)",
+    "nullable": true
+  },
+  {
+    "fieldPath": "phone_number",
     "nativeDataType": "VARCHAR(16777216)",
     "nullable": true
   },
