@@ -3,9 +3,11 @@ import {
   StdioClientTransport,
   type StdioServerParameters,
 } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { RuntimeConfig } from "../../config/runtime-config.js";
 import { AppError } from "../../errors/app-error.js";
 import { redact } from "../../security/redact.js";
+import type { McpToolClient, ToolCallRequest } from "./datahub-mcp-catalog.js";
 
 const MAX_STDERR_CHARACTERS = 4_096;
 
@@ -24,24 +26,55 @@ export function dataHubMcpServerParameters(config: RuntimeConfig): StdioServerPa
   };
 }
 
+interface SdkToolClient {
+  callTool(request: ToolCallRequest): ReturnType<Client["callTool"]>;
+  close(): Promise<void>;
+}
+
+export function appendBoundedRedactedStderr(
+  collected: string,
+  chunk: unknown,
+  secrets: readonly string[],
+): string {
+  const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+  return String(redact(`${collected}${text}`, secrets)).slice(-MAX_STDERR_CHARACTERS);
+}
+
 function boundedStderrCollector(secrets: readonly string[]): (chunk: unknown) => void {
   let collected = "";
 
   return (chunk: unknown): void => {
-    const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
-    const safeText = String(redact(text, secrets));
-    collected = `${collected}${safeText}`.slice(-MAX_STDERR_CHARACTERS);
+    collected = appendBoundedRedactedStderr(collected, chunk, secrets);
   };
 }
 
-export async function connectDataHubMcp(config: RuntimeConfig): Promise<Client> {
+export function toDataHubMcpToolClient(client: SdkToolClient): McpToolClient {
+  return {
+    async callTool(request) {
+      const result = await client.callTool(request);
+      if ("toolResult" in result) {
+        throw new Error("DataHub MCP returned an unsupported task result.");
+      }
+      const parsed = CallToolResultSchema.safeParse(result);
+      if (!parsed.success) {
+        throw new Error("DataHub MCP returned an unsupported task result.");
+      }
+      return parsed.data;
+    },
+    async close() {
+      await client.close();
+    },
+  };
+}
+
+export async function connectDataHubMcp(config: RuntimeConfig): Promise<McpToolClient> {
   const client = new Client({ name: "lineageguard-ai", version: "0.1.0" });
   const transport = new StdioClientTransport(dataHubMcpServerParameters(config));
   transport.stderr?.on("data", boundedStderrCollector([config.datahubGmsToken]));
 
   try {
     await client.connect(transport);
-    return client;
+    return toDataHubMcpToolClient(client);
   } catch {
     try {
       await client.close();

@@ -7,7 +7,12 @@ import {
   type McpToolClient,
   type ToolCallRequest,
 } from "./datahub-mcp-catalog.js";
-import { dataHubMcpServerParameters } from "./mcp-client.js";
+import {
+  appendBoundedRedactedStderr,
+  connectDataHubMcp,
+  dataHubMcpServerParameters,
+  toDataHubMcpToolClient,
+} from "./mcp-client.js";
 
 const DATASET_URN =
   "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.order_details,PROD)";
@@ -254,6 +259,55 @@ describe("DataHubMcpCatalog", () => {
     ]);
   });
 
+  it("allocates concurrent trace IDs and ordering when calls complete in reverse", async () => {
+    const searchResult = Promise.withResolvers<CallToolResult>();
+    const schemaResult = Promise.withResolvers<CallToolResult>();
+    const results = [searchResult.promise, schemaResult.promise];
+    let callIndex = 0;
+    const client: McpToolClient = {
+      async callTool() {
+        return results[callIndex++]!;
+      },
+      async close() {},
+    };
+    const catalog = new DataHubMcpCatalog(client);
+
+    const search = catalog.searchDatasets("orders");
+    const schema = catalog.listSchemaFields(DATASET_URN);
+    schemaResult.resolve(
+      jsonResult({
+        urn: DATASET_URN,
+        fields: [{ fieldPath: "customer_id" }],
+        totalFields: 1,
+        returned: 1,
+        remainingCount: 0,
+      }),
+    );
+    await schema;
+    searchResult.resolve(jsonResult({ searchResults: [] }));
+    await search;
+
+    expect(catalog.getTrace()).toEqual([
+      {
+        callId: "mcp-001",
+        tool: "search",
+        arguments: {
+          query: "/q orders",
+          filter: "entity_type = dataset",
+          num_results: 50,
+          offset: 0,
+        },
+        status: "ok",
+      },
+      {
+        callId: "mcp-002",
+        tool: "list_schema_fields",
+        arguments: { urn: DATASET_URN, limit: 100, offset: 0 },
+        status: "ok",
+      },
+    ]);
+  });
+
   it("translates dependency failures and records only a safe error trace", async () => {
     const client: McpToolClient = {
       async callTool() {
@@ -352,5 +406,52 @@ describe("dataHubMcpServerParameters", () => {
       },
       stderr: "pipe",
     });
+  });
+
+  it("returns a client boundary directly compatible with the catalog and preserves close", async () => {
+    let closeCount = 0;
+    const sdkClient = {
+      async callTool() {
+        return jsonResult({ searchResults: [] });
+      },
+      async close() {
+        closeCount += 1;
+      },
+    };
+    const client = toDataHubMcpToolClient(sdkClient);
+    const catalog = new DataHubMcpCatalog(client);
+
+    await expect(catalog.searchDatasets("orders")).resolves.toEqual([]);
+    await catalog.close();
+
+    expect(closeCount).toBe(1);
+    const connect: (config: ReturnType<typeof loadRuntimeConfig>) => Promise<McpToolClient> =
+      connectDataHubMcp;
+    expect(connect).toBe(connectDataHubMcp);
+  });
+
+  it("rejects unsupported SDK task results without exposing their payload", async () => {
+    const sdkClient = {
+      async callTool() {
+        return { toolResult: { detail: "raw task payload with secret-token" } };
+      },
+      async close() {},
+    };
+    const client = toDataHubMcpToolClient(sdkClient);
+    const operation = client.callTool({ name: "search", arguments: {} });
+
+    await expect(operation).rejects.toThrow("DataHub MCP returned an unsupported task result.");
+    await expect(operation).rejects.not.toThrow("raw task payload with secret-token");
+  });
+
+  it("redacts secrets split across stderr chunks and keeps the collector bounded", () => {
+    let collected = "";
+    collected = appendBoundedRedactedStderr(collected, "before local-test-", ["local-test-token"]);
+    collected = appendBoundedRedactedStderr(collected, "token after", ["local-test-token"]);
+
+    expect(collected).toBe("before [REDACTED] after");
+    collected = appendBoundedRedactedStderr(collected, "x".repeat(5_000), ["local-test-token"]);
+    expect(collected.length).toBeLessThanOrEqual(4_096);
+    expect(collected).not.toContain("local-test-token");
   });
 });

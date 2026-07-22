@@ -28,7 +28,8 @@ function withOptional<T extends object, K extends string, V>(
 }
 
 export class DataHubMcpCatalog implements DataHubCatalog {
-  readonly #trace: ToolTraceEntry[] = [];
+  readonly #trace: Array<ToolTraceEntry | undefined> = [];
+  #nextCallNumber = 1;
 
   constructor(
     private readonly client: McpToolClient,
@@ -121,7 +122,12 @@ export class DataHubMcpCatalog implements DataHubCatalog {
   }
 
   getTrace(): readonly ToolTraceEntry[] {
-    return [...this.#trace];
+    const completed: ToolTraceEntry[] = [];
+    for (const entry of this.#trace) {
+      if (entry === undefined) break;
+      completed.push(entry);
+    }
+    return completed;
   }
 
   async close(): Promise<void> {
@@ -133,20 +139,23 @@ export class DataHubMcpCatalog implements DataHubCatalog {
   }
 
   private async call<T>(request: ToolCallRequest, parse: (response: unknown) => T): Promise<T> {
+    const callNumber = this.#nextCallNumber++;
+    const traceIndex = callNumber - 1;
     const traceEntry = {
-      callId: `mcp-${String(this.#trace.length + 1).padStart(3, "0")}`,
+      callId: `mcp-${String(callNumber).padStart(3, "0")}`,
       tool: request.name,
       arguments: redact(request.arguments, this.secrets) as Record<string, unknown>,
     };
+    this.#trace[traceIndex] = undefined;
 
     try {
       const result = await this.client.callTool(request);
       const decoded = decodeJsonToolResult(result);
       const parsed = parse(decoded);
-      this.#trace.push({ ...traceEntry, status: "ok" });
+      this.#trace[traceIndex] = { ...traceEntry, status: "ok" };
       return parsed;
     } catch {
-      this.#trace.push({ ...traceEntry, status: "error" });
+      this.#trace[traceIndex] = { ...traceEntry, status: "error" };
       throw this.unavailable();
     }
   }
