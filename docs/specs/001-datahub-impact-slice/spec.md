@@ -2,7 +2,7 @@
 
 **Specification ID:** `001-datahub-impact-slice`
 
-**Status:** Draft for user approval
+**Status:** Approved
 
 **Date:** 2026-07-22
 

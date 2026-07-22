@@ -27,4 +27,4 @@
 
 ## Current Gate
 
-Application implementation remains blocked until `spec.md` is reviewed and approved.
+The specification is approved. Application implementation remains blocked until `plan.md` is reviewed and approved.
