@@ -18,7 +18,10 @@ describe("resolveDataset", () => {
       platform: "snowflake",
     };
 
-    expect(resolveDataset(intent(candidate.urn), [candidate])).toEqual(candidate);
+    expect(resolveDataset(intent(candidate.urn), [candidate])).toEqual({
+      ...candidate,
+      environment: "PROD",
+    });
   });
 
   it("resolves an exact platform-qualified dataset name", () => {
@@ -45,7 +48,11 @@ describe("resolveDataset", () => {
     };
 
     expect(resolveDataset(intent("snowflake:account.database.schema.orders"), [candidate])).toEqual(
-      candidate,
+      {
+        ...candidate,
+        platform: "snowflake",
+        environment: "PROD",
+      },
     );
   });
 
@@ -55,9 +62,11 @@ describe("resolveDataset", () => {
       name: "ORDERS ARCHIVE",
     };
 
-    expect(resolveDataset(intent("snowflake:orders%2Carchive%28daily%29"), [candidate])).toEqual(
-      candidate,
-    );
+    expect(resolveDataset(intent("snowflake:orders%2Carchive%28daily%29"), [candidate])).toEqual({
+      ...candidate,
+      platform: "snowflake",
+      environment: "PROD",
+    });
   });
 
   it("preserves a literal percent sequence accepted by pinned DataHub", () => {
@@ -66,7 +75,11 @@ describe("resolveDataset", () => {
       name: "ORDERS ARCHIVE",
     };
 
-    expect(resolveDataset(intent("snowflake:orders%ZZarchive"), [candidate])).toEqual(candidate);
+    expect(resolveDataset(intent("snowflake:orders%ZZarchive"), [candidate])).toEqual({
+      ...candidate,
+      platform: "snowflake",
+      environment: "PROD",
+    });
   });
 
   it("does not derive an identity from DataHub reserved symbol U+241F in a component", () => {

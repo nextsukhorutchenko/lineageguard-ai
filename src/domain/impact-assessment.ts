@@ -19,7 +19,12 @@ export interface ImpactAssessment {
 
 export function assessImpact(evidence: NormalizedEvidence): ImpactAssessment {
   const downstreamCount = evidence.downstreamAssets.length;
-  const columnCount = evidence.columnAffectedAssets.length;
+  const downstreamUrns = new Set(evidence.downstreamAssets.map(({ urn }) => urn));
+  const columnCount = new Set(
+    evidence.columnAffectedAssets
+      .filter(({ urn }) => downstreamUrns.has(urn))
+      .map(({ urn }) => urn),
+  ).size;
   const maxHop = Math.max(0, ...evidence.downstreamAssets.map(({ hop }) => hop));
   const factors: RiskFactor[] = [
     {

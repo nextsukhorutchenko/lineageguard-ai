@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { renderImpactReport } from "../artifacts/render-impact-report.js";
 import { writeRunArtifact } from "../artifacts/write-run-artifacts.js";
 import type { DataHubCatalog } from "../datahub/catalog.js";
@@ -11,6 +12,7 @@ import {
 import { assessImpact, type ImpactAssessment } from "../domain/impact-assessment.js";
 import { resolveDataset } from "../domain/resolve-dataset.js";
 import type { RunStatus } from "../domain/run-result.js";
+import { AppError, type SuppressedFailure } from "../errors/app-error.js";
 
 export interface RunImpactAnalysisDependencies {
   readonly request: string;
@@ -18,6 +20,7 @@ export interface RunImpactAnalysisDependencies {
   readonly clock: () => Date;
   readonly runId: string;
   readonly runsRoot: string;
+  readonly signal: AbortSignal;
 }
 
 export interface ImpactReportDraft {
@@ -40,6 +43,16 @@ export interface AnalysisRun extends ImpactReportDraft {
   readonly artifactPath: string;
 }
 
+export class ImpactReportPersistenceError extends AppError {
+  constructor(
+    readonly report: ImpactReportDraft,
+    readonly attemptedPath: string,
+  ) {
+    super("ARTIFACT_WRITE_FAILED", "The impact report could not be persisted.");
+    this.name = "ImpactReportPersistenceError";
+  }
+}
+
 interface BuildImpactReportDraftInput {
   readonly request: string;
   readonly clock: () => Date;
@@ -54,6 +67,23 @@ const assumptions = [
   "Downstream lineage inspection was bounded to two hops.",
 ] as const;
 
+function attachSuppressedFailure(error: unknown, failure: SuppressedFailure): void {
+  try {
+    if (error instanceof AppError) {
+      error.addSuppressedFailure(failure);
+    } else if (error instanceof Error && Object.isExtensible(error)) {
+      Object.defineProperty(error, "suppressedFailures", {
+        configurable: false,
+        enumerable: false,
+        value: Object.freeze([Object.freeze(failure)]),
+        writable: false,
+      });
+    }
+  } catch {
+    // Cleanup metadata is secondary; the original analysis failure must remain authoritative.
+  }
+}
+
 function buildFacts(evidence: NormalizedEvidence): readonly string[] {
   const facts = [
     `Selected dataset ${evidence.targetDataset.urn} was returned by DataHub.`,
@@ -62,6 +92,9 @@ function buildFacts(evidence: NormalizedEvidence): readonly string[] {
 
   if (evidence.targetDataset.platform !== undefined) {
     facts.push(`Selected dataset platform is ${evidence.targetDataset.platform}.`);
+  }
+  if (evidence.targetDataset.environment !== undefined) {
+    facts.push(`Selected dataset environment is ${evidence.targetDataset.environment}.`);
   }
   for (const asset of evidence.downstreamAssets) {
     facts.push(`Downstream asset ${asset.urn} was returned at hop ${asset.hop}.`);
@@ -108,7 +141,9 @@ function buildUnknowns(evidence: NormalizedEvidence): readonly string[] {
   if (evidence.targetDataset.platform === undefined) {
     unknowns.push("Selected dataset platform metadata was not available.");
   }
-  unknowns.push("Selected dataset environment metadata was not available.");
+  if (evidence.targetDataset.environment === undefined) {
+    unknowns.push("Selected dataset environment metadata was not available.");
+  }
 
   return unknowns;
 }
@@ -137,18 +172,32 @@ function buildImpactReportDraft(input: BuildImpactReportDraftInput): ImpactRepor
 }
 
 export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Promise<AnalysisRun> {
-  const intent = parseChangeIntent(deps.request);
+  let outcome:
+    | { readonly kind: "completed"; readonly run: AnalysisRun }
+    | { readonly kind: "failed"; readonly error: unknown };
 
   try {
-    const candidates = await deps.catalog.searchDatasets(intent.datasetHint);
+    deps.signal.throwIfAborted();
+    const intent = parseChangeIntent(deps.request);
+    const candidates = await deps.catalog.searchDatasets(intent.datasetHint, {
+      signal: deps.signal,
+    });
+    deps.signal.throwIfAborted();
     const target = resolveDataset(intent, candidates);
-    const fields = await deps.catalog.listSchemaFields(target.urn);
+    const fields = await deps.catalog.listSchemaFields(target.urn, { signal: deps.signal });
+    deps.signal.throwIfAborted();
     const sourceColumn = requireSourceColumn(fields, intent.sourceColumn);
-    const tableLineage = await deps.catalog.getDownstreamLineage(target.urn, { maxHops: 2 });
+    const tableLineage = await deps.catalog.getDownstreamLineage(target.urn, {
+      maxHops: 2,
+      signal: deps.signal,
+    });
+    deps.signal.throwIfAborted();
     const columnLineage = await deps.catalog.getDownstreamLineage(target.urn, {
       column: sourceColumn.fieldPath,
       maxHops: 2,
+      signal: deps.signal,
     });
+    deps.signal.throwIfAborted();
     const evidence = normalizeEvidence({
       target,
       fields,
@@ -166,15 +215,42 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
       evidence,
       assessment,
     });
+    deps.signal.throwIfAborted();
     const markdown = renderImpactReport(report);
-    const artifactPath = await writeRunArtifact({
-      runsRoot: deps.runsRoot,
-      runId: report.runId,
-      filename: "impact-report.md",
-      content: markdown,
-    });
-    return { ...report, artifactPath };
-  } finally {
-    await deps.catalog.close();
+    deps.signal.throwIfAborted();
+    const attemptedPath = resolve(deps.runsRoot, report.runId, "impact-report.md");
+    let artifactPath: string;
+    try {
+      artifactPath = await writeRunArtifact({
+        runsRoot: deps.runsRoot,
+        runId: report.runId,
+        filename: "impact-report.md",
+        content: markdown,
+        signal: deps.signal,
+      });
+    } catch (error) {
+      if (error instanceof AppError && error.code === "ARTIFACT_WRITE_FAILED") {
+        throw new ImpactReportPersistenceError(report, attemptedPath);
+      }
+      throw error;
+    }
+    outcome = { kind: "completed", run: { ...report, artifactPath } };
+  } catch (error) {
+    outcome = { kind: "failed", error };
   }
+
+  try {
+    await deps.catalog.close();
+  } catch (closeError) {
+    if (outcome.kind === "completed") throw closeError;
+
+    const failure: SuppressedFailure = {
+      code: "MCP_UNAVAILABLE",
+      message: "The DataHub catalog could not be closed after analysis failed.",
+    };
+    attachSuppressedFailure(outcome.error, failure);
+  }
+
+  if (outcome.kind === "failed") throw outcome.error;
+  return outcome.run;
 }

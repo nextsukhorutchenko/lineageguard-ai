@@ -24,7 +24,7 @@ const evidence = ({
     lineageColumns: [],
   })),
   columnAffectedAssets: Array.from({ length: columnAffected }, (_, index) => ({
-    urn: `urn:column:${index}`,
+    urn: `urn:downstream:${index}`,
     hop: 0,
     lineageColumns: ["customer_id"],
   })),
@@ -62,5 +62,25 @@ describe("assessImpact", () => {
     const normalizedEvidence = evidence({ downstream: 2, columnAffected: 2, maxHop: 1 });
 
     expect(assessImpact(normalizedEvidence)).toEqual(assessImpact(normalizedEvidence));
+  });
+
+  it("does not treat equal-sized disjoint lineage sets as complete coverage", () => {
+    const disjoint = {
+      ...evidence({ downstream: 2, columnAffected: 2, maxHop: 1 }),
+      columnAffectedAssets: [
+        { urn: "urn:column:0", hop: 1, lineageColumns: ["customer_id"] },
+        { urn: "urn:column:1", hop: 1, lineageColumns: ["customer_id"] },
+      ],
+    };
+
+    expect(assessImpact(disjoint)).toMatchObject({
+      score: 46,
+      level: "medium",
+      confidence: "low",
+      factors: expect.arrayContaining([
+        expect.objectContaining({ name: "confirmedColumns", points: 0 }),
+        expect.objectContaining({ name: "metadataGap", points: 10 }),
+      ]),
+    });
   });
 });

@@ -127,7 +127,7 @@ describe("renderImpactReport", () => {
     );
     expect(first).toContain("orders\\|daily");
     expect(first).toContain("snow\\`flake");
-    expect(first).toContain("NUMBER\\r\\n(38,0)");
+    expect(first).toContain("NUMBER\\\\r\\\\n(38,0)");
     expect(first).toContain('{"offset":0,"query":"/q orders\\|daily"}');
     expect(first.endsWith("\n")).toBe(true);
     expect(first.endsWith("\n\n")).toBe(false);
@@ -141,7 +141,9 @@ describe("renderImpactReport", () => {
       ...run.evidence.columnAffectedAssets.map(({ urn }) => urn),
     ]);
     const factSection = first.split("## Facts\n\n")[1]!.split("\n\n## Assumptions")[0]!;
-    const factUrns = factSection.match(/urn:li:dataset:\([^\s]+\)/g) ?? [];
+    const factUrns = (factSection.match(/urn:li:dataset:\([^\s]+\)/g) ?? []).map((urn) =>
+      urn.replace(/\\([\\`*_[\]|])/gu, "$1"),
+    );
     expect(factUrns.every((urn) => evidenceUrns.has(urn))).toBe(true);
     expect(first).toMatchInlineSnapshot(`
       "# LineageGuard AI Impact Report
@@ -150,19 +152,19 @@ describe("renderImpactReport", () => {
 
       | Run ID | Created at | Original request |
       | --- | --- | --- |
-      | 20260722T120000Z-0123abcd | 2026-07-22T12:00:00.000Z | Rename column customer_id to customer_key in dataset snowflake:orders\\|daily |
+      | 20260722T120000Z-0123abcd | 2026-07-22T12:00:00.000Z | Rename column customer\\_id to customer\\_key in dataset snowflake:orders\\|daily |
 
       ## Resolved Change Intent
 
       | Change | Dataset hint | Source column | Target column |
       | --- | --- | --- | --- |
-      | Rename column | snowflake:orders\\|daily | customer_id | customer_key |
+      | Rename column | snowflake:orders\\|daily | customer\\_id | customer\\_key |
 
       ## Selected Dataset
 
-      | URN | Name | Platform | Source column | Native type | Nullable |
-      | --- | --- | --- | --- | --- | --- |
-      | urn:li:dataset:(urn:li:dataPlatform:snowflake,orders,PROD) | orders\\|daily | snow\\\`flake | customer_id | NUMBER\\r\\n(38,0) | No |
+      | URN | Name | Platform | Environment | Source column | Native type | Nullable |
+      | --- | --- | --- | --- | --- | --- | --- |
+      | urn:li:dataset:(urn:li:dataPlatform:snowflake,orders,PROD) | orders\\|daily | snow\\\`flake | Not available | customer\\_id | NUMBER\\\\r\\\\n(38,0) | No |
 
       ## Evidence Summary
 
@@ -174,7 +176,7 @@ describe("renderImpactReport", () => {
 
       | URN | Name | Platform | Hop | Evidence |
       | --- | --- | --- | --- | --- |
-      | urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_orders,PROD) | customer\\|orders | snow\\\`flake | 1 | Column |
+      | urn:li:dataset:(urn:li:dataPlatform:snowflake,customer\\_orders,PROD) | customer\\|orders | snow\\\`flake | 1 | Column |
 
       ## Deterministic Impact Assessment
 
@@ -190,7 +192,7 @@ describe("renderImpactReport", () => {
       ## Facts
 
       - Selected dataset urn:li:dataset:(urn:li:dataPlatform:snowflake,orders,PROD) was returned by DataHub.
-      - Downstream asset urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_orders,PROD) was returned at hop 1.
+      - Downstream asset urn:li:dataset:(urn:li:dataPlatform:snowflake,customer\\_orders,PROD) was returned at hop 1.
 
       ## Assumptions
 
@@ -246,19 +248,19 @@ describe("renderImpactReport", () => {
 
       | Run ID | Created at | Original request |
       | --- | --- | --- |
-      | 20260722T120000Z-0123abcd | 2026-07-22T12:00:00.000Z | Rename column customer_id to customer_key in dataset snowflake:orders\\|daily |
+      | 20260722T120000Z-0123abcd | 2026-07-22T12:00:00.000Z | Rename column customer\\_id to customer\\_key in dataset snowflake:orders\\|daily |
 
       ## Resolved Change Intent
 
       | Change | Dataset hint | Source column | Target column |
       | --- | --- | --- | --- |
-      | Rename column | snowflake:orders\\|daily | customer_id | customer_key |
+      | Rename column | snowflake:orders\\|daily | customer\\_id | customer\\_key |
 
       ## Selected Dataset
 
-      | URN | Name | Platform | Source column | Native type | Nullable |
-      | --- | --- | --- | --- | --- | --- |
-      | urn:li:dataset:(urn:li:dataPlatform:snowflake,orders,PROD) | orders\\|daily | snow\\\`flake | customer_id | NUMBER\\r\\n(38,0) | No |
+      | URN | Name | Platform | Environment | Source column | Native type | Nullable |
+      | --- | --- | --- | --- | --- | --- | --- |
+      | urn:li:dataset:(urn:li:dataPlatform:snowflake,orders,PROD) | orders\\|daily | snow\\\`flake | Not available | customer\\_id | NUMBER\\\\r\\\\n(38,0) | No |
 
       ## Evidence Summary
 
@@ -270,7 +272,7 @@ describe("renderImpactReport", () => {
 
       | URN | Name | Platform | Hop | Evidence |
       | --- | --- | --- | --- | --- |
-      | urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_orders,PROD) | customer\\|orders | snow\\\`flake | 1 | Table |
+      | urn:li:dataset:(urn:li:dataPlatform:snowflake,customer\\_orders,PROD) | customer\\|orders | snow\\\`flake | 1 | Table |
 
       ## Deterministic Impact Assessment
 
@@ -286,7 +288,7 @@ describe("renderImpactReport", () => {
       ## Facts
 
       - Selected dataset urn:li:dataset:(urn:li:dataPlatform:snowflake,orders,PROD) was returned by DataHub.
-      - Downstream asset urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_orders,PROD) was returned at hop 1.
+      - Downstream asset urn:li:dataset:(urn:li:dataPlatform:snowflake,customer\\_orders,PROD) was returned at hop 1.
 
       ## Assumptions
 
@@ -309,5 +311,59 @@ describe("renderImpactReport", () => {
       COMPLETED_WITH_LIMITATIONS
       "
     `);
+  });
+
+  it("neutralizes heading, HTML, Markdown-link, and terminal-control injection", () => {
+    const injectedUrn = `${TARGET_URN}\n## Forged Heading`;
+    const injectedEvidence: NormalizedEvidence = {
+      ...columnEvidence,
+      targetDataset: {
+        urn: injectedUrn,
+        name: "<script>alert(1)</script>",
+        platform: "snowflake\u001b[2J",
+        environment: "PROD",
+      },
+      sourceColumn: {
+        fieldPath: "customer_id\n# Forged Source",
+        nativeDataType: "<img src=x onerror=alert(1)>",
+      },
+      downstreamAssets: [],
+      columnAffectedAssets: [],
+      evidenceLevel: "none",
+      trace: [
+        {
+          callId: "mcp-001\u001b[31m",
+          tool: "search",
+          arguments: { query: "<script>trace()</script>\n## Trace Heading" },
+          status: "ok",
+        },
+      ],
+    };
+    const report = renderImpactReport(
+      createRun({
+        request: "Rename [click](javascript:alert(1))\n## Request Heading",
+        intent: {
+          kind: "rename_column",
+          datasetHint: "[click](javascript:alert(1))\n## Intent Heading",
+          sourceColumn: "customer_id",
+          targetColumn: "customer_key",
+        },
+        evidence: injectedEvidence,
+        facts: [`Selected dataset ${injectedUrn} was returned by DataHub.`],
+        unknowns: ["Unknown <script>alert(1)</script>\u001b[0m"],
+        status: "INSUFFICIENT_METADATA",
+      }),
+    );
+
+    expect(report).not.toMatch(
+      /\n## (?:Forged Heading|Request Heading|Intent Heading|Trace Heading)/,
+    );
+    expect(report).not.toContain("<script>");
+    expect(report).not.toContain("<img");
+    expect(report).not.toContain("\u001b");
+    expect(report).not.toContain("[click](javascript:");
+    expect(report).toContain("&lt;script&gt;");
+    expect(report).toContain("\\u001B");
+    expect(report).toContain("\\[click\\](javascript:alert(1))");
   });
 });

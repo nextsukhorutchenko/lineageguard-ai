@@ -15,7 +15,10 @@ export interface ToolCallRequest {
 }
 
 export interface McpToolClient {
-  callTool(request: ToolCallRequest): Promise<CallToolResult>;
+  callTool(
+    request: ToolCallRequest,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<CallToolResult>;
   close(): Promise<void>;
 }
 
@@ -36,7 +39,10 @@ export class DataHubMcpCatalog implements DataHubCatalog {
     private readonly secrets: readonly string[] = [],
   ) {}
 
-  async searchDatasets(hint: string): Promise<readonly DatasetCandidate[]> {
+  async searchDatasets(
+    hint: string,
+    options: { readonly signal?: AbortSignal } = {},
+  ): Promise<readonly DatasetCandidate[]> {
     const parsed = await this.call(
       {
         name: "search",
@@ -48,6 +54,7 @@ export class DataHubMcpCatalog implements DataHubCatalog {
         },
       },
       (response) => searchResponseSchema.parse(response),
+      options.signal,
     );
     const candidates: DatasetCandidate[] = [];
 
@@ -60,7 +67,10 @@ export class DataHubMcpCatalog implements DataHubCatalog {
     return candidates;
   }
 
-  async listSchemaFields(datasetUrn: string): Promise<readonly SchemaField[]> {
+  async listSchemaFields(
+    datasetUrn: string,
+    options: { readonly signal?: AbortSignal } = {},
+  ): Promise<readonly SchemaField[]> {
     const fields: SchemaField[] = [];
     let offset = 0;
 
@@ -70,7 +80,14 @@ export class DataHubMcpCatalog implements DataHubCatalog {
           name: "list_schema_fields",
           arguments: { urn: datasetUrn, limit: 100, offset },
         },
-        (response) => schemaResponseSchema.parse(response),
+        (response) => {
+          const schemaPage = schemaResponseSchema.parse(response);
+          if (schemaPage.urn !== datasetUrn) {
+            throw new Error("DataHub returned schema fields for a different dataset URN.");
+          }
+          return schemaPage;
+        },
+        options.signal,
       );
 
       for (const field of parsed.fields) {
@@ -91,7 +108,7 @@ export class DataHubMcpCatalog implements DataHubCatalog {
 
   async getDownstreamLineage(
     datasetUrn: string,
-    options: { readonly column?: string; readonly maxHops: 2 },
+    options: { readonly column?: string; readonly maxHops: 2; readonly signal?: AbortSignal },
   ): Promise<readonly LineageAsset[]> {
     const parsed = await this.call(
       {
@@ -106,6 +123,7 @@ export class DataHubMcpCatalog implements DataHubCatalog {
         },
       },
       (response) => lineageResponseSchema.parse(response),
+      options.signal,
     );
 
     return (parsed.downstreams?.searchResults ?? []).map((result) => {
@@ -137,7 +155,12 @@ export class DataHubMcpCatalog implements DataHubCatalog {
     }
   }
 
-  private async call<T>(request: ToolCallRequest, parse: (response: unknown) => T): Promise<T> {
+  private async call<T>(
+    request: ToolCallRequest,
+    parse: (response: unknown) => T,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    signal?.throwIfAborted();
     const callNumber = this.#nextCallNumber++;
     const traceIndex = callNumber - 1;
     const traceEntry = {
@@ -148,13 +171,18 @@ export class DataHubMcpCatalog implements DataHubCatalog {
     this.#trace[traceIndex] = undefined;
 
     try {
-      const result = await this.client.callTool(request);
+      const result = await this.client.callTool(
+        request,
+        signal === undefined ? undefined : { signal },
+      );
+      signal?.throwIfAborted();
       const decoded = decodeJsonToolResult(result);
       const parsed = parse(decoded);
       this.#trace[traceIndex] = { ...traceEntry, status: "ok" };
       return parsed;
     } catch {
       this.#trace[traceIndex] = { ...traceEntry, status: "error" };
+      if (signal?.aborted) signal.throwIfAborted();
       throw this.unavailable();
     }
   }

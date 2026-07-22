@@ -20,6 +20,9 @@ describe("parseChangeIntent", () => {
     "Drop column customer_id in dataset snowflake:orders",
     "Rename customer_id in dataset snowflake:orders",
     "Rename column customer_id to customer_key and drop email in dataset snowflake:orders",
+    "Rename column customer_id to customer_key in dataset snowflake:orders; drop column email",
+    "Rename column customer_id to customer_key in dataset snowflake:orders. Drop column email",
+    "Rename column customer_id to customer_key in dataset snowflake:orders\nDrop column email",
   ])("rejects unsupported or incomplete input: %s", (request) => {
     expect(() => parseChangeIntent(request)).toThrowError(AppError);
     expect(() => parseChangeIntent(request)).toThrowError(

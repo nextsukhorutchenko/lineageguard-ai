@@ -5,6 +5,7 @@ export interface DatasetCandidate {
   readonly urn: string;
   readonly name: string;
   readonly platform?: string;
+  readonly environment?: string;
 }
 
 const normalize = (value: string): string => value.trim().toLocaleLowerCase("en-US");
@@ -25,7 +26,14 @@ function isCanonicalUrnComponent(value: string): boolean {
   );
 }
 
-function platformQualifiedUrnIdentity(urn: string): string | undefined {
+interface CanonicalDatasetUrnIdentity {
+  readonly platform: string;
+  readonly datasetName: string;
+  readonly environment: string;
+  readonly platformQualifiedName: string;
+}
+
+function canonicalDatasetUrnIdentity(urn: string): CanonicalDatasetUrnIdentity | undefined {
   if (!urn.startsWith(datasetUrnPrefix) || !urn.endsWith(")")) return undefined;
 
   const components = urn.slice(datasetUrnPrefix.length, -1).split(",");
@@ -45,7 +53,14 @@ function platformQualifiedUrnIdentity(urn: string): string | undefined {
   }
 
   const platform = platformUrn.slice(dataPlatformUrnPrefix.length);
-  return platform.length === 0 ? undefined : `${platform}:${datasetName}`;
+  return platform.length === 0
+    ? undefined
+    : {
+        platform,
+        datasetName,
+        environment,
+        platformQualifiedName: `${platform}:${datasetName}`,
+      };
 }
 
 export function resolveDataset(
@@ -56,8 +71,8 @@ export function resolveDataset(
   const exact = candidates.filter((candidate) => {
     const keys = [candidate.urn, candidate.name];
     if (candidate.platform) keys.push(`${candidate.platform}:${candidate.name}`);
-    const urnIdentity = platformQualifiedUrnIdentity(candidate.urn);
-    if (urnIdentity) keys.push(urnIdentity);
+    const urnIdentity = canonicalDatasetUrnIdentity(candidate.urn);
+    if (urnIdentity) keys.push(urnIdentity.platformQualifiedName);
     return keys.some((key) => normalize(key) === hint);
   });
 
@@ -72,5 +87,13 @@ export function resolveDataset(
     });
   }
 
-  return exact[0]!;
+  const selected = exact[0]!;
+  const canonicalIdentity = canonicalDatasetUrnIdentity(selected.urn);
+  return canonicalIdentity === undefined
+    ? selected
+    : {
+        ...selected,
+        platform: canonicalIdentity.platform,
+        environment: canonicalIdentity.environment,
+      };
 }

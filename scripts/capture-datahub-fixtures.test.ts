@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { canonicalizeFixturePayloads, serializeFixture } from "./capture-datahub-fixtures.js";
+import {
+  canonicalizeFixturePayloads,
+  serializeFixture,
+  type FixturePayloads,
+} from "./capture-datahub-fixtures.js";
 
 const token = "local-test-token";
 
@@ -57,7 +61,7 @@ const permuted = {
     .reverse(),
 };
 
-async function render(payloads: typeof ordered): Promise<readonly string[]> {
+async function render(payloads: FixturePayloads): Promise<readonly string[]> {
   const canonical = canonicalizeFixturePayloads(payloads);
   return Promise.all([
     serializeFixture(canonical.candidates, token),

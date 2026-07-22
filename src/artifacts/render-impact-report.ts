@@ -1,5 +1,6 @@
 import type { ImpactReportDraft } from "../app/run-impact-analysis.js";
 import type { RiskFactor } from "../domain/impact-assessment.js";
+import { sanitizeMarkdownTableCell, sanitizeMarkdownText } from "../security/sanitize-output.js";
 
 type Alignment = "left" | "right";
 
@@ -18,11 +19,7 @@ const traceArgumentKeys = {
 } as const;
 
 function escapeTableCell(value: unknown): string {
-  return String(value)
-    .replaceAll("|", "\\|")
-    .replaceAll("`", "\\`")
-    .replaceAll("\r", "\\r")
-    .replaceAll("\n", "\\n");
+  return sanitizeMarkdownTableCell(value);
 }
 
 function stableJson(value: unknown): string {
@@ -72,7 +69,9 @@ function alignedTable(
 }
 
 function bulletList(values: readonly string[]): string {
-  return values.length === 0 ? "- None." : values.map((value) => `- ${value}`).join("\n");
+  return values.length === 0
+    ? "- None."
+    : values.map((value) => `- ${sanitizeMarkdownText(value)}`).join("\n");
 }
 
 function safeTraceArguments(
@@ -133,12 +132,13 @@ export function renderImpactReport(run: ImpactReportDraft): string {
     ),
     "## Selected Dataset",
     compactTable(
-      ["URN", "Name", "Platform", "Source column", "Native type", "Nullable"],
+      ["URN", "Name", "Platform", "Environment", "Source column", "Native type", "Nullable"],
       [
         [
           run.evidence.targetDataset.urn,
           run.evidence.targetDataset.name,
           run.evidence.targetDataset.platform ?? "Not available",
+          run.evidence.targetDataset.environment ?? "Not available",
           run.evidence.sourceColumn.fieldPath,
           run.evidence.sourceColumn.nativeDataType ?? "Not available",
           run.evidence.sourceColumn.nullable === undefined

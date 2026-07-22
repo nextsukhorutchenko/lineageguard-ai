@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
@@ -38,6 +38,8 @@ interface FakeCatalogOptions {
   readonly tableLineage?: readonly LineageAsset[];
   readonly columnLineage?: readonly LineageAsset[];
   readonly failSearch?: boolean;
+  readonly searchError?: Error;
+  readonly closeError?: Error;
 }
 
 class FakeCatalog implements DataHubCatalog {
@@ -52,6 +54,7 @@ class FakeCatalog implements DataHubCatalog {
 
   async searchDatasets(): Promise<readonly DatasetCandidate[]> {
     this.operations.push("searchDatasets");
+    if (this.#options.searchError) throw this.#options.searchError;
     if (this.#options.failSearch) throw new AppError("DATAHUB_UNAVAILABLE", "Unavailable.");
     this.#trace.push({
       callId: "mcp-001",
@@ -103,6 +106,7 @@ class FakeCatalog implements DataHubCatalog {
   async close(): Promise<void> {
     this.operations.push("close");
     this.closeCount += 1;
+    if (this.#options.closeError) throw this.#options.closeError;
   }
 }
 
@@ -114,13 +118,18 @@ async function createRunsRoot(): Promise<string> {
   return root;
 }
 
-async function runWith(catalog: FakeCatalog, runsRoot: string) {
+async function runWith(
+  catalog: FakeCatalog,
+  runsRoot: string,
+  signal: AbortSignal = new AbortController().signal,
+) {
   return runImpactAnalysis({
     request: REQUEST,
     catalog,
     clock: () => new Date("2026-07-22T12:00:00.000Z"),
     runId: RUN_ID,
     runsRoot,
+    signal,
   });
 }
 
@@ -158,6 +167,11 @@ describe("runImpactAnalysis", () => {
     ]);
     expect(catalog.closeCount).toBe(1);
     expect(run.artifactPath).toBeDefined();
+    expect(run.evidence.targetDataset).toMatchObject({
+      platform: "snowflake",
+      environment: "PROD",
+    });
+    expect(run.facts).toContain("Selected dataset environment is PROD.");
     await expect(readFile(run.artifactPath!, "utf8")).resolves.toContain(
       "# LineageGuard AI Impact Report",
     );
@@ -219,8 +233,21 @@ describe("runImpactAnalysis", () => {
 
     const run = await runWith(catalog, await createRunsRoot());
 
+    expect(run.unknowns).toEqual(["Downstream lineage may be truncated at the MCP result limit."]);
+  });
+
+  it("reports platform and environment gaps only when canonical metadata is absent", async () => {
+    const catalog = new FakeCatalog({
+      candidates: [{ urn: "urn:li:dataset:opaque", name: "snowflake:orders" }],
+    });
+
+    const run = await runWith(catalog, await createRunsRoot());
+
+    expect(run.evidence.metadataGaps).toEqual([
+      "Selected dataset platform metadata was not available.",
+      "Selected dataset environment metadata was not available.",
+    ]);
     expect(run.unknowns).toEqual([
-      "Downstream lineage may be truncated at the MCP result limit.",
       "Selected dataset platform metadata was not available.",
       "Selected dataset environment metadata was not available.",
     ]);
@@ -259,6 +286,126 @@ describe("runImpactAnalysis", () => {
     });
     expect(catalog.operations).toEqual(["searchDatasets", "close"]);
     expect(catalog.closeCount).toBe(1);
+  });
+
+  it("closes the owned catalog when request parsing fails", async () => {
+    const catalog = new FakeCatalog();
+
+    await expect(
+      runImpactAnalysis({
+        request: "Drop column customer_id from dataset snowflake:orders",
+        catalog,
+        clock: () => new Date("2026-07-22T12:00:00.000Z"),
+        runId: RUN_ID,
+        runsRoot: await createRunsRoot(),
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    expect(catalog.operations).toEqual(["close"]);
+    expect(catalog.closeCount).toBe(1);
+  });
+
+  it("preserves the primary analysis error and attaches a safe close failure", async () => {
+    const primary = new AppError("DATAHUB_UNAVAILABLE", "Primary analysis failure.");
+    const catalog = new FakeCatalog({
+      searchError: primary,
+      closeError: new Error("raw close failure with secret-token"),
+    });
+
+    const caught = await runWith(catalog, await createRunsRoot()).catch((error: unknown) => error);
+
+    expect(caught).toBe(primary);
+    expect(caught).toMatchObject({
+      suppressedFailures: [
+        {
+          code: "MCP_UNAVAILABLE",
+          message: "The DataHub catalog could not be closed after analysis failed.",
+        },
+      ],
+    });
+    expect(JSON.stringify(caught)).not.toContain("raw close failure");
+    expect(JSON.stringify(caught)).not.toContain("secret-token");
+    expect(catalog.closeCount).toBe(1);
+  });
+
+  it("never replaces a primary error when suppressed metadata cannot be attached", async () => {
+    const primary = new Error("Primary generic failure.");
+    Object.defineProperty(primary, "suppressedFailures", {
+      configurable: false,
+      value: Object.freeze([]),
+    });
+    const catalog = new FakeCatalog({
+      searchError: primary,
+      closeError: new Error("Close failure."),
+    });
+
+    await expect(runWith(catalog, await createRunsRoot())).rejects.toBe(primary);
+    expect(catalog.closeCount).toBe(1);
+  });
+
+  it("surfaces a close failure when analysis otherwise succeeds", async () => {
+    const closeFailure = new AppError("MCP_UNAVAILABLE", "Safe close failure.");
+    const catalog = new FakeCatalog({ closeError: closeFailure });
+
+    await expect(runWith(catalog, await createRunsRoot())).rejects.toBe(closeFailure);
+    expect(catalog.closeCount).toBe(1);
+  });
+
+  it("preserves the safe in-memory report and attempted path after a real writer failure", async () => {
+    const catalog = new FakeCatalog();
+    const sandbox = await createRunsRoot();
+    const blockedRoot = join(sandbox, "runs-file");
+    await writeFile(blockedRoot, "not a directory", "utf8");
+
+    const caught = await runWith(catalog, blockedRoot).catch((error: unknown) => error);
+
+    expect(caught).toMatchObject({
+      name: "ImpactReportPersistenceError",
+      code: "ARTIFACT_WRITE_FAILED",
+      attemptedPath: join(blockedRoot, RUN_ID, "impact-report.md"),
+      report: {
+        runId: RUN_ID,
+        request: REQUEST,
+        status: "COMPLETED",
+        evidence: {
+          targetDataset: {
+            urn: TARGET.urn,
+            platform: "snowflake",
+            environment: "PROD",
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(caught)).not.toContain("secret");
+    expect(catalog.closeCount).toBe(1);
+  });
+
+  it("aborts after all MCP reads and before artifact persistence", async () => {
+    const controller = new AbortController();
+    const catalog = new FakeCatalog();
+    const runsRoot = await createRunsRoot();
+
+    const operation = runImpactAnalysis({
+      request: REQUEST,
+      catalog,
+      clock: () => {
+        controller.abort();
+        return new Date("2026-07-22T12:00:00.000Z");
+      },
+      runId: RUN_ID,
+      runsRoot,
+      signal: controller.signal,
+    });
+
+    await expect(operation).rejects.toMatchObject({ name: "AbortError" });
+    expect(catalog.operations).toEqual([
+      "searchDatasets",
+      "listSchemaFields",
+      "getDownstreamLineage:table",
+      "getDownstreamLineage:customer_id",
+      "close",
+    ]);
+    await expect(access(join(runsRoot, RUN_ID, "impact-report.md"))).rejects.toThrow();
   });
 
   it("does not expose the pre-write report builder as public application API", () => {

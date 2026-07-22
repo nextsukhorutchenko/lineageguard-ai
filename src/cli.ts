@@ -9,8 +9,10 @@ import { loadRuntimeConfig, type RuntimeConfig } from "./config/runtime-config.j
 import type { DataHubCatalog } from "./datahub/catalog.js";
 import { DataHubMcpCatalog } from "./datahub/mcp/datahub-mcp-catalog.js";
 import { connectDataHubMcp } from "./datahub/mcp/mcp-client.js";
+import { parseChangeIntent } from "./domain/change-intent.js";
 import type { RunStatus } from "./domain/run-result.js";
 import { AppError, type AppErrorCode } from "./errors/app-error.js";
+import { sanitizeTerminalText } from "./security/sanitize-output.js";
 
 const help = [
   "Usage: lineageguard --request <text> [--runs-dir <path>]",
@@ -31,7 +33,7 @@ const guidance = {
   NEEDS_USER_CLARIFICATION: "Choose one of the listed dataset URNs and retry with that exact URN.",
   COLUMN_NOT_FOUND: "Choose one of the actual schema fields listed above.",
   ARTIFACT_WRITE_FAILED:
-    "Verify that the configured runs directory is writable and remains inside the project workspace.",
+    "Verify that the configured runs directory is writable and has no symbolic-link or junction ancestors.",
 } as const;
 
 const exitCodes = {
@@ -70,7 +72,8 @@ export interface CliDependencies {
   readonly stdout: TextWriter;
   readonly stderr: TextWriter;
   readonly signal: InterruptSignal;
-  readonly createCatalog: (config: RuntimeConfig) => Promise<DataHubCatalog>;
+  readonly shutdownTimeoutMs: number;
+  readonly createCatalog: (config: RuntimeConfig, signal: AbortSignal) => Promise<DataHubCatalog>;
   readonly runImpactAnalysis: (input: RunImpactAnalysisDependencies) => Promise<CliAnalysisResult>;
 }
 
@@ -106,8 +109,8 @@ function closeOnce(catalog: DataHubCatalog): DataHubCatalog {
   let closing: Promise<void> | undefined;
 
   return {
-    searchDatasets: (hint) => catalog.searchDatasets(hint),
-    listSchemaFields: (datasetUrn) => catalog.listSchemaFields(datasetUrn),
+    searchDatasets: (hint, options) => catalog.searchDatasets(hint, options),
+    listSchemaFields: (datasetUrn, options) => catalog.listSchemaFields(datasetUrn, options),
     getDownstreamLineage: (datasetUrn, options) =>
       catalog.getDownstreamLineage(datasetUrn, options),
     getTrace: () => catalog.getTrace(),
@@ -123,17 +126,21 @@ function stringList(value: unknown): readonly string[] | undefined {
 
 function diagnosticDetails(error: AppError): string {
   if (error.code === "TARGET_NOT_FOUND" && typeof error.details.searchHint === "string") {
-    return `Search hint: ${error.details.searchHint}\n`;
+    return `Search hint: ${sanitizeTerminalText(error.details.searchHint)}\n`;
   }
 
   const candidates = stringList(error.details.candidates);
   if (error.code === "NEEDS_USER_CLARIFICATION" && candidates !== undefined) {
-    return `Dataset candidates:\n${candidates.map((candidate) => `- ${candidate}\n`).join("")}`;
+    return `Dataset candidates:\n${candidates
+      .map((candidate) => `- ${sanitizeTerminalText(candidate)}\n`)
+      .join("")}`;
   }
 
   const knownFields = stringList(error.details.knownFields);
   if (error.code === "COLUMN_NOT_FOUND" && knownFields !== undefined) {
-    return `Known schema fields:\n${knownFields.map((field) => `- ${field}\n`).join("")}`;
+    return `Known schema fields:\n${knownFields
+      .map((field) => `- ${sanitizeTerminalText(field)}\n`)
+      .join("")}`;
   }
 
   return "";
@@ -142,16 +149,34 @@ function diagnosticDetails(error: AppError): string {
 function writeAppError(error: AppError, stderr: TextWriter): number {
   const recovery = error.code === "INVALID_REQUEST" ? undefined : guidance[error.code];
   stderr.write(
-    `Status: ${error.code}\n${error.message}\n${diagnosticDetails(error)}${
+    `Status: ${error.code}\n${sanitizeTerminalText(error.message)}\n${diagnosticDetails(error)}${
       recovery === undefined ? "" : `Recovery: ${recovery}\n`
     }`,
   );
   return exitCodes[error.code];
 }
 
-async function defaultCreateCatalog(config: RuntimeConfig): Promise<DataHubCatalog> {
-  const client = await connectDataHubMcp(config);
+async function defaultCreateCatalog(
+  config: RuntimeConfig,
+  signal: AbortSignal,
+): Promise<DataHubCatalog> {
+  const client = await connectDataHubMcp(config, signal);
   return new DataHubMcpCatalog(client, [config.datahubGmsToken]);
+}
+
+async function waitForSettlementWithin(work: Promise<unknown>, timeoutMs: number): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const bounded = new Promise<void>((resolve) => {
+    timeout = setTimeout(resolve, timeoutMs);
+  });
+  await Promise.race([
+    work.then(
+      () => undefined,
+      () => undefined,
+    ),
+    bounded,
+  ]);
+  if (timeout !== undefined) clearTimeout(timeout);
 }
 
 const defaultDependencies: CliDependencies = {
@@ -160,6 +185,7 @@ const defaultDependencies: CliDependencies = {
   stdout: process.stdout,
   stderr: process.stderr,
   signal: process,
+  shutdownTimeoutMs: 5_000,
   createCatalog: defaultCreateCatalog,
   runImpactAnalysis,
 };
@@ -189,6 +215,16 @@ export async function runCli(
     return 2;
   }
 
+  try {
+    parseChangeIntent(arguments_.request);
+  } catch (error) {
+    if (error instanceof AppError) return writeAppError(error, dependencies.stderr);
+    dependencies.stderr.write(
+      "Status: INVALID_REQUEST\nThe request does not match the supported rename format.\n",
+    );
+    return 2;
+  }
+
   let config: RuntimeConfig;
   try {
     config = loadRuntimeConfig(dependencies.environment);
@@ -200,58 +236,90 @@ export async function runCli(
   }
 
   try {
-    const catalog = closeOnce(await dependencies.createCatalog(config));
+    const abortController = new AbortController();
+    let catalog: DataHubCatalog | undefined;
+    let interruptedByUser = false;
+    let resolveInterrupted!: (outcome: { readonly kind: "interrupted" }) => void;
+    const interrupted = new Promise<{ readonly kind: "interrupted" }>((resolve) => {
+      resolveInterrupted = resolve;
+    });
+    const onInterrupt = (): void => {
+      if (interruptedByUser) return;
+      interruptedByUser = true;
+      abortController.abort();
+      resolveInterrupted({ kind: "interrupted" });
+      void catalog?.close().catch(() => undefined);
+    };
+    dependencies.signal.once("SIGINT", onInterrupt);
+
     try {
-      let interruptedByUser = false;
-      let resolveInterrupted!: (outcome: { readonly kind: "interrupted" }) => void;
-      const interrupted = new Promise<{ readonly kind: "interrupted" }>((resolve) => {
-        resolveInterrupted = resolve;
-      });
-      const onInterrupt = (): void => {
-        interruptedByUser = true;
-        resolveInterrupted({ kind: "interrupted" });
-        void catalog.close().catch(() => undefined);
-      };
-      dependencies.signal.once("SIGINT", onInterrupt);
-
-      try {
-        const analysis = dependencies
-          .runImpactAnalysis({
-            request: arguments_.request,
-            catalog,
-            clock: dependencies.clock,
-            runId: createRunId(dependencies.clock()),
-            runsRoot: arguments_.runsRoot ?? config.runsRoot,
-          })
-          .then(
-            (run) => ({ kind: "completed" as const, run }),
-            (error: unknown) => ({ kind: "failed" as const, error }),
-          );
-        const outcome = await Promise.race([analysis, interrupted]);
-
-        if (interruptedByUser || outcome.kind === "interrupted") {
-          dependencies.stderr.write("Interrupted by the user.\n");
-          return 130;
-        }
-        if (outcome.kind === "failed") {
-          if (outcome.error instanceof AppError) {
-            return writeAppError(outcome.error, dependencies.stderr);
+      const catalogCreation = dependencies.createCatalog(config, abortController.signal).then(
+        async (created) => {
+          const ownedCatalog = closeOnce(created);
+          if (abortController.signal.aborted) {
+            await ownedCatalog.close().catch(() => undefined);
           }
-          dependencies.stderr.write(
-            "Status: MCP_UNAVAILABLE\nThe analysis failed at an external integration boundary.\n",
-          );
-          return 3;
-        }
+          return { kind: "created" as const, catalog: ownedCatalog };
+        },
+        (error: unknown) => ({ kind: "failed" as const, error }),
+      );
+      const creationOutcome = await Promise.race([catalogCreation, interrupted]);
 
-        dependencies.stdout.write(
-          `Status: ${outcome.run.status}\nRun ID: ${outcome.run.runId}\nReport: ${outcome.run.artifactPath}\n`,
+      if (interruptedByUser || creationOutcome.kind === "interrupted") {
+        await waitForSettlementWithin(
+          catalogCreation.then(async (outcome) => {
+            if (outcome.kind === "created") await outcome.catalog.close().catch(() => undefined);
+          }),
+          dependencies.shutdownTimeoutMs,
         );
-        return 0;
-      } finally {
-        dependencies.signal.off("SIGINT", onInterrupt);
+        dependencies.stderr.write("Interrupted by the user.\n");
+        return 130;
       }
+      if (creationOutcome.kind === "failed") throw creationOutcome.error;
+      catalog = creationOutcome.catalog;
+
+      const analysis = dependencies
+        .runImpactAnalysis({
+          request: arguments_.request,
+          catalog,
+          clock: dependencies.clock,
+          runId: createRunId(dependencies.clock()),
+          runsRoot: arguments_.runsRoot ?? config.runsRoot,
+          signal: abortController.signal,
+        })
+        .then(
+          (run) => ({ kind: "completed" as const, run }),
+          (error: unknown) => ({ kind: "failed" as const, error }),
+        );
+      const outcome = await Promise.race([analysis, interrupted]);
+
+      if (interruptedByUser || outcome.kind === "interrupted") {
+        await waitForSettlementWithin(
+          Promise.allSettled([analysis, catalog.close()]),
+          dependencies.shutdownTimeoutMs,
+        );
+        dependencies.stderr.write("Interrupted by the user.\n");
+        return 130;
+      }
+      if (outcome.kind === "failed") {
+        if (outcome.error instanceof AppError) {
+          return writeAppError(outcome.error, dependencies.stderr);
+        }
+        dependencies.stderr.write(
+          "Status: MCP_UNAVAILABLE\nThe analysis failed at an external integration boundary.\n",
+        );
+        return 3;
+      }
+
+      dependencies.stdout.write(
+        `Status: ${outcome.run.status}\nRun ID: ${sanitizeTerminalText(outcome.run.runId)}\nReport: ${sanitizeTerminalText(outcome.run.artifactPath)}\n`,
+      );
+      return 0;
     } finally {
-      await catalog.close().catch(() => undefined);
+      dependencies.signal.off("SIGINT", onInterrupt);
+      if (catalog !== undefined && !interruptedByUser) {
+        await catalog.close().catch(() => undefined);
+      }
     }
   } catch (error) {
     if (error instanceof AppError) {

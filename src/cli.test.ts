@@ -52,6 +52,7 @@ interface CliHarness {
   readonly stderr: string[];
   readonly received: {
     config?: RuntimeConfig;
+    catalogSignal?: AbortSignal;
     analysis?: RunImpactAnalysisDependencies;
   };
 }
@@ -81,8 +82,10 @@ function harness(
       signal,
       stdout: { write: (text) => stdout.push(text) },
       stderr: { write: (text) => stderr.push(text) },
-      createCatalog: async (config) => {
+      shutdownTimeoutMs: 25,
+      createCatalog: async (config, signal_) => {
         received.config = config;
+        received.catalogSignal = signal_;
         return catalog;
       },
       runImpactAnalysis: async (input) => {
@@ -162,6 +165,7 @@ describe("runCli", () => {
       );
       expect(test.stderr).toEqual([]);
       expect(test.received.analysis).toMatchObject({ request: REQUEST, runsRoot: "reports" });
+      expect(test.received.analysis?.signal).toBe(test.received.catalogSignal);
       expect(test.received.config).toMatchObject({ runsRoot: "runs" });
     },
   );
@@ -219,7 +223,7 @@ describe("runCli", () => {
       code: "ARTIFACT_WRITE_FAILED",
       exitCode: 4,
       recovery:
-        "Verify that the configured runs directory is writable and remains inside the project workspace.",
+        "Verify that the configured runs directory is writable and has no symbolic-link or junction ancestors.",
     },
   ];
 
@@ -247,6 +251,28 @@ describe("runCli", () => {
     },
   );
 
+  it("neutralizes terminal controls and injected lines in external diagnostics", async () => {
+    const test = harness(async () => {
+      throw new AppError(
+        "NEEDS_USER_CLARIFICATION",
+        "Several datasets match.\u001b[2J\nStatus: COMPLETED",
+        {
+          candidates: ["urn:li:dataset:one\u001b[31m\nRecovery: forged"],
+        },
+      );
+    });
+
+    const exitCode = await runCli(["--request", REQUEST], test.dependencies);
+    const diagnostic = test.stderr.join("");
+
+    expect(exitCode).toBe(2);
+    expect(diagnostic).not.toContain("\u001b");
+    expect(diagnostic).not.toContain("\nStatus: COMPLETED\n");
+    expect(diagnostic).not.toContain("\nRecovery: forged\n");
+    expect(diagnostic).toContain("\\u001B[2J\\nStatus: COMPLETED");
+    expect(diagnostic).toContain("\\u001B[31m\\nRecovery: forged");
+  });
+
   it("returns stable configuration guidance without exposing validation details", async () => {
     const test = harness();
     const dependencies = { ...test.dependencies, environment: { DATAHUB_GMS_TOKEN: "secret" } };
@@ -260,16 +286,18 @@ describe("runCli", () => {
     expect(test.received.config).toBeUndefined();
   });
 
-  it("closes the catalog once when real analysis rejects a malformed request", async () => {
+  it("rejects a malformed request before configuration or catalog acquisition", async () => {
     const test = harness(runImpactAnalysisReal);
+    const dependencies = { ...test.dependencies, environment: {} };
 
     const exitCode = await runCli(
       ["--request", "Drop column customer_id from dataset snowflake:orders"],
-      test.dependencies,
+      dependencies,
     );
 
     expect(exitCode).toBe(2);
-    expect(test.catalog.closeCount).toBe(1);
+    expect(test.catalog.closeCount).toBe(0);
+    expect(test.received.config).toBeUndefined();
     expect(test.stderr.join("")).toBe(
       "Status: INVALID_REQUEST\nSupported format: Rename column <source> to <target> in dataset <dataset hint>.\n",
     );
@@ -295,6 +323,47 @@ describe("runCli", () => {
     expect(test.catalog.closeCount).toBe(1);
     expect(test.stderr.join("")).toBe("Interrupted by the user.\n");
     expect(test.signal.listenerCount("SIGINT")).toBe(0);
+  });
+
+  it("aborts analysis and awaits its settlement before returning 130", async () => {
+    let analysisStarted!: () => void;
+    let abortObserved!: () => void;
+    let settleAnalysis!: () => void;
+    const started = new Promise<void>((resolve) => {
+      analysisStarted = resolve;
+    });
+    const aborted = new Promise<void>((resolve) => {
+      abortObserved = resolve;
+    });
+    const test = harness(
+      (input) =>
+        new Promise((resolve) => {
+          settleAnalysis = () =>
+            resolve({
+              status: "COMPLETED",
+              runId: input.runId,
+              artifactPath: `${input.runsRoot}/${input.runId}/impact-report.md`,
+            });
+          input.signal.addEventListener("abort", abortObserved, { once: true });
+          analysisStarted();
+        }),
+    );
+    let returned = false;
+
+    const exitCodePromise = runCli(["--request", REQUEST], test.dependencies).then((code) => {
+      returned = true;
+      return code;
+    });
+    await started;
+    test.signal.emit("SIGINT");
+    await aborted;
+    await Promise.resolve();
+    expect(returned).toBe(false);
+
+    settleAnalysis();
+    await expect(exitCodePromise).resolves.toBe(130);
+    expect(test.catalog.closeCount).toBe(1);
+    expect(test.stderr.join("")).toBe("Interrupted by the user.\n");
   });
 
   it("keeps exit 130 when SIGINT teardown rejects analysis before close settles", async () => {

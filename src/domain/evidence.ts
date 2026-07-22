@@ -85,9 +85,32 @@ export function normalizeEvidence(input: NormalizeEvidenceInput): NormalizedEvid
     compareEnglish(left.fieldPath, right.fieldPath),
   );
   const downstreamAssets = deduplicateAssets(input.tableLineage);
-  const columnAffectedAssets = deduplicateAssets(input.columnLineage);
+  const returnedColumnAssets = deduplicateAssets(input.columnLineage);
+  const downstreamUrns = new Set(downstreamAssets.map(({ urn }) => urn));
+  const columnAffectedAssets = returnedColumnAssets.filter(({ urn }) => downstreamUrns.has(urn));
+  const unmatchedColumnCount = returnedColumnAssets.length - columnAffectedAssets.length;
   const evidenceLevel: EvidenceLevel =
     columnAffectedAssets.length > 0 ? "column" : downstreamAssets.length > 0 ? "table" : "none";
+  const metadataGaps: string[] = [];
+
+  if (downstreamAssets.length === 0) {
+    metadataGaps.push("No downstream lineage was returned.");
+  } else if (columnAffectedAssets.length < downstreamAssets.length) {
+    metadataGaps.push(
+      `Column-level lineage is unavailable for ${downstreamAssets.length - columnAffectedAssets.length} of ${downstreamAssets.length} table-level downstream assets.`,
+    );
+  }
+  if (unmatchedColumnCount > 0) {
+    metadataGaps.push(
+      `${unmatchedColumnCount} column-lineage ${unmatchedColumnCount === 1 ? "asset was" : "assets were"} absent from table-level lineage and ${unmatchedColumnCount === 1 ? "was" : "were"} not counted as confirmed.`,
+    );
+  }
+  if (input.target.platform === undefined) {
+    metadataGaps.push("Selected dataset platform metadata was not available.");
+  }
+  if (input.target.environment === undefined) {
+    metadataGaps.push("Selected dataset environment metadata was not available.");
+  }
 
   return {
     targetDataset: input.target,
@@ -96,7 +119,7 @@ export function normalizeEvidence(input: NormalizeEvidenceInput): NormalizedEvid
     downstreamAssets,
     columnAffectedAssets,
     evidenceLevel,
-    metadataGaps: [],
+    metadataGaps,
     trace: input.trace,
   };
 }

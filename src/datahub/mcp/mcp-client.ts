@@ -27,7 +27,11 @@ export function dataHubMcpServerParameters(config: RuntimeConfig): StdioServerPa
 }
 
 interface SdkToolClient {
-  callTool(request: ToolCallRequest): ReturnType<Client["callTool"]>;
+  callTool(
+    request: ToolCallRequest,
+    resultSchema?: typeof CallToolResultSchema,
+    options?: { readonly signal?: AbortSignal },
+  ): ReturnType<Client["callTool"]>;
   close(): Promise<void>;
 }
 
@@ -50,8 +54,8 @@ function boundedStderrCollector(secrets: readonly string[]): (chunk: unknown) =>
 
 export function toDataHubMcpToolClient(client: SdkToolClient): McpToolClient {
   return {
-    async callTool(request) {
-      const result = await client.callTool(request);
+    async callTool(request, options) {
+      const result = await client.callTool(request, CallToolResultSchema, options);
       if ("toolResult" in result) {
         throw new Error("DataHub MCP returned an unsupported task result.");
       }
@@ -67,13 +71,17 @@ export function toDataHubMcpToolClient(client: SdkToolClient): McpToolClient {
   };
 }
 
-export async function connectDataHubMcp(config: RuntimeConfig): Promise<McpToolClient> {
+export async function connectDataHubMcp(
+  config: RuntimeConfig,
+  signal?: AbortSignal,
+): Promise<McpToolClient> {
+  signal?.throwIfAborted();
   const client = new Client({ name: "lineageguard-ai", version: "0.1.0" });
   const transport = new StdioClientTransport(dataHubMcpServerParameters(config));
   transport.stderr?.on("data", boundedStderrCollector([config.datahubGmsToken]));
 
   try {
-    await client.connect(transport);
+    await client.connect(transport, signal === undefined ? undefined : { signal });
     return toDataHubMcpToolClient(client);
   } catch {
     try {
@@ -81,6 +89,7 @@ export async function connectDataHubMcp(config: RuntimeConfig): Promise<McpToolC
     } catch {
       // Startup diagnostics remain bounded and private even when cleanup also fails.
     }
+    if (signal?.aborted) signal.throwIfAborted();
     throw new AppError("MCP_UNAVAILABLE", "The DataHub MCP subprocess could not be started.");
   }
 }

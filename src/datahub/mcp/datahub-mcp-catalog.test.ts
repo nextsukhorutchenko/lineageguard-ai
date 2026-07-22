@@ -259,6 +259,34 @@ describe("DataHubMcpCatalog", () => {
     ]);
   });
 
+  it("fails closed when any schema page identifies a different dataset URN", async () => {
+    const mismatchedUrn =
+      "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.other_table,PROD)";
+    const client = new RecordingMcpClient([
+      jsonResult({
+        urn: DATASET_URN,
+        fields: [{ fieldPath: "customer_id" }],
+        totalFields: 2,
+        returned: 1,
+        remainingCount: 1,
+      }),
+      jsonResult({
+        urn: mismatchedUrn,
+        fields: [{ fieldPath: "order_id" }],
+        totalFields: 2,
+        returned: 1,
+        remainingCount: 0,
+      }),
+    ]);
+    const catalog = new DataHubMcpCatalog(client);
+
+    await expect(catalog.listSchemaFields(DATASET_URN)).rejects.toMatchObject({
+      code: "DATAHUB_UNAVAILABLE",
+      details: {},
+    });
+    expect(catalog.getTrace().map(({ status }) => status)).toEqual(["ok", "error"]);
+  });
+
   it("allocates concurrent trace IDs and ordering when calls complete in reverse", async () => {
     const searchResult = Promise.withResolvers<CallToolResult>();
     const schemaResult = Promise.withResolvers<CallToolResult>();
@@ -334,6 +362,30 @@ describe("DataHubMcpCatalog", () => {
         status: "error",
       },
     ]);
+  });
+
+  it("forwards cancellation to the MCP request without translating AbortError", async () => {
+    const controller = new AbortController();
+    let receivedSignal: AbortSignal | undefined;
+    const client: McpToolClient = {
+      async callTool(_request, options) {
+        receivedSignal = options?.signal;
+        return new Promise((_, reject) => {
+          options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), {
+            once: true,
+          });
+        });
+      },
+      async close() {},
+    };
+    const catalog = new DataHubMcpCatalog(client);
+
+    const operation = catalog.searchDatasets("orders", { signal: controller.signal });
+    controller.abort();
+
+    await expect(operation).rejects.toMatchObject({ name: "AbortError" });
+    expect(receivedSignal).toBe(controller.signal);
+    expect(catalog.getTrace()).toMatchObject([{ tool: "search", status: "error" }]);
   });
 
   it("treats malformed MCP payloads as safe failed calls", async () => {
