@@ -10,6 +10,7 @@ export const searchResponseSchema = z
               .object({
                 urn: z.string().startsWith("urn:li:"),
                 name: z.string().optional(),
+                properties: z.object({ name: z.string().optional() }).passthrough().optional(),
                 type: z.string().optional(),
                 platform: z.object({ name: z.string().optional() }).passthrough().optional(),
               })
