@@ -63,6 +63,10 @@ function canonicalDatasetUrnIdentity(urn: string): CanonicalDatasetUrnIdentity |
       };
 }
 
+export function isCanonicalDatasetUrn(urn: string): boolean {
+  return canonicalDatasetUrnIdentity(urn) !== undefined;
+}
+
 export function resolveDataset(
   intent: ChangeIntent,
   candidates: readonly DatasetCandidate[],

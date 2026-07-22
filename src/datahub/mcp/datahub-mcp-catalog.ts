@@ -63,8 +63,7 @@ export class DataHubMcpCatalog implements DataHubCatalog {
     const candidates: DatasetCandidate[] = [];
 
     for (const { entity } of parsed.searchResults) {
-      const name = entity.name ?? entity.properties?.name;
-      if (name === undefined) continue;
+      const name = entity.name ?? entity.properties?.name ?? entity.urn;
       candidates.push(withOptional({ urn: entity.urn, name }, "platform", entity.platform?.name));
     }
 

@@ -75,4 +75,14 @@ describe("fixture canonicalization", () => {
   it("renders semantically equivalent permutations as byte-identical fixture content", async () => {
     await expect(render(ordered)).resolves.toEqual(await render(permuted));
   });
+
+  it("serializes the deterministic URN display fallback for unnamed search candidates", async () => {
+    const urn = "urn:li:dataset:(urn:li:dataPlatform:snowflake,unnamed_orders,PROD)";
+    const [searchFixture] = await render({
+      ...ordered,
+      candidates: [{ urn, name: urn }],
+    });
+
+    expect(JSON.parse(searchFixture!)).toEqual([{ urn, name: urn }]);
+  });
 });

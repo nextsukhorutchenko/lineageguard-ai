@@ -335,6 +335,9 @@ describe("runCli", () => {
     "Rename column customer_id to customer_key in dataset snowflake:orders, alter column email",
     "Rename column customer_id to customer_key in dataset snowflake:orders and remove email",
     "Rename column customer_id to customer_key in dataset snowflake:orders (and remove email)",
+    "Rename column customer_id to customer_key in dataset snowflake:orders (archive) drop column email",
+    "Rename column customer_id to customer_key in dataset snowflake:orders [archive] remove column email",
+    "Rename column customer_id to customer_key in dataset snowflake:orders / delete column email",
   ])(
     "rejects a malformed request before configuration or catalog acquisition: %s",
     async (request) => {

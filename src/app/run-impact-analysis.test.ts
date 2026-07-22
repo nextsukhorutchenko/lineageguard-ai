@@ -228,6 +228,32 @@ describe("runImpactAnalysis", () => {
     expect(report).toContain(UNMATCHED_COLUMN_DOWNSTREAM.urn.replaceAll("_", "\\_"));
   });
 
+  it("preserves an unnamed exact-URN target in normalized evidence and the report", async () => {
+    const unnamedTarget: DatasetCandidate = { urn: TARGET.urn, name: TARGET.urn };
+    const catalog = new FakeCatalog({ candidates: [unnamedTarget] });
+    const runsRoot = await createRunsRoot();
+
+    const run = await runImpactAnalysis({
+      request: `Rename column customer_id to customer_key in dataset ${unnamedTarget.urn}`,
+      catalog,
+      clock: () => new Date("2026-07-22T12:00:00.000Z"),
+      runId: RUN_ID,
+      runsRoot,
+      signal: new AbortController().signal,
+      secrets: [],
+    });
+    const report = await readFile(run.artifactPath, "utf8");
+
+    expect(run.evidence.targetDataset).toEqual({
+      ...unnamedTarget,
+      platform: "snowflake",
+      environment: "PROD",
+    });
+    expect(run.evidence.searchCandidateUrns).toEqual([unnamedTarget.urn]);
+    expect(run.facts).toContain(`DataHub search returned candidate ${unnamedTarget.urn}.`);
+    expect(report).toContain("DataHub search returned candidate");
+  });
+
   it("redacts a known secret from persisted Markdown without mutating analysis identities", async () => {
     const secret = "known-artifact-secret";
     const target: DatasetCandidate = {

@@ -224,6 +224,19 @@ describe("DataHubMcpCatalog", () => {
     expect(JSON.stringify(catalog.getTrace())).not.toContain("customer_id");
   });
 
+  it("preserves an unnamed search-result fixture by using its URN as the display name", async () => {
+    const client = new RecordingMcpClient([
+      jsonResult({
+        searchResults: [{ entity: { urn: DATASET_URN, type: "DATASET" } }],
+      }),
+    ]);
+    const catalog = new DataHubMcpCatalog(client);
+
+    await expect(catalog.searchDatasets(DATASET_URN)).resolves.toEqual([
+      { urn: DATASET_URN, name: DATASET_URN },
+    ]);
+  });
+
   it("paginates schema fields until DataHub reports none remaining", async () => {
     const client = new RecordingMcpClient([
       jsonResult({

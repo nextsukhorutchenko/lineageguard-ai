@@ -35,6 +35,14 @@ describe("parseChangeIntent", () => {
     ).toMatchObject({ datasetHint });
   });
 
+  it("accepts an action-like word as a dotted dataset-name component", () => {
+    const datasetHint = "snowflake:analytics.drop";
+
+    expect(
+      parseChangeIntent(`Rename column customer_id to customer_key in dataset ${datasetHint}`),
+    ).toMatchObject({ datasetHint });
+  });
+
   it.each([
     "Drop column customer_id in dataset snowflake:orders",
     "Rename customer_id in dataset snowflake:orders",
@@ -44,6 +52,9 @@ describe("parseChangeIntent", () => {
     "Rename column customer_id to customer_key in dataset snowflake:orders, alter column email",
     "Rename column customer_id to customer_key in dataset snowflake:orders and remove email",
     "Rename column customer_id to customer_key in dataset snowflake:orders (and remove email)",
+    "Rename column customer_id to customer_key in dataset snowflake:orders (archive) drop column email",
+    "Rename column customer_id to customer_key in dataset snowflake:orders [archive] remove column email",
+    "Rename column customer_id to customer_key in dataset snowflake:orders / delete column email",
     "Rename column customer_id to customer_key in dataset urn:li:dataset:(urn:li:dataPlatform:snowflake,orders,PROD, drop column email)",
     "Rename column customer_id to customer_key in dataset urn:li:dataset:(urn:li:dataPlatform:snowflake,orders,PROD, drop column email",
     "Rename column customer_id to customer_key in dataset snowflake:orders. Drop column email",

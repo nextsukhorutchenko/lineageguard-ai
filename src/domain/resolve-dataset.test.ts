@@ -24,6 +24,18 @@ describe("resolveDataset", () => {
     });
   });
 
+  it("resolves an unnamed candidate by exact URN when its display name falls back to identity", () => {
+    const urn =
+      "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.unnamed_orders,PROD)";
+
+    expect(resolveDataset(intent(urn), [{ urn, name: urn }])).toEqual({
+      urn,
+      name: urn,
+      platform: "snowflake",
+      environment: "PROD",
+    });
+  });
+
   it("resolves an exact platform-qualified dataset name", () => {
     expect(
       resolveDataset(intent("snowflake:b2fd91.order_entry_db.analytics.order_details"), [
