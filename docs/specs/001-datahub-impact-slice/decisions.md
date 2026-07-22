@@ -27,4 +27,4 @@
 
 ## Current Gate
 
-The specification is approved. Application implementation remains blocked until `plan.md` is reviewed and approved.
+The specification and `plan.md` are approved. Application implementation may proceed task-by-task under the approved plan.
