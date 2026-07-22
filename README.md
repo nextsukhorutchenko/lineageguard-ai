@@ -57,13 +57,19 @@ $env:PYTHONUTF8 = "1"
 The pinned Windows CLI cannot ingest this datapack through its local-file loader. Load it through an ephemeral Python 3.11 container instead. This command mounts the user-level DataHub authentication file read-only; it does not mount the repository, backup, Docker socket, or package cache.
 
 ```powershell
-$gmsContainer = "datahub-datahub-gms-quickstart-1"
-$network = docker inspect $gmsContainer --format '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}{{end}}'
-$aliases = @(docker inspect $gmsContainer --format '{{range $name, $network := .NetworkSettings.Networks}}{{range $network.Aliases}}{{println .}}{{end}}{{end}}')
-if ($network -ne "datahub_network") { throw "Expected the DataHub quickstart network." }
-if ($aliases -notcontains "datahub-gms") { throw "Expected the DataHub GMS network alias." }
+$gmsContainers = @(docker ps --filter "label=io.datahubproject.datahub.component=gms" --filter "ancestor=acryldata/datahub-gms:v1.6.0" --format '{{.ID}}')
+if ($gmsContainers.Count -ne 1) { throw "Expected exactly one pinned DataHub GMS container." }
+$gmsContainer = $gmsContainers[0]
+$gmsServiceName = "datahub-gms"
+$networks = docker inspect $gmsContainer --format '{{json .NetworkSettings.Networks}}' | ConvertFrom-Json
+$matchingNetworks = @($networks.PSObject.Properties | Where-Object { @($_.Value.DNSNames) -contains $gmsServiceName })
+if ($matchingNetworks.Count -ne 1) { throw "Expected one GMS network with the datahub-gms DNS name." }
+$network = $matchingNetworks[0].Name
+$gmsInternalUrl = "http://${gmsServiceName}:8080"
 
-docker run --rm --network $network --mount "type=bind,source=$env:USERPROFILE\.datahubenv,target=/tmp/source-datahubenv,readonly" --env PYTHONUTF8=1 python:3.11-slim@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93 /bin/sh -c 'set -eu; pip install --no-cache-dir --quiet "acryl-datahub==1.6.0.15"; datahub version; cp /tmp/source-datahubenv /root/.datahubenv; sed -i "s#http://localhost:8080#http://datahub-gms:8080#g" /root/.datahubenv; datahub check server-config >/dev/null; datahub datapack load showcase-ecommerce'
+docker run --rm --network $network --env "DATAHUB_GMS_INTERNAL_URL=$gmsInternalUrl" python:3.11-slim@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93 python -c 'import os, urllib.request; response = urllib.request.urlopen(os.environ["DATAHUB_GMS_INTERNAL_URL"] + "/health"); assert response.status == 200; print("GMS internal health: 200")'
+
+docker run --rm --network $network --mount "type=bind,source=$env:USERPROFILE\.datahubenv,target=/tmp/source-datahubenv,readonly" --env PYTHONUTF8=1 --env "DATAHUB_GMS_INTERNAL_URL=$gmsInternalUrl" python:3.11-slim@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93 /bin/sh -c 'set -eu; pip install --no-cache-dir --quiet "acryl-datahub==1.6.0.15"; datahub version; cp /tmp/source-datahubenv /root/.datahubenv; sed -i "s#http://localhost:8080#$DATAHUB_GMS_INTERNAL_URL#g" /root/.datahubenv; datahub check server-config >/dev/null; datahub datapack load showcase-ecommerce'
 ```
 
 See [docs/demo-scenario.md](docs/demo-scenario.md) for the pinned scenario facts and official datapack source.

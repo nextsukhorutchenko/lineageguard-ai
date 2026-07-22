@@ -49,6 +49,39 @@ describe("resolveDataset", () => {
     );
   });
 
+  it("preserves percent-encoded reserved characters in a canonical dataset name", () => {
+    const candidate = {
+      urn: "urn:li:dataset:(urn:li:dataPlatform:snowflake,orders%2Carchive%28daily%29,PROD)",
+      name: "ORDERS ARCHIVE",
+    };
+
+    expect(resolveDataset(intent("snowflake:orders%2Carchive%28daily%29"), [candidate])).toEqual(
+      candidate,
+    );
+  });
+
+  it.each([
+    {
+      label: "an extra top-level component",
+      urn: "urn:li:dataset:(urn:li:dataPlatform:snowflake,orders,PROD,DEV)",
+      hint: "snowflake:orders,PROD",
+    },
+    {
+      label: "a raw comma in the dataset component",
+      urn: "urn:li:dataset:(urn:li:dataPlatform:snowflake,orders,archive,PROD)",
+      hint: "snowflake:orders,archive",
+    },
+    {
+      label: "raw parentheses in the dataset component",
+      urn: "urn:li:dataset:(urn:li:dataPlatform:snowflake,orders(daily),PROD)",
+      hint: "snowflake:orders(daily)",
+    },
+  ])("does not derive an identity from a dataset URN with $label", ({ urn, hint }) => {
+    expect(() => resolveDataset(intent(hint), [{ urn, name: "ORDERS" }])).toThrowError(
+      expect.objectContaining({ code: "TARGET_NOT_FOUND" }),
+    );
+  });
+
   it.each([
     "urn:li:chart:(urn:li:dataPlatform:snowflake,account.database.schema.orders)",
     "urn:li:dataset:(not-a-platform-urn,account.database.schema.orders,PROD)",

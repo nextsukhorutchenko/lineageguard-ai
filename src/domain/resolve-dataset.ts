@@ -9,15 +9,40 @@ export interface DatasetCandidate {
 
 const normalize = (value: string): string => value.trim().toLocaleLowerCase("en-US");
 
-const datasetUrnPattern = /^urn:li:dataset:\(urn:li:dataPlatform:([^,()]+),(.+),([^,()]+)\)$/;
+const datasetUrnPrefix = "urn:li:dataset:(";
+const dataPlatformUrnPrefix = "urn:li:dataPlatform:";
+const invalidRawComponentCharacter = /[(),]/;
+const invalidPercentEscape = /%(?![0-9A-Fa-f]{2})/;
+
+function isCanonicalUrnComponent(value: string): boolean {
+  return (
+    value.length > 0 &&
+    !invalidRawComponentCharacter.test(value) &&
+    !invalidPercentEscape.test(value)
+  );
+}
 
 function platformQualifiedUrnIdentity(urn: string): string | undefined {
-  const match = datasetUrnPattern.exec(urn);
-  const platform = match?.[1];
-  const datasetName = match?.[2];
-  return platform === undefined || datasetName === undefined
-    ? undefined
-    : `${platform}:${datasetName}`;
+  if (!urn.startsWith(datasetUrnPrefix) || !urn.endsWith(")")) return undefined;
+
+  const components = urn.slice(datasetUrnPrefix.length, -1).split(",");
+  if (components.length !== 3) return undefined;
+
+  const [platformUrn, datasetName, environment] = components;
+  if (
+    platformUrn === undefined ||
+    datasetName === undefined ||
+    environment === undefined ||
+    !platformUrn.startsWith(dataPlatformUrnPrefix) ||
+    !isCanonicalUrnComponent(platformUrn) ||
+    !isCanonicalUrnComponent(datasetName) ||
+    !isCanonicalUrnComponent(environment)
+  ) {
+    return undefined;
+  }
+
+  const platform = platformUrn.slice(dataPlatformUrnPrefix.length);
+  return platform.length === 0 ? undefined : `${platform}:${datasetName}`;
 }
 
 export function resolveDataset(
