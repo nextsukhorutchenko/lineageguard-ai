@@ -19,6 +19,11 @@ import {
   schemaResponseSchema,
   searchResponseSchema,
 } from "./schemas.js";
+import {
+  createBoundedMcpClose,
+  type OwnedMcpToolCallOptions,
+  runWithMcpToolDeadline,
+} from "./mcp-boundary-policy.js";
 
 type ReadToolName = ToolTraceEntry["tool"];
 
@@ -43,10 +48,7 @@ export interface ToolCallRequest {
 }
 
 export interface McpToolClient {
-  callTool(
-    request: ToolCallRequest,
-    options?: { readonly signal?: AbortSignal },
-  ): Promise<CallToolResult>;
+  callTool(request: ToolCallRequest, options: OwnedMcpToolCallOptions): Promise<CallToolResult>;
   getServerInfo(): DataHubServerInfo;
   close(): Promise<void>;
 }
@@ -112,12 +114,15 @@ function mergeLineageAssets(left: LineageAsset | undefined, right: LineageAsset)
 
 export class DataHubMcpCatalog implements DataHubCatalog {
   readonly #trace: Array<ToolTraceEntry | undefined> = [];
+  readonly #closeOwnedClient: () => Promise<void>;
   #nextCallNumber = 1;
 
   constructor(
     private readonly client: McpToolClient,
     private readonly secrets: readonly string[] = [],
-  ) {}
+  ) {
+    this.#closeOwnedClient = createBoundedMcpClose(() => client.close());
+  }
 
   async searchDatasets(
     hint: string,
@@ -485,12 +490,8 @@ export class DataHubMcpCatalog implements DataHubCatalog {
     return completed;
   }
 
-  async close(): Promise<void> {
-    try {
-      await this.client.close();
-    } catch {
-      throw new AppError("MCP_UNAVAILABLE", "The DataHub MCP client could not be closed.");
-    }
+  close(): Promise<void> {
+    return this.#closeOwnedClient();
   }
 
   private async call<T>(
@@ -511,13 +512,20 @@ export class DataHubMcpCatalog implements DataHubCatalog {
     };
     this.#trace[traceIndex] = undefined;
 
+    let result: CallToolResult;
     try {
-      const result = await this.client.callTool(
-        request,
-        signal === undefined ? undefined : { signal },
+      result = await runWithMcpToolDeadline(signal, (ownedOptions) =>
+        this.client.callTool(request, ownedOptions),
       );
+    } catch (error) {
+      this.#trace[traceIndex] = { ...traceEntry, status: "error" };
+      throw error;
+    }
+
+    try {
       signal?.throwIfAborted();
       const parsed = parse(decodeJsonToolResult(result));
+      signal?.throwIfAborted();
       this.#trace[traceIndex] = { ...traceEntry, status: "ok" };
       return parsed;
     } catch {

@@ -9,6 +9,10 @@ import { AppError } from "../../errors/app-error.js";
 import { redact } from "../../security/redact.js";
 import { sanitizeBoundaryText } from "../../security/sanitize-output.js";
 import type { McpToolClient, ToolCallRequest } from "./datahub-mcp-catalog.js";
+import {
+  createBoundedMcpClose,
+  type OwnedMcpToolCallOptions,
+} from "./mcp-boundary-policy.js";
 
 const MAX_STDERR_CHARACTERS = 4_096;
 
@@ -34,7 +38,7 @@ interface SdkToolClient {
   callTool(
     request: ToolCallRequest,
     resultSchema?: typeof CallToolResultSchema,
-    options?: { readonly signal?: AbortSignal },
+    options?: OwnedMcpToolCallOptions,
   ): ReturnType<Client["callTool"]>;
   listTools(
     params?: { readonly cursor?: string },
@@ -186,6 +190,7 @@ export async function connectOwnedDataHubMcpClient(
   signal?: AbortSignal,
 ): Promise<McpToolClient> {
   signal?.throwIfAborted();
+  const closeOwnedClient = createBoundedMcpClose(() => client.close());
   const deadline = AbortSignal.timeout(15_000);
   const connectionSignal = signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
 
@@ -194,13 +199,24 @@ export async function connectOwnedDataHubMcpClient(
     await listAndAssertRequiredReadOnlyTools(client, connectionSignal);
     return toDataHubMcpToolClient(client, secrets);
   } catch {
-    try {
-      await client.close();
-    } catch {
-      // Startup diagnostics remain bounded and private even when cleanup also fails.
+    let primary: unknown = new AppError(
+      "MCP_UNAVAILABLE",
+      "The DataHub MCP subprocess could not be started.",
+    );
+    if (signal?.aborted) {
+      try {
+        signal.throwIfAborted();
+      } catch (error) {
+        primary = error;
+      }
     }
-    if (signal?.aborted) signal.throwIfAborted();
-    throw new AppError("MCP_UNAVAILABLE", "The DataHub MCP subprocess could not be started.");
+
+    try {
+      await closeOwnedClient();
+    } catch {
+      // Startup cleanup is bounded and secondary to the classified startup failure.
+    }
+    throw primary;
   }
 }
 

@@ -1,6 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { createHash } from "node:crypto";
-import { describe, expect, expectTypeOf, it } from "vitest";
+import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { calculateContextCoverage } from "../../domain/context-coverage.js";
 import { loadRuntimeConfig } from "../../config/runtime-config.js";
 import type { RequiredIncompleteReasonCode } from "../../domain/evidence.js";
@@ -19,6 +19,7 @@ import {
   listAndAssertRequiredReadOnlyTools,
   toDataHubMcpToolClient,
 } from "./mcp-client.js";
+import type { OwnedMcpToolCallOptions } from "./mcp-boundary-policy.js";
 
 const DATASET_URN =
   "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.order_details,PROD)";
@@ -33,12 +34,17 @@ function jsonResult(payload: unknown): CallToolResult {
 
 class RecordingMcpClient implements McpToolClient {
   readonly calls: ToolCallRequest[] = [];
+  readonly callOptions: OwnedMcpToolCallOptions[] = [];
   closeCount = 0;
 
   constructor(private readonly results: readonly CallToolResult[]) {}
 
-  async callTool(request: ToolCallRequest): Promise<CallToolResult> {
+  async callTool(
+    request: ToolCallRequest,
+    options: OwnedMcpToolCallOptions,
+  ): Promise<CallToolResult> {
     this.calls.push(request);
+    this.callOptions.push(options);
     const result = this.results[this.calls.length - 1];
     if (!result) throw new Error("The fake has no result for this call.");
     return result;
@@ -52,6 +58,11 @@ class RecordingMcpClient implements McpToolClient {
     return {};
   }
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 const searchPage = (offset: number, total: number, urns: readonly string[]) =>
   jsonResult({
@@ -91,6 +102,319 @@ const lineagePage = (
       truncatedDueToTokenBudget: options.tokenTruncated ?? false,
     },
   });
+
+const ownedReadCases = [
+  {
+    tool: "search",
+    invoke: (catalog: DataHubMcpCatalog, signal?: AbortSignal) =>
+      catalog.searchDatasets("orders", signal === undefined ? {} : { signal }),
+  },
+  {
+    tool: "list_schema_fields",
+    invoke: (catalog: DataHubMcpCatalog, signal?: AbortSignal) =>
+      catalog.listSchemaFields(DATASET_URN, signal === undefined ? {} : { signal }),
+  },
+  {
+    tool: "get_lineage",
+    invoke: (catalog: DataHubMcpCatalog, signal?: AbortSignal) =>
+      catalog.getDownstreamLineage(DATASET_URN, {
+        maxHops: 2,
+        ...(signal === undefined ? {} : { signal }),
+      }),
+  },
+  {
+    tool: "get_entities",
+    invoke: (catalog: DataHubMcpCatalog, signal?: AbortSignal) =>
+      catalog.getEntityContext([DATASET_URN], signal === undefined ? {} : { signal }),
+  },
+] as const;
+
+describe("DataHubMcpCatalog owned boundary", () => {
+  it.each(ownedReadCases)(
+    "expires $tool without a caller signal after fifteen seconds",
+    async ({ tool, invoke }) => {
+      vi.useFakeTimers();
+      let received: OwnedMcpToolCallOptions | undefined;
+      const client: McpToolClient = {
+        async callTool(_request, options) {
+          received = options;
+          return new Promise<never>(() => undefined);
+        },
+        getServerInfo: () => ({}),
+        async close() {},
+      };
+      const catalog = new DataHubMcpCatalog(client);
+      const operation = invoke(catalog);
+      const rejected = expect(operation).rejects.toMatchObject({
+        code: "DATAHUB_UNAVAILABLE",
+        message: "DataHub is unavailable through the MCP adapter.",
+        details: {},
+      });
+
+      expect(received).toMatchObject({ timeout: 15_000, maxTotalTimeout: 15_000 });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await rejected;
+      expect(received?.signal.aborted).toBe(true);
+      expect(catalog.getTrace()).toMatchObject([{ tool, status: "error" }]);
+    },
+  );
+
+  it("preserves the exact caller cancellation while aborting the owned request", async () => {
+    const caller = new AbortController();
+    const classified = new AppError("DATAHUB_UNAVAILABLE", "Parent scope owns cancellation.");
+    let ownedSignal: AbortSignal | undefined;
+    const client: McpToolClient = {
+      async callTool(_request, options) {
+        ownedSignal = options.signal;
+        return new Promise<never>(() => undefined);
+      },
+      getServerInfo: () => ({}),
+      async close() {},
+    };
+    const operation = new DataHubMcpCatalog(client).searchDatasets("orders", {
+      signal: caller.signal,
+    });
+    caller.abort(classified);
+
+    await expect(operation).rejects.toBe(classified);
+    expect(ownedSignal).not.toBe(caller.signal);
+    expect(ownedSignal?.aborted).toBe(true);
+  });
+
+  it("does not let later caller cancellation replace an earlier dependency failure", async () => {
+    const caller = new AbortController();
+    const classified = new AppError("DATAHUB_UNAVAILABLE", "Parent scope owns cancellation.");
+    const deferred = Promise.withResolvers<CallToolResult>();
+    const client: McpToolClient = {
+      callTool() {
+        return deferred.promise;
+      },
+      getServerInfo: () => ({}),
+      async close() {},
+    };
+    const operation = new DataHubMcpCatalog(client).searchDatasets("orders", {
+      signal: caller.signal,
+    });
+    const outcome = operation.then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    const abortAfterDependency = deferred.promise.catch(() => {
+      caller.abort(classified);
+    });
+
+    deferred.reject(new Error("raw dependency failure"));
+    await abortAfterDependency;
+    const settled = await outcome;
+    expect(settled).toEqual({
+      error: expect.objectContaining({
+        code: "DATAHUB_UNAVAILABLE",
+        message: "DataHub is unavailable through the MCP adapter.",
+        details: {},
+      }),
+    });
+    expect("error" in settled && settled.error).not.toBe(classified);
+  });
+
+  it("does not promote a late MCP result to evidence or an ok trace", async () => {
+    vi.useFakeTimers();
+    const deferred = Promise.withResolvers<CallToolResult>();
+    const client: McpToolClient = {
+      async callTool() {
+        return deferred.promise;
+      },
+      getServerInfo: () => ({}),
+      async close() {},
+    };
+    const catalog = new DataHubMcpCatalog(client);
+    const operation = catalog.searchDatasets("orders");
+    const outcome = operation.then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    const settled = await outcome;
+    expect(settled).toEqual({
+      error: expect.objectContaining({
+        code: "DATAHUB_UNAVAILABLE",
+        message: "DataHub is unavailable through the MCP adapter.",
+        details: {},
+      }),
+    });
+
+    deferred.resolve(jsonResult({ start: 0, count: 0, total: 0, searchResults: [] }));
+    await Promise.resolve();
+    expect(settled).not.toHaveProperty("value");
+    expect(catalog.getTrace()).toEqual([
+      expect.objectContaining({ tool: "search", status: "error" }),
+    ]);
+  });
+
+  it("forwards signal, timeout, and maxTotalTimeout unchanged to SDK callTool", async () => {
+    let received: OwnedMcpToolCallOptions | undefined;
+    const client = toDataHubMcpToolClient({
+      async callTool(
+        _request,
+        _schema,
+        options?: {
+          readonly signal?: AbortSignal;
+          readonly timeout?: number;
+          readonly maxTotalTimeout?: number;
+        },
+      ) {
+        received = options as OwnedMcpToolCallOptions;
+        return jsonResult({ start: 0, count: 0, total: 0, searchResults: [] });
+      },
+      getServerVersion() {
+        return undefined;
+      },
+      async close() {},
+    });
+
+    await new DataHubMcpCatalog(client).searchDatasets("orders");
+
+    expect(received).toMatchObject({
+      signal: expect.any(AbortSignal),
+      timeout: 15_000,
+      maxTotalTimeout: 15_000,
+    });
+  });
+
+  it("returns one normal-close settlement and invokes the client once", async () => {
+    const deferred = Promise.withResolvers<void>();
+    let closeCount = 0;
+    const client: McpToolClient = {
+      async callTool() {
+        return jsonResult({});
+      },
+      getServerInfo: () => ({}),
+      async close() {
+        closeCount += 1;
+        return deferred.promise;
+      },
+    };
+    const catalog = new DataHubMcpCatalog(client);
+    const first = catalog.close();
+    const second = catalog.close();
+
+    expect(first).toBe(second);
+    expect(closeCount).toBe(1);
+    deferred.resolve();
+    await first;
+    await catalog.close();
+    expect(closeCount).toBe(1);
+  });
+
+  it("settles a hung normal close at five seconds", async () => {
+    vi.useFakeTimers();
+    let closeCount = 0;
+    const client: McpToolClient = {
+      async callTool() {
+        return jsonResult({});
+      },
+      getServerInfo: () => ({}),
+      async close() {
+        closeCount += 1;
+        return new Promise<never>(() => undefined);
+      },
+    };
+    const operation = new DataHubMcpCatalog(client).close();
+    const rejected = expect(operation).rejects.toMatchObject({
+      code: "MCP_UNAVAILABLE",
+      message: "The DataHub MCP client could not be closed.",
+      details: {},
+    });
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(closeCount).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await rejected;
+    expect(closeCount).toBe(1);
+  });
+
+  it("settles a hung startup close at five seconds with a fixed failure", async () => {
+    vi.useFakeTimers();
+    let closeCount = 0;
+    const client = {
+      async connect() {
+        throw new Error("raw startup failure with secret-token");
+      },
+      async listTools() {
+        return { tools: [] };
+      },
+      async callTool() {
+        return jsonResult({});
+      },
+      getServerVersion() {
+        return undefined;
+      },
+      async close() {
+        closeCount += 1;
+        return new Promise<never>(() => undefined);
+      },
+    };
+    const operation = connectOwnedDataHubMcpClient(client, {} as never, ["secret-token"]);
+    const rejected = expect(operation).rejects.toMatchObject({
+      code: "MCP_UNAVAILABLE",
+      message: "The DataHub MCP subprocess could not be started.",
+      details: {},
+    });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await rejected;
+    expect(closeCount).toBe(1);
+    await expect(operation).rejects.not.toThrow("raw startup failure with secret-token");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not let later caller cancellation replace an earlier startup failure", async () => {
+    vi.useFakeTimers();
+    const caller = new AbortController();
+    const classified = new AppError("DATAHUB_UNAVAILABLE", "Parent scope owns cancellation.");
+    const closeStarted = Promise.withResolvers<void>();
+    let closeCount = 0;
+    const client = {
+      async connect() {
+        throw new Error("raw startup failure");
+      },
+      async listTools() {
+        return { tools: [] };
+      },
+      async callTool() {
+        return jsonResult({});
+      },
+      getServerVersion() {
+        return undefined;
+      },
+      async close() {
+        closeCount += 1;
+        closeStarted.resolve();
+        return new Promise<never>(() => undefined);
+      },
+    };
+    const operation = connectOwnedDataHubMcpClient(client, {} as never, [], caller.signal);
+    const outcome = operation.then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+
+    await closeStarted.promise;
+    caller.abort(classified);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const settled = await outcome;
+    expect(settled).toEqual({
+      error: expect.objectContaining({
+        code: "MCP_UNAVAILABLE",
+        message: "The DataHub MCP subprocess could not be started.",
+        details: {},
+      }),
+    });
+    expect("error" in settled && settled.error).not.toBe(classified);
+    expect(closeCount).toBe(1);
+  });
+});
 
 interface CollectorScenarioResult {
   readonly complete: boolean;
@@ -1730,9 +2054,9 @@ describe("DataHubMcpCatalog", () => {
     let receivedSignal: AbortSignal | undefined;
     const client: McpToolClient = {
       async callTool(_request, options) {
-        receivedSignal = options?.signal;
+        receivedSignal = options.signal;
         return new Promise((_, reject) => {
-          options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), {
+          options.signal.addEventListener("abort", () => reject(options.signal.reason), {
             once: true,
           });
         });
@@ -1748,7 +2072,8 @@ describe("DataHubMcpCatalog", () => {
     controller.abort();
 
     await expect(operation).rejects.toMatchObject({ name: "AbortError" });
-    expect(receivedSignal).toBe(controller.signal);
+    expect(receivedSignal).not.toBe(controller.signal);
+    expect(receivedSignal?.aborted).toBe(true);
     expect(catalog.getTrace()).toMatchObject([{ tool: "search", status: "error" }]);
   });
 
@@ -1869,7 +2194,14 @@ describe("dataHubMcpServerParameters", () => {
       async close() {},
     };
     const client = toDataHubMcpToolClient(sdkClient);
-    const operation = client.callTool({ name: "search", arguments: {} });
+    const operation = client.callTool(
+      { name: "search", arguments: {} },
+      {
+        signal: new AbortController().signal,
+        timeout: 15_000,
+        maxTotalTimeout: 15_000,
+      },
+    );
 
     await expect(operation).rejects.toThrow("DataHub MCP returned an unsupported task result.");
     await expect(operation).rejects.not.toThrow("raw task payload with secret-token");
