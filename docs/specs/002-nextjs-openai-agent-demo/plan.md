@@ -1016,8 +1016,8 @@ Update `NormalizedEvidence` with required `completeness`, `entityContextRetrieva
 ```text
 parse intent
 collect all search pages
-if search is incomplete and no unique exact URN is already present, stop with a collection failure
-resolve only from collected candidates; never infer TARGET_NOT_FOUND from incomplete search
+if search is incomplete, continue only when the user hint is a canonical dataset URN and exactly one collected candidate.urn equals it
+resolve complete search from collected candidates; never infer TARGET_NOT_FOUND from incomplete search
 collect all schema pages
 if schema is incomplete and the source is absent, stop with a collection failure
 validate source field; never infer COLUMN_NOT_FOUND from incomplete schema
@@ -1027,13 +1027,34 @@ request entity context for target plus deduplicated table-lineage URNs
 normalize evidence and calculate Context Coverage
 assess impact with the unchanged assessImpact function
 derive INCOMPLETE_EVIDENCE before existing status rules
-persist the impact report
-close the catalog exactly once
+build the ImpactReportDraft and Markdown in memory
+close the catalog exactly once through the shared five-second bounded idempotent cleanup boundary
+recheck caller cancellation
+publish impact-report.md with create-only semantics
+return the successful run
 ```
 
 Downgrade only an explicit, non-timeout per-URN enrichment gap returned by `getEntityContext` to incomplete optional context and continue with required evidence. Preserve its collection metadata as `entityContextRetrieval`. If the shared signal is aborted, a deadline owns the failure, or the call throws a transport/decode `DATAHUB_UNAVAILABLE`, rethrow it so cleanup and the terminal `DATAHUB_UNAVAILABLE`/`CANCELLED` policy runs. Search, schema, or lineage decode failures remain terminal. Add explicit unknowns for every incomplete required collection and label affected counts as collected lower bounds.
 
-If incomplete search still contains one exact URN, analysis may continue with `search.complete=false`; if it contains no unique exact URN, throw sanitized `DATAHUB_UNAVAILABLE` with `Dataset search was incomplete.` without `TARGET_NOT_FOUND` or a false ambiguity. If incomplete schema contains the source field, analysis may continue with `schema.complete=false`; if it does not, throw sanitized `DATAHUB_UNAVAILABLE` with `Dataset schema was incomplete.` without `COLUMN_NOT_FOUND`. Add tests for all four branches and assert that the two absence codes are emitted only from complete collections. Add a separate timeout test proving an aborted `get_entities` call is terminal, closes the catalog once, and never reaches generation.
+If incomplete search still contains exactly one candidate whose `candidate.urn` equals an explicit
+user hint that passes the canonical dataset-URN parser, analysis may continue with
+`search.complete=false`. Candidate name, explicit `platform:name`, and URN-derived
+`platform:name` matches never establish uniqueness for incomplete search. Every absent,
+duplicated, alias-only, or noncanonical outcome throws sanitized `DATAHUB_UNAVAILABLE` with
+`Dataset search was incomplete.` without `TARGET_NOT_FOUND` or false ambiguity. If incomplete
+schema contains the source field, analysis may continue with `schema.complete=false`; if it does
+not, throw sanitized `DATAHUB_UNAVAILABLE` with `Dataset schema was incomplete.` without
+`COLUMN_NOT_FOUND`. Add tests for all branches and assert that the two absence codes are emitted
+only from complete collections.
+
+All four DataHub reads reuse the approved application boundary in
+`src/datahub/mcp/mcp-boundary-policy.ts`: each call owns 15 seconds beneath the workflow budget,
+passes explicit SDK `timeout` and `maxTotalTimeout`, and validates the complete result against the
+1 MiB / depth-64 / 100,000-node budget plus tool-specific schemas. Normal close owns five seconds
+and one cached settlement. Close rejection or expiry after otherwise successful analysis is
+`MCP_UNAVAILABLE`, publishes no impact report, never makes `ChangeContext` ready, and cannot enter
+agent generation. Primary analysis failure remains authoritative; writer failure after close
+remains `ARTIFACT_WRITE_FAILED`.
 
 Add `INCOMPLETE_EVIDENCE` to `src/domain/run-result.ts`. `deriveStatus` must return it whenever `evidence.completeness.complete` is false; otherwise retain the current `INSUFFICIENT_METADATA`, `COMPLETED`, and `COMPLETED_WITH_LIMITATIONS` logic. Do not change `assessImpact` or any score factor.
 
@@ -5769,6 +5790,11 @@ describe("createDeadline", () => {
 
 Add workflow tests with a catalog call that waits for `options.signal.abort`. Assert the terminal snapshot is `DATAHUB_UNAVAILABLE`, `closeCount === 1`, provider generation calls remain zero, the final four artifact paths do not exist, and resolving the original pending promise afterward cannot emit `COMPLETED`.
 
+Add an otherwise-successful analysis whose catalog close rejects and one whose close expires at the
+shared five-second boundary. Both must terminate as `MCP_UNAVAILABLE`, observe `closeCount === 1`,
+leave no legacy `impact-report.md`, never make deterministic context ready, make zero provider
+generation calls, and leave no package manifest or finalized package.
+
 Add browser-cancellation tests at the workflow boundary. Before package rename, assert the sanitized `CANCELLED` snapshot is persisted and emitted exactly once while the callback remains connected. With a callback that simulates a disconnected stream and returns without throwing, assert persistence still succeeds and `loadRunSnapshot` returns `CANCELLED`. At the storage barrier immediately after rename, assert reload returns `COMPLETED`, no cancellation diagnostic overwrites it, and a closed response merely omits the last event.
 
 Add a connection test whose fake SDK client never completes `connect`; abort the 15-second connection signal, then assert the SDK client `close()` is called exactly once and the safe error code is `MCP_UNAVAILABLE`.
@@ -5906,6 +5932,12 @@ In `connectDataHubMcp`, create the 15-second child of the supplied scope; pass t
 
 In `runAgentWorkflow`, wrap the raw browser/request signal with `createRequestAbortScope`, then create the 95-second workflow child and 90-second agent child before calling the provider. Inside `analyze_rename_change`, create one 55-second DataHub child of the agent scope and pass the scope plus recorder to `createCatalog`, while passing its exact raw signal to every `runImpactAnalysis` call. Catch its own timeout as `DATAHUB_UNAVAILABLE`, but propagate an upstream agent expiry as `GENERATION_FAILED`, an upstream workflow expiry as `CANCELLED`, and request cancellation as `CANCELLED`. The 55-second owner must expire before the 60-second Agents SDK tool timeout when started together, avoiding a race with generic tool failure. A timeout during `get_entities` is part of this same analysis deadline and must never be downgraded to an optional context gap. Dispose every scope in its owning `finally`.
 
+The workflow-owned 55-second DataHub-analysis scope is a parent budget and classification owner; it
+does not replace or lengthen the shared adapter's 15-second per-call deadline or five-second close
+deadline. A shared per-call expiry remains fixed `DATAHUB_UNAVAILABLE`; a shared close
+rejection/expiry remains fixed `MCP_UNAVAILABLE`. Both settle before the parent budget and suppress
+late results.
+
 Task 9A must also replace Task 9's `signal: deps.signal` on `persistCompletedRun` with `signal: workflowScope.signal`. That exact classified 95-second signal must reach every staged write and the pre-rename check in `commitPackageAtomically`; a live browser signal cannot outlast and bypass the workflow deadline. Add a barrier-controlled fake-timer test that expires `WORKFLOW_TIMEOUT` between staged file writes, then releases the writer: staging is removed, no rename/package appears, and the only authoritative terminal snapshot is `CANCELLED`.
 
 Create the deadline-event accumulator before the first transition. Pass it through the MCP connection owner and provider boundary, record each instantiated owner/attempt exactly once, and include its immutable snapshot plus the exact policy in every terminal `terminalSnapshot` call. A deadline that is never instantiated has no event. Completed owners record `completed`; the owner that expires records `expired`; already-instantiated owners interrupted by parent cancellation record `cancelled`. The SDK analysis-tool timeout remains visible in policy but produces no duplicate event. Tests must use a fake clock/timer and compare exact records rather than sleeping. Add a two-attempt generation case that yields two `GENERATION_TIMEOUT` records and a maximal case with exactly six events; a seventh event or duplicate owner/attempt must fail schema validation.
@@ -5950,7 +5982,11 @@ Because the 90-second agent owner can expire before the first tool, during analy
 
 Add two explicit fake-timer workflow regressions. A provider that ignores work until the 90-second agent owner expires must persist and emit exactly one `GENERATION_FAILED` snapshot with `AGENT_TIMEOUT: expired`, `WORKFLOW_TIMEOUT: completed`, and no route fallback. A post-agent pre-commit hook that remains pending until the 95-second workflow owner expires must persist and emit exactly one `CANCELLED` snapshot with `AGENT_TIMEOUT: completed` and `WORKFLOW_TIMEOUT: expired`; resolving either stale promise afterward must not emit `COMPLETED`. Both tests reload the diagnostic snapshot from disk and compare the full exact bounded deadline-event array.
 
-The existing `runImpactAnalysis` `finally`-equivalent close path remains the sole owner after successful catalog creation. `connectDataHubMcp` owns cleanup before catalog creation succeeds. Do not close the same client from the route handler.
+The existing `runImpactAnalysis` close-before-publication path remains the sole owner after
+successful catalog creation: build the report in memory, close through the shared bounded
+idempotent boundary, recheck cancellation, then publish through the create-only writer.
+`connectDataHubMcp` owns cleanup before catalog creation succeeds. Do not close the same client from
+the route handler.
 
 - [ ] **Step 5: Prove cleanup, late-result suppression, and preserved partial analysis**
 
