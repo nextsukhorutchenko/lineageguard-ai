@@ -4,7 +4,7 @@
 
 **Decision:** Three thin, implicitly invocable repository skills
 
-**Status:** Proposed — conversational design approved; written specification pending review
+**Status:** Approved
 
 ## Context
 
