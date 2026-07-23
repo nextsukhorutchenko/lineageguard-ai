@@ -6,8 +6,11 @@ import {
   open,
   readFile,
   readdir,
+  rename,
+  rmdir,
   rm,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -176,8 +179,8 @@ function createCliDependencies(
     capture: async (config, destination) =>
       writeFixturePayloads(ordered, config.datahubGmsToken, destination),
     openCompletionMarker: (path) => open(path, "wx"),
-    removeCandidate: (path) =>
-      rm(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }),
+    removeCandidateEntry: (path) => unlink(path),
+    removeCandidate: (path) => rmdir(path),
   };
   return { ...defaults, ...overrides };
 }
@@ -464,6 +467,43 @@ describe("fixture capture CLI", () => {
     expect(output.chunks).toEqual([]);
   });
 
+  it("rejects a regular root component substituted while creating the nested root", async () => {
+    const sandbox = await createTemporaryDirectory("lineageguard-capture-root-identity-");
+    const repositoryRoot = join(sandbox, "repository");
+    const displacedTemporaryRoot = join(sandbox, "validated-tmp");
+    await mkdir(repositoryRoot);
+    const output = createRecordingWriter();
+    let captureCalled = false;
+    let markerOpened = false;
+
+    await expect(
+      runFixtureCaptureCli(
+        createCliDependencies(repositoryRoot, output.writer, {
+          createDirectory: async (path) => {
+            if (relative(repositoryRoot, path) === join("tmp", "datahub-fixture-captures")) {
+              await rename(join(repositoryRoot, "tmp"), displacedTemporaryRoot);
+              await mkdir(join(repositoryRoot, "tmp"));
+            }
+            await mkdir(path);
+          },
+          capture: async () => {
+            captureCalled = true;
+            throw new Error("Capture must not run for a substituted root.");
+          },
+          openCompletionMarker: async (path) => {
+            markerOpened = true;
+            return open(path, "wx");
+          },
+        }),
+      ),
+    ).rejects.toThrow("Fixture capture path is unsafe.");
+
+    expect(captureCalled).toBe(false);
+    expect(markerOpened).toBe(false);
+    await expect(access(displacedTemporaryRoot)).resolves.toBeUndefined();
+    expect(output.chunks).toEqual([]);
+  });
+
   it("rejects a linked candidate without traversing it during cleanup", async () => {
     const sandbox = await createTemporaryDirectory("lineageguard-capture-child-link-");
     const repositoryRoot = join(sandbox, "repository");
@@ -513,6 +553,43 @@ describe("fixture capture CLI", () => {
     ).rejects.toThrow("Fixture capture path is unsafe.");
 
     await expect(readFile(sentinel, "utf8")).resolves.toBe("keep\n");
+    expect(output.chunks).toEqual([]);
+  });
+
+  it("does not publish a regular directory substituted for the owned candidate", async () => {
+    const repositoryRoot = await createTemporaryDirectory(
+      "lineageguard-capture-candidate-identity-",
+    );
+    const output = createRecordingWriter();
+    let candidate: string | undefined;
+    let displacedCandidate: string | undefined;
+    const dependencies = createCliDependencies(repositoryRoot, output.writer, {
+      createCandidateDirectory: async (prefix) => {
+        candidate = await mkdtemp(prefix);
+        return candidate;
+      },
+      capture: async (config, destination) => {
+        const written = await writeFixturePayloads(ordered, config.datahubGmsToken, destination);
+        displacedCandidate = join(dirname(destination), "capture-displaced");
+        await rename(destination, displacedCandidate);
+        await mkdir(destination);
+        await writeFixturePayloads(ordered, config.datahubGmsToken, destination);
+        return written;
+      },
+      removeCandidate: async () => {
+        throw new Error("Substituted directories must not be removed.");
+      },
+    });
+
+    await expect(runFixtureCaptureCli(dependencies)).rejects.toThrow(
+      "Fixture capture path is unsafe.",
+    );
+    if (candidate === undefined || displacedCandidate === undefined) {
+      throw new Error("Expected both candidate directories.");
+    }
+    await expect(access(candidate)).resolves.toBeUndefined();
+    await expect(access(displacedCandidate)).resolves.toBeUndefined();
+    await expect(access(join(candidate, fixtureCompletionMarker))).rejects.toThrow();
     expect(output.chunks).toEqual([]);
   });
 
@@ -577,6 +654,36 @@ describe("fixture capture CLI", () => {
     expect(output.chunks).toEqual([]);
   });
 
+  it("refuses cleanup when a regular directory replaces the owned candidate", async () => {
+    const repositoryRoot = await createTemporaryDirectory("lineageguard-capture-cleanup-identity-");
+    const output = createRecordingWriter();
+    const primary = new Error("capture failed after candidate substitution");
+    let candidate: string | undefined;
+    let displacedCandidate: string | undefined;
+    const dependencies = createCliDependencies(repositoryRoot, output.writer, {
+      createCandidateDirectory: async (prefix) => {
+        candidate = await mkdtemp(prefix);
+        return candidate;
+      },
+      capture: async (_config, destination) => {
+        await writeFile(join(destination, fixtureFileNames[0]), "original\n", "utf8");
+        displacedCandidate = join(dirname(destination), "capture-cleanup-displaced");
+        await rename(destination, displacedCandidate);
+        await mkdir(destination);
+        throw primary;
+      },
+    });
+
+    await expect(runFixtureCaptureCli(dependencies)).rejects.toBe(primary);
+    if (candidate === undefined || displacedCandidate === undefined) {
+      throw new Error("Expected both candidate directories.");
+    }
+    await expect(access(candidate)).resolves.toBeUndefined();
+    await expect(access(displacedCandidate)).resolves.toBeUndefined();
+    await expect(access(join(candidate, fixtureCompletionMarker))).rejects.toThrow();
+    expect(output.chunks).toEqual([]);
+  });
+
   it("leaves cleanup-failed output unmarked and preserves the primary failure", async () => {
     const repositoryRoot = await createTemporaryDirectory("lineageguard-capture-cleanup-");
     const output = createRecordingWriter();
@@ -602,6 +709,80 @@ describe("fixture capture CLI", () => {
     await expect(runFixtureCaptureCli(dependencies)).rejects.toBe(primary);
     if (candidate === undefined) throw new Error("Expected a candidate directory.");
     await expect(access(candidate)).resolves.toBeUndefined();
+    await expect(access(join(candidate, fixtureCompletionMarker))).rejects.toThrow();
+    expect(output.chunks).toEqual([]);
+  });
+
+  it("refuses final cleanup when a completion marker appears before directory removal", async () => {
+    const repositoryRoot = await createTemporaryDirectory("lineageguard-capture-cleanup-marker-");
+    const output = createRecordingWriter();
+    const primary = new Error("capture failed before cleanup marker race");
+    let candidate: string | undefined;
+    const dependencies = createCliDependencies(repositoryRoot, output.writer, {
+      createCandidateDirectory: async (prefix) => {
+        candidate = await mkdtemp(prefix);
+        return candidate;
+      },
+      capture: async (_config, destination) => {
+        await writeFile(join(destination, fixtureFileNames[0]), "{}\n", "utf8");
+        throw primary;
+      },
+      beforeCleanupRemoval: async (path) => {
+        if (candidate !== undefined && path === candidate) {
+          await writeFile(join(candidate, fixtureCompletionMarker), "", {
+            encoding: "utf8",
+            flag: "wx",
+          });
+        }
+      },
+    });
+
+    await expect(runFixtureCaptureCli(dependencies)).rejects.toBe(primary);
+    if (candidate === undefined) throw new Error("Expected a candidate directory.");
+    await expect(lstat(join(candidate, fixtureCompletionMarker))).resolves.toMatchObject({
+      size: 0,
+    });
+    await expect(readdir(candidate)).resolves.toEqual([fixtureCompletionMarker]);
+    expect(output.chunks).toEqual([]);
+  });
+
+  it("refuses cleanup when a regular entry is substituted before its removal", async () => {
+    const repositoryRoot = await createTemporaryDirectory("lineageguard-capture-cleanup-entry-");
+    const output = createRecordingWriter();
+    const primary = new Error("capture failed before cleanup entry race");
+    const replacement = "do not remove replacement\n";
+    let candidate: string | undefined;
+    let displacedEntry: string | undefined;
+    let substituted = false;
+    const dependencies = createCliDependencies(repositoryRoot, output.writer, {
+      createCandidateDirectory: async (prefix) => {
+        candidate = await mkdtemp(prefix);
+        return candidate;
+      },
+      capture: async (_config, destination) => {
+        await writeFile(join(destination, fixtureFileNames[0]), "original\n", "utf8");
+        throw primary;
+      },
+      beforeCleanupRemoval: async (path) => {
+        if (
+          !substituted &&
+          candidate !== undefined &&
+          path === join(candidate, fixtureFileNames[0])
+        ) {
+          substituted = true;
+          displacedEntry = join(dirname(candidate), "displaced-entry.txt");
+          await rename(path, displacedEntry);
+          await writeFile(path, replacement, "utf8");
+        }
+      },
+    });
+
+    await expect(runFixtureCaptureCli(dependencies)).rejects.toBe(primary);
+    if (candidate === undefined || displacedEntry === undefined) {
+      throw new Error("Expected entry substitution.");
+    }
+    await expect(readFile(join(candidate, fixtureFileNames[0]), "utf8")).resolves.toBe(replacement);
+    await expect(readFile(displacedEntry, "utf8")).resolves.toBe("original\n");
     await expect(access(join(candidate, fixtureCompletionMarker))).rejects.toThrow();
     expect(output.chunks).toEqual([]);
   });
@@ -686,6 +867,38 @@ describe("fixture capture CLI", () => {
     expect(output.chunks.join("")).not.toContain("C:\\private");
   });
 
+  it("keeps completion authoritative when marker-handle close throws synchronously", async () => {
+    const repositoryRoot = await createTemporaryDirectory(
+      "lineageguard-capture-marker-sync-close-",
+    );
+    const output = createRecordingWriter();
+    const closeFailure = new Error(`sync close failed at C:\\private\\capture with ${token}`);
+    const dependencies = createCliDependencies(repositoryRoot, output.writer, {
+      openCompletionMarker: async (path) => {
+        const handle = await open(path, "wx");
+        return {
+          close: () => {
+            void handle.close().catch(() => undefined);
+            throw closeFailure;
+          },
+        };
+      },
+    });
+
+    const result = await runFixtureCaptureCli(dependencies);
+
+    const marker = await lstat(join(result.destination, fixtureCompletionMarker));
+    expect(marker.isFile()).toBe(true);
+    expect(marker.size).toBe(0);
+    expect(output.chunks).toEqual([
+      expect.stringMatching(
+        /^Captured 5 sanitized DataHub fixture candidates at tmp\/datahub-fixture-captures\/capture-/,
+      ),
+    ]);
+    expect(output.chunks.join("")).not.toContain(token);
+    expect(output.chunks.join("")).not.toContain("C:\\private");
+  });
+
   it("keeps a completed candidate successful when stdout throws", async () => {
     const repositoryRoot = await createTemporaryDirectory("lineageguard-capture-stdout-failure-");
     const stderr = createRecordingWriter();
@@ -694,6 +907,29 @@ describe("fixture capture CLI", () => {
       write: () => {
         throw new Error(`stdout failed at C:\\\\private\\\\capture with ${token}`);
       },
+    };
+    const dependencies = createCliDependencies(repositoryRoot, stdout, {
+      createCandidateDirectory: async (prefix) => {
+        candidate = await mkdtemp(prefix);
+        return candidate;
+      },
+    });
+
+    await expect(runFixtureCaptureCommand(dependencies, stderr.writer)).resolves.toBe(0);
+    if (candidate === undefined) throw new Error("Expected a candidate directory.");
+    await expect(lstat(join(candidate, fixtureCompletionMarker))).resolves.toMatchObject({
+      size: 0,
+    });
+    expect(stderr.chunks).toEqual([]);
+  });
+
+  it("keeps a completed candidate successful when stdout rejects asynchronously", async () => {
+    const repositoryRoot = await createTemporaryDirectory("lineageguard-capture-stdout-rejection-");
+    const stderr = createRecordingWriter();
+    let candidate: string | undefined;
+    const stdout: FixtureCaptureTextWriter = {
+      write: () =>
+        Promise.reject(new Error(`stdout rejected at C:\\\\private\\\\capture with ${token}`)),
     };
     const dependencies = createCliDependencies(repositoryRoot, stdout, {
       createCandidateDirectory: async (prefix) => {
