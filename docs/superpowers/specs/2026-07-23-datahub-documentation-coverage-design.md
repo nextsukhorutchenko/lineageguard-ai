@@ -4,7 +4,7 @@
 
 **Decision:** Approach A — evidence-based documentation delta
 
-**Status:** Approved approach; awaiting written-design review
+**Status:** Approved
 
 ## Context
 

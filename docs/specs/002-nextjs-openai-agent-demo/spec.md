@@ -6,7 +6,7 @@
 
 **Date:** 2026-07-22
 
-**Last amended:** 2026-07-23 — approved tutorial-derived runtime proof, live preflight, provenance, and reviewer-gate scope
+**Last amended:** 2026-07-23 — approved tutorial, operator-documentation, MCP, Agent Context Kit, and DataHub Skills source coverage
 
 **Project:** LineageGuard AI
 
@@ -80,6 +80,8 @@ The manager agent has only high-level, application-owned tools. It has no raw Da
 The application-owned DataHub adapter may invoke only `search`, `list_schema_fields`, `get_lineage`, and `get_entities`. The first three produce required impact evidence; `get_entities` supplies bounded contextual enrichment. The MCP Server may advertise other tools, but they remain unreachable through the application allowlist and are never exposed to the manager agent.
 
 The existing domain, DataHub adapter, evidence normalization, impact assessment, redaction, and safe artifact-writing modules remain authoritative. The browser and agent layers must reuse these modules rather than duplicate their behavior.
+
+This ordering is the approved context-first use of Agent Context Kit guidance: DataHub context is collected, normalized, bounded, and classified before it is supplied to the agent. Agent Context Kit remains an architecture reference, not a second DataHub client or runtime framework.
 
 The OpenAI integration uses the official TypeScript Agents SDK and the Responses API path it provides. Agent output must use an explicit structured schema. The default model is configurable and initially set to `gpt-5.6-sol` with `medium` reasoning effort; the effective model and reasoning setting must be recorded in sanitized run metadata.
 
@@ -470,6 +472,14 @@ ownership context, and run the live MCP integration check. The guide must distin
 endpoint from the GMS endpoint, require `uv` and Python 3.11 or newer for the pinned MCP server,
 and include personal-access-token troubleshooting without enabling mutations.
 
+The live guide must configure the self-hosted MCP subprocess with shell-local `DATAHUB_GMS_URL` and `DATAHUB_GMS_TOKEN`, resolve `uvx` to an absolute executable path, and must not use `@latest` or place a personal access token in a URL. The guide's absolute-path remedy is upstream guidance; locating it with `Get-Command uvx` and supplying it through `DATAHUB_MCP_UVX_PATH` is LineageGuard's certified Windows adaptation.
+
+The live-verification record must identify the intended DataHub account and search-visibility scope when available. A changed Default View invalidates comparison with certified search evidence; the operator must not disable or bypass the view to recover an expected result. No effect on schema, lineage, or entity reads may be claimed unless the pinned live contract test establishes it.
+
+The documentation must distinguish three separate boundaries: `datahub/datahub` is the default local frontend login, a shell-local PAT authenticates MCP to GMS, and `OPENAI_API_KEY` authenticates only the server-side OpenAI provider. Default frontend credentials are permitted only on an isolated localhost Quickstart. UI or connector ingestion, DataHub Secrets, user onboarding, custom JAAS, and OIDC are not runtime prerequisites or workarounds; production credential changes and OIDC remain deferred hardening references.
+
+Normal live recovery may inspect expected containers and targeted logs but must not automate `datahub docker nuke`, broad Docker pruning, database repair, or index repair. A local nuke may be documented only as an explicit data-loss action after backup and operator choice.
+
 ### FR-031 — Configuration Validation
 
 Startup and request handling must fail clearly when required live-mode configuration is absent or malformed. Configuration errors must not leak secret values.
@@ -546,6 +556,8 @@ Readiness must never depend on a total advertised-tool count. Tutorial totals su
 10 read tools, or 12 write tools are version- and configuration-dependent observations, not an
 API contract.
 
+The current DataHub MCP guide is deployment, authentication, and troubleshooting guidance rather than the executable application contract. Certified local mode must continue to launch `uvx mcp-server-datahub@0.6.0 --transport stdio`; the pinned `v0.6.0` source and release, runtime discovery, and application tests define supported names and parameters. `@latest`, managed remote HTTP/OAuth, and any newly advertised tool must not silently expand the certified runtime.
+
 ### FR-040 — Hackathon Submission Package
 
 The repository must contain English submission materials for the `Metadata-Aware Code Generation & Development` category: official-resource attribution, license and third-party disclosure, new-project and AI-tool disclosure, judging-criteria mapping, sample-output guide, live/replay explanation, submission checklist, and a timed video script shorter than three minutes.
@@ -560,11 +572,17 @@ judging map must visibly connect DataHub asset resolution, schema, table/column 
 ownership/context coverage, and the four-operation read-only trail to the 24/11/90 result and
 `BLOCK_DIRECT_RENAME` decision.
 
+The resource inventory must also list and classify all twelve unique official resources in the approved DataHub documentation-coverage design. It must pin the DataHub Skills repository to commit `864ee5800c55eb90628f290bd8e91602b0a3e28e`, record its Apache-2.0 license, and state whether any code or prose was copied. The MCP guide is a moving deployment reference, Agent Context Kit is an architecture reference, and DataHub Skills is a workflow-format and contribution reference; none becomes a runtime dependency or an authorization source.
+
 ### FR-041 — Read-Only DataHub Skill Candidate
 
-After the core browser demo passes its offline gate, the repository must include one English, Apache-2.0-compatible LineageGuard schema-change impact skill patterned after the official DataHub Skills format. It must preserve the same read-only, completeness-first, no-SQL-execution boundaries and must use actual pinned MCP parameter names.
+After the core browser demo passes its offline gate, the repository must include one English, Apache-2.0-compatible LineageGuard schema-change impact skill authored as a clean-room contribution candidate with reference to the official DataHub Skills guidance and repository commit `864ee5800c55eb90628f290bd8e91602b0a3e28e`. It must preserve the same MCP-only, read-only, completeness-first, no-SQL-execution boundaries and use the actual pinned `0.6.0` MCP parameter names.
 
-The skill is a development and open-source contribution artifact, not a runtime dependency or a third agent tool. Publishing it upstream is deferred until separately approved.
+The skill is a development and open-source contribution artifact, not a runtime dependency or a third agent tool. The product and CI must not install the official DataHub Skills bundle. Publishing it upstream is deferred until separately approved.
+
+The candidate must be written clean-room in a self-contained `SKILL.md`, `references/`, and `templates/` layout. It must present human-readable entity names with full evidence URNs and separate facts, inferences, scope, limitations, unknowns, recommendations, and human approval gates. It must not copy the upstream broad `allowed-tools: Bash(datahub *)` permission, CLI or GraphQL fallbacks, mutation-capable companion workflows, or the abstract `get_lineage(urn, direction, depth)` example.
+
+Local validation proves only candidate readiness. Before any separately approved upstream pull request, the candidate must be placed in a clean fork and checked against the upstream revision's then-current mandatory pre-commit, formatting, lint, CI, and pull-request-title requirements. The inspected repository's `tests/run-tests.sh` requires Claude Code and covers connector skills, so it is not functional acceptance evidence for this lineage candidate and cannot justify a contribution-bonus claim.
 
 ## Artifact Execution Classifications
 
@@ -756,7 +774,7 @@ Formatting, linting, type checking, unit tests, contract tests, fixture integrat
 
 ### AC-015 — Repeatable Local Demo
 
-English documentation enables a clean checkout to run both fixture replay and the opt-in live local demo with the required services and environment configuration.
+English documentation enables a clean checkout to run fixture replay and the opt-in live local demo with pinned DataHub and MCP versions, shell-local credentials, an absolute `uvx` path, and the intended account and search-visibility scope. It does not use `@latest`, place a PAT in a URL, or disable DataHub authorization to reproduce certified evidence.
 
 ### AC-016 — Fail-Closed Collection
 
@@ -774,6 +792,8 @@ The golden replay produces the same Context Coverage percentage and per-dimensio
 
 Live contract tests accept only the four application-owned read operations, reject a missing required tool or missing/false `readOnlyHint`, ignore extra advertised tools, and prove that the manager agent still receives exactly two high-level tools.
 
+Documentation and repository validation distinguish the moving MCP guide from the pinned `0.6.0` contract, distinguish the guide's absolute-path remedy from LineageGuard's Windows configuration, and scope Default View claims to MCP searches unless a pinned live test proves behavior for another allowed read.
+
 ### AC-020 — Cancellation and Deadline Cleanup
 
 Tests prove that browser cancellation before atomic rename, MCP connection timeout, DataHub-read timeout, nested generation/agent timeout, overall workflow timeout, and an injected mid-package write failure reach the correct sanitized terminal path, close owned resources, cannot later publish `COMPLETED`, remove staging data, and leave no committed manifest or downloadable finalized migration package. A separate race test proves that cancellation immediately after rename cannot relabel or delete the already committed completed package.
@@ -788,6 +808,8 @@ visible runtime-proof contract with both exact application-tool names, and an ex
 mutations-disabled boundary. Separately recorded live evidence must prove GMS health, UI
 inspection, and the MCP integration check. The recorded demo shows how DataHub context changes the
 migration decision rather than merely displaying a `Powered by DataHub` claim.
+
+Repository validation also proves that all twelve approved official resources are present with their project classifications, that the pinned DataHub Skills commit and license are recorded, and that the local skill contains the clean-room evidence and approval structure without broad shell permissions, CLI/GraphQL fallbacks, stale MCP parameters, SQL execution, mutation, or autonomous approval. It must not represent local linting or the connector-only upstream test runner as an accepted upstream contribution.
 
 ## Required Deliverables
 
@@ -890,3 +912,5 @@ against <https://docs.datahub.com/docs/quickstart>,
 counts are descriptive and configuration-dependent, not an application contract. Its mutation,
 automatic-owner, and SQL/action examples remain intentionally outside this read-only runtime; no
 tutorial code or image is copied.
+
+The approved 2026-07-23 agent-context amendment re-reviewed the current [DataHub Skills guide](https://docs.datahub.com/docs/dev-guides/agent-context/skills), [MCP guide](https://docs.datahub.com/docs/features/feature-guides/mcp), [Agent Context Kit guide](https://docs.datahub.com/docs/dev-guides/agent-context/agent-context), and [DataHub Skills repository](https://github.com/datahub-project/datahub-skills) at commit `864ee5800c55eb90628f290bd8e91602b0a3e28e`. These sources contribute clean-room workflow, troubleshooting, and contribution patterns only; the pinned four-operation MCP adapter and two application-owned agent tools remain the complete runtime authority.
