@@ -44,7 +44,7 @@ The same branch review also identified two documentation discrepancies:
 - Preserve create-only fixture writes.
 - Keep committed fixtures unchanged during live capture.
 - Produce exactly five canonical, strictly validated, sanitized candidate
-  files.
+  fixture files.
 - Keep candidate output beneath a fixed repository-ignored root.
 - Prevent a failed capture from appearing to be a completed candidate.
 - Keep mandatory tests offline, deterministic, and credential-free.
@@ -60,15 +60,17 @@ The same branch review also identified two documentation discrepancies:
   report-status derivation.
 - Changing the meaning of Evidence Completeness or Context Coverage.
 - Adding dependencies, changing the lockfile, or changing CI.
+- Adding a platform-specific native no-replace directory-rename mechanism.
 - Claiming that replay evidence proves current live DataHub state.
 
 ## Considered Approaches
 
 ### A. Fresh repository-ignored candidate directory
 
-Create and atomically publish a unique
-`tmp/datahub-fixture-captures/capture-*` directory for every command invocation
-and write all five files there with create-only semantics.
+Create a unique `tmp/datahub-fixture-captures/capture-*` directory for every
+command invocation, write all five fixture files there with create-only
+semantics, and create a `.complete` marker only after the complete on-disk set
+passes strict validation.
 
 **Advantages**
 
@@ -114,15 +116,55 @@ Require the operator to supply a destination on every command invocation.
 - Increases the risk of accidentally selecting the committed fixture
   directory.
 
+## Completion Publication Options
+
+### A1. Unique directory plus create-only completion marker
+
+Use `mkdtemp` to create the final unique `capture-*` directory without reusing
+an existing path. Write the five fixture files with `wx`, validate the exact
+on-disk set, and atomically create an empty `.complete` marker with `wx` as the
+final completion operation.
+
+**Advantages**
+
+- Uses only portable Node.js filesystem APIs.
+- Does not rename over or replace another directory.
+- A partial directory has no marker and is unambiguously incomplete.
+- Keeps exactly five fixture payloads while making completion machine-checkable.
+
+**Disadvantages**
+
+- A completed candidate contains one additional non-fixture marker file.
+- Operators and future promotion tooling must check the marker and strict
+  fixture set together.
+
+### A2. Preflight followed by ordinary directory rename
+
+Check that the final path is absent and then rename a staging directory.
+
+**Rejected because:** Node.js exposes ordinary rename semantics rather than a
+portable no-replace directory rename. On POSIX systems, an existing empty
+destination directory can be replaced between the preflight and rename. This
+would contradict the no-overwrite contract.
+
+### A3. Platform-specific native no-replace rename
+
+Use a native binding or platform command that exposes no-replace rename
+semantics.
+
+**Rejected because:** it would add a dependency or platform branch, expand the
+security and portability surface, and exceed the smallest safe remediation.
+
 ## Decision
 
-Use Approach A.
+Use Approach A with completion refinement A1.
 
 The command-line entrypoint will create a fresh child beneath
-`tmp/datahub-fixture-captures/`, pass only an owned staging directory to the
-existing live capture boundary, and publish its final `capture-*` name only
-after all five files succeed. The current `.gitignore` already excludes `tmp/`,
-so no ignore-rule change is required.
+`tmp/datahub-fixture-captures/` through collision-safe temporary-directory
+creation and pass only that owned `capture-*` directory to the existing live
+capture boundary. It will create a `.complete` marker only after all five
+fixture files have been re-read and strictly validated. The current
+`.gitignore` already excludes `tmp/`, so no ignore-rule change is required.
 
 Committed fixtures remain read-only inputs to strict replay-schema validation.
 Moving a reviewed candidate into `tests/fixtures/datahub/` remains a separate
@@ -165,19 +207,24 @@ operation. Production defaults will:
 4. reject a symbolic link or Windows junction in any path segment from the
    repository root through the capture root;
 5. use collision-safe temporary-directory creation to create one unique owned
-   `staging-*` child;
-6. pass only that staging child to `captureDataHubFixtures`;
+   `capture-*` child;
+6. pass only that candidate child to `captureDataHubFixtures`;
 7. wait for all five files to complete;
-8. atomically rename the staging child to a matching create-only `capture-*`
-   candidate beneath the same root; and
-9. print one success message containing the count and repository-relative
-   candidate path.
+8. re-read the directory, require exactly the five allowlisted fixture
+   filenames as regular non-link files, and parse every file through its strict
+   replay schema;
+9. atomically create an empty `.complete` marker by opening it with `wx` and
+   treat the successful open as the irreversible completion point;
+10. make a best-effort close of the marker handle without downgrading the
+    already completed candidate if close fails; and
+11. print one success message containing the count and repository-relative
+    candidate path.
 
 The orchestration boundary will accept narrow dependency overrides needed by
-offline tests, including an isolated repository root, capture root, staging
-directory factory, capture function, and logger. Production behavior will
-continue to use the module-anchored repository root, real filesystem, runtime
-configuration, and live capture function.
+offline tests, including an isolated repository root, capture root, candidate
+directory factory, capture function, marker opener, cleanup function, and
+logger. Production behavior will continue to use the module-anchored repository
+root, real filesystem, runtime configuration, and live capture function.
 
 The command will never use `tests/fixtures/datahub/` as its destination.
 An existing `capture-*` path must never be reused, overwritten, traversed, or
@@ -185,30 +232,37 @@ removed.
 
 ### 3. Own and clean failed candidates
 
-The orchestrator owns only the unique staging child it created. If capture or
-final publication fails after that child is created, it will:
+The orchestrator owns only the unique candidate child it created. If capture,
+on-disk validation, or marker open fails before the completion point, it will:
 
 1. verify lexical and physical containment beneath the validated capture root;
 2. reject cleanup when the child or an intervening segment is a symbolic link
    or Windows junction;
-3. make a best-effort recursive removal of only that staging child;
+3. make a best-effort recursive removal of only that unmarked candidate child;
 4. emit no success message; and
 5. rethrow the original failure to the programmatic caller.
 
-Cleanup failure must not convert the capture into success. A staging directory
-that cannot be removed retains its `staging-*` name and therefore cannot be
-mistaken for a completed `capture-*` candidate. Cleanup must never traverse a
-link or junction or target the capture root, committed fixtures, an existing
+Cleanup failure must not convert the capture into success. A candidate directory
+that cannot be removed remains without `.complete` and therefore cannot be
+treated as a completed candidate. Cleanup must never traverse a link or
+junction or target the capture root, committed fixtures, a previously completed
 candidate, or any caller-selected unrelated path.
 
-No `capture-*` candidate exists until all five create-only writes have
-succeeded and same-parent atomic publication completes.
+A `capture-*` directory is complete only when its `.complete` marker is a
+zero-byte regular non-link file and the directory contains exactly the five
+strict regular non-link fixture files plus that marker. The marker is never
+copied into committed fixtures.
+
+Successful creation of the marker through `open("wx")` is the irreversible
+completion point. A later marker-handle close failure is suppressed as a
+resource-cleanup failure: it cannot remove the marker, trigger candidate
+cleanup, change the completed result to failure, or expose a raw diagnostic.
 
 ### 4. Keep programmatic failures and public CLI errors separate
 
-`runFixtureCaptureCli` will preserve and rethrow the original capture or
-publication failure so tests and programmatic callers retain the authoritative
-cause.
+`runFixtureCaptureCli` will preserve and rethrow the original pre-completion
+capture, validation, or marker-open failure so tests and programmatic callers
+retain the authoritative cause.
 
 The executable entrypoint will catch that failure, emit only the fixed public
 message `DataHub fixture capture failed.`, and set a non-zero process exit code.
@@ -234,6 +288,9 @@ Every completed candidate directory contains exactly these files:
 4. `lineage-order-details-customer-id.json`; and
 5. `entity-context-order-details-impact.json`.
 
+It also contains an empty non-fixture `.complete` marker. The marker is created
+atomically and last, and it is not part of the five-fixture replay contract.
+
 The current canonical ordering, normalized `{ items, completeness }` envelopes,
 strict replay schemas, redaction, forbidden-field rules, and entity-context
 URN ordering remain unchanged.
@@ -251,10 +308,13 @@ after the capture time.
 - All five payloads are validated and serialized before the first filesystem
   write.
 - The fixed filename tuple prevents externally derived filenames.
-- Staging and candidate output stay under a physically validated
+- Candidate output stays under a physically validated
   repository-ignored root without links or junctions.
-- Same-parent atomic publication prevents partial staging output from appearing
-  under a `capture-*` candidate name.
+- Collision-safe directory creation prevents candidate-path reuse.
+- The create-only `.complete` marker makes successful publication explicit
+  without relying on overwrite-capable directory rename.
+- Successful exclusive marker open is authoritative; a subsequent handle-close
+  failure cannot make completed output appear failed.
 - The success message uses a repository-relative path, not an unrestricted
   native absolute path.
 - No token, raw MCP response, email/profile data, raw SQL, or diagnostics are
@@ -276,24 +336,30 @@ The offline suite will prove that:
 3. every forbidden entity-context field—`email`, `profile`,
    `relatedDocuments`, `rawSql`, `token`, and `diagnostics`—plus a description
    longer than 2,000 characters is rejected before any output file is written;
-4. the CLI orchestrator creates a unique staging child beneath the supplied
-   capture root, publishes a distinct `capture-*` candidate, and never targets
-   the committed fixture directory;
+4. the CLI orchestrator creates a unique `capture-*` child beneath the supplied
+   capture root and never targets the committed fixture directory;
 5. an existing `capture-*` directory is not reused, overwritten, traversed, or
    removed;
 6. a root or child symbolic link or Windows junction is rejected without
    writing through it or traversing it during cleanup;
-7. the success log exactly contains the five-file count and portable
-   repository-relative candidate path;
-8. a capture failure after a partial staging file removes the owned staging
-   child, preserves the original programmatic failure, publishes no candidate,
-   and emits no success log;
-9. a simulated cleanup failure leaves only a `staging-*` path that cannot be
-   mistaken for a completed candidate;
-10. a raw fake failure containing a native path and token is not present in
+7. `.complete` is absent until the exact five-file on-disk set passes strict
+   replay validation, then exists as a zero-byte regular file;
+8. a missing, extra, malformed, or linked fixture prevents marker creation and
+   success output;
+9. a simulated marker-handle close failure is suppressed after successful
+   exclusive marker open, retains the completed candidate, and still produces
+   normal success output without a raw diagnostic;
+10. the success log exactly contains the five-fixture count and portable
+    repository-relative candidate path;
+11. a capture failure after a partial fixture file removes the owned unmarked
+    candidate, preserves the original programmatic failure, and emits no
+    success log;
+12. a simulated cleanup failure leaves only an unmarked `capture-*` directory
+    that cannot qualify as a completed candidate;
+13. a raw fake failure containing a native path and token is not present in
     public CLI output, while the programmatic runner preserves the original
     error; and
-11. existing canonicalization, deterministic serialization, strict validation,
+14. existing canonicalization, deterministic serialization, strict validation,
     and token-redaction tests continue to pass.
 
 Tests will use isolated temporary directories and injected fakes. Mandatory
@@ -309,7 +375,8 @@ The README will:
 - replace the incorrect four-fixture statement with the five-file contract;
 - explain that the command writes a fresh candidate beneath
   `tmp/datahub-fixture-captures/capture-*`;
-- explain that only the final `capture-*` name represents a complete candidate;
+- explain that only a candidate with an empty `.complete` marker and all five
+  strictly valid fixtures is complete;
 - state that committed fixtures are never overwritten by live capture;
 - state that promotion requires a separate approved deterministic migration
   and review; and
@@ -364,13 +431,17 @@ environment gate.
 
 1. The documented capture command succeeds on a normal clean checkout when its
    live prerequisites are available.
-2. Every successful invocation writes exactly five files to a new
+2. Every successful invocation writes exactly five fixture files plus an empty
+   `.complete` marker to a new
    `tmp/datahub-fixture-captures/capture-*` directory.
 3. The command never writes to or modifies `tests/fixtures/datahub/`.
-4. Every fixture write remains create-only.
-5. A completed candidate appears only after same-parent atomic publication;
-   partial output retains a non-candidate `staging-*` name.
-6. A failed capture publishes no candidate and emits no success message.
+4. Every fixture and marker write remains create-only.
+5. A candidate becomes complete only after the exact five-file set passes
+   strict on-disk validation and an empty `.complete` marker is atomically
+   created last.
+6. A failed capture, validation, or marker open produces no completed candidate
+   and emits no success message; a handle-close failure after successful marker
+   open is suppressed and cannot downgrade completion.
 7. Existing files and candidates are never truncated, overwritten, reused,
    traversed, or removed.
 8. Runtime writes and cleanup reject path escape, symbolic links, and Windows
@@ -387,3 +458,8 @@ environment gate.
 14. Committed fixtures, impact scoring, status derivation, dependencies,
     lockfile, and CI remain unchanged.
 15. All applicable repository verification gates pass.
+
+## References
+
+- [Node.js 22 filesystem API](https://nodejs.org/download/release/v22.18.0/docs/api/fs.html)
+- [POSIX `rename`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/rename.html)
