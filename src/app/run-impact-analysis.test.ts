@@ -1,7 +1,7 @@
 import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
+import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { CollectionResult, DataHubCatalog } from "../datahub/catalog.js";
 import type {
   EntityContext,
@@ -63,6 +63,7 @@ interface FakeCatalogOptions {
   readonly entityContextReasons?: readonly EntityContextIncompleteReasonCode[];
   readonly entityContextError?: Error;
   readonly onEntityContext?: (signal: AbortSignal | undefined) => void;
+  readonly onClose?: () => void | Promise<void>;
 }
 
 function collection<T, R extends string>(
@@ -186,6 +187,7 @@ class FakeCatalog implements DataHubCatalog {
   async close(): Promise<void> {
     this.operations.push("close");
     this.closeCount += 1;
+    await this.#options.onClose?.();
     if (this.#options.closeError) throw this.#options.closeError;
   }
 }
@@ -217,6 +219,8 @@ async function runWith(
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true })));
 });
 
@@ -268,6 +272,28 @@ describe("runImpactAnalysis", () => {
     const factUrns = run.facts.flatMap((fact) => fact.match(/urn:li:dataset:\([^\s]+\)/g) ?? []);
     expect(factUrns.length).toBeGreaterThan(0);
     expect(factUrns.every((urn) => evidenceUrns.has(urn))).toBe(true);
+  });
+
+  it("closes successfully before the final report becomes visible", async () => {
+    const runsRoot = await createRunsRoot();
+    const finalPath = join(runsRoot, RUN_ID, "impact-report.md");
+    let reportExistedWhenCloseStarted = true;
+    const catalog = new FakeCatalog({
+      onClose: async () => {
+        reportExistedWhenCloseStarted = await access(finalPath).then(
+          () => true,
+          () => false,
+        );
+      },
+    });
+
+    const run = await runWith(catalog, runsRoot);
+
+    expect(reportExistedWhenCloseStarted).toBe(false);
+    expect(catalog.closeCount).toBe(1);
+    await expect(readFile(run.artifactPath, "utf8")).resolves.toContain(
+      "# LineageGuard AI Impact Report",
+    );
   });
 
   it("reports table-only lineage with explicit limitations", async () => {
@@ -505,8 +531,9 @@ describe("runImpactAnalysis", () => {
       searchError: primary,
       closeError: new Error("raw close failure with secret-token"),
     });
+    const runsRoot = await createRunsRoot();
 
-    const caught = await runWith(catalog, await createRunsRoot()).catch((error: unknown) => error);
+    const caught = await runWith(catalog, runsRoot).catch((error: unknown) => error);
 
     expect(caught).toBe(primary);
     expect(caught).toMatchObject({
@@ -520,6 +547,7 @@ describe("runImpactAnalysis", () => {
     expect(JSON.stringify(caught)).not.toContain("raw close failure");
     expect(JSON.stringify(caught)).not.toContain("secret-token");
     expect(catalog.closeCount).toBe(1);
+    await expect(access(join(runsRoot, RUN_ID, "impact-report.md"))).rejects.toThrow();
   });
 
   it("never replaces a primary error when suppressed metadata cannot be attached", async () => {
@@ -537,19 +565,55 @@ describe("runImpactAnalysis", () => {
     expect(catalog.closeCount).toBe(1);
   });
 
-  it("surfaces a close failure when analysis otherwise succeeds", async () => {
-    const closeFailure = new AppError("MCP_UNAVAILABLE", "Safe close failure.");
+  it("rejects close failure without publishing a final report", async () => {
+    const runsRoot = await createRunsRoot();
+    const finalPath = join(runsRoot, RUN_ID, "impact-report.md");
+    const closeFailure = new AppError(
+      "MCP_UNAVAILABLE",
+      "The DataHub MCP client could not be closed.",
+    );
     const catalog = new FakeCatalog({ closeError: closeFailure });
 
-    await expect(runWith(catalog, await createRunsRoot())).rejects.toBe(closeFailure);
+    await expect(runWith(catalog, runsRoot)).rejects.toBe(closeFailure);
+    await expect(access(finalPath)).rejects.toThrow();
+    expect(catalog.closeCount).toBe(1);
+  });
+
+  it("rejects an owned close deadline without publishing a final report", async () => {
+    vi.useFakeTimers();
+    const runsRoot = await createRunsRoot();
+    const finalPath = join(runsRoot, RUN_ID, "impact-report.md");
+    const closeStarted = Promise.withResolvers<void>();
+    const timeoutFailure = new AppError(
+      "MCP_UNAVAILABLE",
+      "The DataHub MCP client could not be closed.",
+    );
+    const catalog = new FakeCatalog({
+      onClose: async () => {
+        closeStarted.resolve();
+        return new Promise<never>((_, reject) => {
+          setTimeout(() => reject(timeoutFailure), 5_000);
+        });
+      },
+    });
+    const operation = runWith(catalog, runsRoot);
+    const rejected = expect(operation).rejects.toBe(timeoutFailure);
+
+    await closeStarted.promise;
+    await vi.advanceTimersByTimeAsync(5_000);
+    await rejected;
+    await expect(access(finalPath)).rejects.toThrow();
     expect(catalog.closeCount).toBe(1);
   });
 
   it("preserves the safe in-memory report and attempted path after a real writer failure", async () => {
-    const catalog = new FakeCatalog();
     const sandbox = await createRunsRoot();
     const blockedRoot = join(sandbox, "runs-file");
-    await writeFile(blockedRoot, "not a directory", "utf8");
+    const catalog = new FakeCatalog({
+      onClose: async () => {
+        await writeFile(blockedRoot, "not a directory", "utf8");
+      },
+    });
 
     const caught = await runWith(catalog, blockedRoot).catch((error: unknown) => error);
 
@@ -572,6 +636,23 @@ describe("runImpactAnalysis", () => {
       },
     });
     expect(JSON.stringify(caught)).not.toContain("secret");
+    expect(catalog.closeCount).toBe(1);
+    expect(catalog.operations.at(-1)).toBe("close");
+    await expect(access(join(blockedRoot, RUN_ID, "impact-report.md"))).rejects.toThrow();
+  });
+
+  it("rechecks caller cancellation after successful close and before publication", async () => {
+    const controller = new AbortController();
+    const runsRoot = await createRunsRoot();
+    const finalPath = join(runsRoot, RUN_ID, "impact-report.md");
+    const catalog = new FakeCatalog({
+      onClose: () => controller.abort(),
+    });
+
+    await expect(runWith(catalog, runsRoot, controller.signal)).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    await expect(access(finalPath)).rejects.toThrow();
     expect(catalog.closeCount).toBe(1);
   });
 

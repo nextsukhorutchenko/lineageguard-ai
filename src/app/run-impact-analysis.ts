@@ -66,6 +66,18 @@ interface BuildImpactReportDraftInput {
   readonly assessment: ImpactAssessment;
 }
 
+type AnalysisOutcome =
+  | {
+      readonly kind: "readyToPublish";
+      readonly report: ImpactReportDraft;
+      readonly markdown: string;
+      readonly attemptedPath: string;
+    }
+  | {
+      readonly kind: "failed";
+      readonly error: unknown;
+    };
+
 const assumptions = [
   "Dataset resolution required one exact URN, name, or platform-qualified name match.",
   "Downstream lineage inspection was bounded to two hops.",
@@ -210,9 +222,7 @@ function buildImpactReportDraft(input: BuildImpactReportDraftInput): ImpactRepor
 }
 
 export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Promise<AnalysisRun> {
-  let outcome:
-    | { readonly kind: "completed"; readonly run: AnalysisRun }
-    | { readonly kind: "failed"; readonly error: unknown };
+  let outcome: AnalysisOutcome;
 
   try {
     deps.signal.throwIfAborted();
@@ -300,23 +310,12 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
     deps.signal.throwIfAborted();
     const markdown = renderImpactReport(report, deps.secrets);
     deps.signal.throwIfAborted();
-    const attemptedPath = resolve(deps.runsRoot, report.runId, "impact-report.md");
-    let artifactPath: string;
-    try {
-      artifactPath = await writeRunArtifact({
-        runsRoot: deps.runsRoot,
-        runId: report.runId,
-        filename: "impact-report.md",
-        content: markdown,
-        signal: deps.signal,
-      });
-    } catch (error) {
-      if (error instanceof AppError && error.code === "ARTIFACT_WRITE_FAILED") {
-        throw new ImpactReportPersistenceError(report, attemptedPath);
-      }
-      throw error;
-    }
-    outcome = { kind: "completed", run: { ...report, artifactPath } };
+    outcome = {
+      kind: "readyToPublish",
+      report,
+      markdown,
+      attemptedPath: resolve(deps.runsRoot, report.runId, "impact-report.md"),
+    };
   } catch (error) {
     outcome = { kind: "failed", error };
   }
@@ -324,7 +323,7 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
   try {
     await deps.catalog.close();
   } catch (closeError) {
-    if (outcome.kind === "completed") throw closeError;
+    if (outcome.kind === "readyToPublish") throw closeError;
 
     const failure: SuppressedFailure = {
       code: "MCP_UNAVAILABLE",
@@ -334,5 +333,24 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
   }
 
   if (outcome.kind === "failed") throw outcome.error;
-  return outcome.run;
+
+  deps.signal.throwIfAborted();
+
+  let artifactPath: string;
+  try {
+    artifactPath = await writeRunArtifact({
+      runsRoot: deps.runsRoot,
+      runId: outcome.report.runId,
+      filename: "impact-report.md",
+      content: outcome.markdown,
+      signal: deps.signal,
+    });
+  } catch (error) {
+    if (error instanceof AppError && error.code === "ARTIFACT_WRITE_FAILED") {
+      throw new ImpactReportPersistenceError(outcome.report, outcome.attemptedPath);
+    }
+    throw error;
+  }
+
+  return { ...outcome.report, artifactPath };
 }
