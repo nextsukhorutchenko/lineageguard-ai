@@ -98,38 +98,42 @@ export function createBoundedMcpClose(close: () => Promise<void>): () => Promise
   let settlement: Promise<void> | undefined;
 
   return (): Promise<void> => {
-    settlement ??= new Promise<void>((resolve, reject) => {
-      let finished = false;
-      const timer = setTimeout(() => {
-        finish(() => reject(closeUnavailable()));
-      }, DATAHUB_MCP_BOUNDARY_POLICY.closeMs);
-      timer.unref();
+    if (settlement !== undefined) return settlement;
 
-      const finish = (settle: () => void): boolean => {
-        if (finished) return false;
-        finished = true;
-        clearTimeout(timer);
-        settle();
-        return true;
-      };
+    const deferred = Promise.withResolvers<void>();
+    settlement = deferred.promise;
+    let finished = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
 
-      let pending: Promise<void>;
-      try {
-        pending = close();
-      } catch {
-        finish(() => reject(closeUnavailable()));
-        return;
-      }
+    const finish = (settle: () => void): boolean => {
+      if (finished) return false;
+      finished = true;
+      if (timer !== undefined) clearTimeout(timer);
+      settle();
+      return true;
+    };
 
-      void pending.then(
-        () => {
-          finish(resolve);
-        },
-        () => {
-          finish(() => reject(closeUnavailable()));
-        },
-      );
-    });
+    timer = setTimeout(() => {
+      finish(() => deferred.reject(closeUnavailable()));
+    }, DATAHUB_MCP_BOUNDARY_POLICY.closeMs);
+    timer.unref();
+
+    let pending: Promise<void>;
+    try {
+      pending = close();
+    } catch {
+      finish(() => deferred.reject(closeUnavailable()));
+      return settlement;
+    }
+
+    void pending.then(
+      () => {
+        finish(deferred.resolve);
+      },
+      () => {
+        finish(() => deferred.reject(closeUnavailable()));
+      },
+    );
 
     return settlement;
   };

@@ -125,6 +125,22 @@ describe("runWithMcpToolDeadline", () => {
 });
 
 describe("createBoundedMcpClose", () => {
+  it("publishes its cached settlement before synchronously invoking close", async () => {
+    let nested: Promise<void> | undefined;
+    let closeCount = 0;
+    let close!: () => Promise<void>;
+    close = createBoundedMcpClose(async () => {
+      closeCount += 1;
+      if (closeCount === 1) nested = close();
+    });
+
+    const first = close();
+
+    expect(nested).toBe(first);
+    expect(closeCount).toBe(1);
+    await expect(first).resolves.toBeUndefined();
+  });
+
   it("returns one cached settlement and closes once", async () => {
     const deferred = Promise.withResolvers<void>();
     let closeCount = 0;
