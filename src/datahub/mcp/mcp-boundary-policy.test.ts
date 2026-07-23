@@ -128,8 +128,7 @@ describe("createBoundedMcpClose", () => {
   it("publishes its cached settlement before synchronously invoking close", async () => {
     let nested: Promise<void> | undefined;
     let closeCount = 0;
-    let close!: () => Promise<void>;
-    close = createBoundedMcpClose(async () => {
+    const close: () => Promise<void> = createBoundedMcpClose(async () => {
       closeCount += 1;
       if (closeCount === 1) nested = close();
     });

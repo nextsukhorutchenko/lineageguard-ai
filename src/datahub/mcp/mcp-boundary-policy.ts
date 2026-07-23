@@ -29,7 +29,6 @@ export async function runWithMcpToolDeadline<T>(
   return new Promise<T>((resolve, reject) => {
     const controller = new AbortController();
     let finished = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
 
     const onCallerAbort = (): void => {
       if (finished || callerSignal === undefined) return;
@@ -60,7 +59,7 @@ export async function runWithMcpToolDeadline<T>(
     };
 
     callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
-    timer = setTimeout(() => {
+    const timer = setTimeout(() => {
       if (!finish(() => reject(toolUnavailable()))) return;
       controller.abort();
     }, DATAHUB_MCP_BOUNDARY_POLICY.toolCallMs);
@@ -103,7 +102,6 @@ export function createBoundedMcpClose(close: () => Promise<void>): () => Promise
     const deferred = Promise.withResolvers<void>();
     settlement = deferred.promise;
     let finished = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
 
     const finish = (settle: () => void): boolean => {
       if (finished) return false;
@@ -113,7 +111,7 @@ export function createBoundedMcpClose(close: () => Promise<void>): () => Promise
       return true;
     };
 
-    timer = setTimeout(() => {
+    const timer = setTimeout(() => {
       finish(() => deferred.reject(closeUnavailable()));
     }, DATAHUB_MCP_BOUNDARY_POLICY.closeMs);
     timer.unref();
