@@ -20,12 +20,8 @@ type WorkItem =
       readonly kind: "array";
       readonly value: readonly unknown[];
       readonly index: number;
+      readonly length: number;
       readonly depth: number;
-    }
-  | {
-      readonly kind: "array-keys";
-      readonly value: readonly unknown[];
-      readonly keys: Generator<string>;
     }
   | ObjectFrame
   | { readonly kind: "exit"; readonly value: object };
@@ -74,21 +70,68 @@ function addJsonString(state: BudgetState, value: string): void {
 }
 
 function* ownJsonKeys(value: object): Generator<string> {
-  const array = Array.isArray(value);
+  for (const key in value) {
+    if (Object.hasOwn(value, key)) yield key;
+  }
+}
 
+function ownEnumerableDataDescriptor(value: object, key: string): PropertyDescriptor {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (descriptor === undefined || !descriptor.enumerable || !("value" in descriptor)) {
+    throw boundaryFailure();
+  }
+  return descriptor;
+}
+
+function arrayLength(value: readonly unknown[]): number {
+  const descriptor = Object.getOwnPropertyDescriptor(value, "length");
+  if (
+    descriptor === undefined ||
+    !("value" in descriptor) ||
+    !Number.isSafeInteger(descriptor.value) ||
+    descriptor.value < 0
+  ) {
+    throw boundaryFailure();
+  }
+  return descriptor.value;
+}
+
+function assertFinalContainerProperties(value: object): void {
+  if (Object.getOwnPropertySymbols(value).length > 0) throw boundaryFailure();
+
+  const array = Array.isArray(value);
+  const length = array ? arrayLength(value) : undefined;
   for (const key of Object.getOwnPropertyNames(value)) {
     if (array && key === "length") continue;
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (descriptor === undefined || !descriptor.enumerable || !("value" in descriptor)) {
       throw boundaryFailure();
     }
-    if (array && !canonicalArrayIndex(key, value.length)) throw boundaryFailure();
-    yield key;
+    if (array && !canonicalArrayIndex(key, length!)) throw boundaryFailure();
   }
 }
 
-function assertNoSymbolKeys(value: object): void {
-  if (Object.getOwnPropertySymbols(value).length > 0) throw boundaryFailure();
+function countJoinedTextBlockNewlines(result: CallToolResult, state: BudgetState): void {
+  if (typeof result !== "object" || result === null) throw boundaryFailure();
+  const contentDescriptor = ownEnumerableDataDescriptor(result, "content");
+  const content = contentDescriptor.value;
+  if (!Array.isArray(content) || Object.getPrototypeOf(content) !== Array.prototype) {
+    throw boundaryFailure();
+  }
+
+  const length = arrayLength(content);
+  if (length > DATAHUB_MCP_BOUNDARY_POLICY.maxJsonNodes) throw boundaryFailure();
+
+  let textBlocks = 0;
+  for (let index = 0; index < length; index += 1) {
+    const blockDescriptor = ownEnumerableDataDescriptor(content, String(index));
+    const block = blockDescriptor.value;
+    if (typeof block !== "object" || block === null) throw boundaryFailure();
+    const typeDescriptor = ownEnumerableDataDescriptor(block, "type");
+    if (typeDescriptor.value !== "text") continue;
+    if (textBlocks > 0) addBytes(state, 1);
+    textBlocks += 1;
+  }
 }
 
 function assertPlainRecord(value: object): asserts value is Record<string, unknown> {
@@ -103,16 +146,7 @@ function canonicalArrayIndex(key: string, length: number): boolean {
 
 export function assertMcpToolResultWithinBudget(result: CallToolResult): void {
   const state: BudgetState = { bytes: 0, nodes: 0 };
-  let textBlocks = 0;
-
-  if (result.content.length > DATAHUB_MCP_BOUNDARY_POLICY.maxJsonNodes) {
-    throw boundaryFailure();
-  }
-  for (const block of result.content) {
-    if (block.type !== "text") continue;
-    if (textBlocks > 0) addBytes(state, 1);
-    textBlocks += 1;
-  }
+  countJoinedTextBlockNewlines(result, state);
 
   const active = new Set<object>();
   const stack: WorkItem[] = [{ kind: "value", value: result, parentDepth: 0 }];
@@ -121,12 +155,13 @@ export function assertMcpToolResultWithinBudget(result: CallToolResult): void {
     const item = stack.pop()!;
 
     if (item.kind === "exit") {
+      assertFinalContainerProperties(item.value);
       active.delete(item.value);
       continue;
     }
 
     if (item.kind === "array") {
-      if (item.index >= item.value.length) continue;
+      if (item.index >= item.length) continue;
       if (item.index > 0) addBytes(state, 1);
       const descriptor = Object.getOwnPropertyDescriptor(item.value, String(item.index));
       if (descriptor === undefined || !descriptor.enumerable || !("value" in descriptor)) {
@@ -134,14 +169,6 @@ export function assertMcpToolResultWithinBudget(result: CallToolResult): void {
       }
       stack.push({ ...item, index: item.index + 1 });
       stack.push({ kind: "value", value: descriptor.value, parentDepth: item.depth });
-      continue;
-    }
-
-    if (item.kind === "array-keys") {
-      const next = item.keys.next();
-      if (next.done) continue;
-      if (!canonicalArrayIndex(next.value, item.value.length)) throw boundaryFailure();
-      stack.push(item);
       continue;
     }
 
@@ -186,19 +213,21 @@ export function assertMcpToolResultWithinBudget(result: CallToolResult): void {
     const depth = item.parentDepth + 1;
     if (depth > DATAHUB_MCP_BOUNDARY_POLICY.maxJsonDepth) throw boundaryFailure();
     if (active.has(value)) throw boundaryFailure();
-    assertNoSymbolKeys(value);
     active.add(value);
     addBytes(state, 2);
     stack.push({ kind: "exit", value });
 
     if (Array.isArray(value)) {
       if (Object.getPrototypeOf(value) !== Array.prototype) throw boundaryFailure();
+      const length = arrayLength(value);
+      if (length > DATAHUB_MCP_BOUNDARY_POLICY.maxJsonNodes) throw boundaryFailure();
       stack.push({
-        kind: "array-keys",
+        kind: "array",
         value,
-        keys: ownJsonKeys(value),
+        index: 0,
+        length,
+        depth,
       });
-      stack.push({ kind: "array", value, index: 0, depth });
       continue;
     }
 

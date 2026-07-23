@@ -1,5 +1,5 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DATAHUB_MCP_BOUNDARY_POLICY } from "./mcp-boundary-policy.js";
 import { assertMcpToolResultWithinBudget } from "./mcp-tool-result-budget.js";
 
@@ -104,6 +104,83 @@ describe("assertMcpToolResultWithinBudget", () => {
     expect(() => assertMcpToolResultWithinBudget(withStructured)).toThrow(
       "DataHub MCP tool result exceeded the application boundary.",
     );
+  });
+
+  it("rejects hostile content descriptors without invoking getters or an own iterator", () => {
+    const contentGetter = vi.fn(() => {
+      throw new Error("content getter executed");
+    });
+    const contentGetterResult = Object.defineProperty({}, "content", {
+      enumerable: true,
+      get: contentGetter,
+    }) as CallToolResult;
+
+    expect(() => assertMcpToolResultWithinBudget(contentGetterResult)).toThrow(
+      "DataHub MCP tool result exceeded the application boundary.",
+    );
+    expect(contentGetter).not.toHaveBeenCalled();
+
+    const indexGetter = vi.fn(() => {
+      throw new Error("content index getter executed");
+    });
+    const indexedContent: unknown[] = [];
+    Object.defineProperty(indexedContent, "0", { enumerable: true, get: indexGetter });
+
+    expect(() =>
+      assertMcpToolResultWithinBudget({ content: indexedContent } as CallToolResult),
+    ).toThrow("DataHub MCP tool result exceeded the application boundary.");
+    expect(indexGetter).not.toHaveBeenCalled();
+
+    const typeGetter = vi.fn(() => {
+      throw new Error("content type getter executed");
+    });
+    const typedContent = [
+      Object.defineProperty({ text: '"safe"' }, "type", { enumerable: true, get: typeGetter }),
+    ];
+
+    expect(() =>
+      assertMcpToolResultWithinBudget({ content: typedContent } as CallToolResult),
+    ).toThrow("DataHub MCP tool result exceeded the application boundary.");
+    expect(typeGetter).not.toHaveBeenCalled();
+
+    const iteratorGetter = vi.fn(() => {
+      throw new Error("content iterator getter executed");
+    });
+    const iterableContent = [{ type: "text", text: '"safe"' }];
+    Object.defineProperty(iterableContent, Symbol.iterator, { get: iteratorGetter });
+
+    expect(() =>
+      assertMcpToolResultWithinBudget({ content: iterableContent } as CallToolResult),
+    ).toThrow("DataHub MCP tool result exceeded the application boundary.");
+    expect(iteratorGetter).not.toHaveBeenCalled();
+
+    expect(() => assertMcpToolResultWithinBudget({ content: Array(1) } as CallToolResult)).toThrow(
+      "DataHub MCP tool result exceeded the application boundary.",
+    );
+  });
+
+  it("exits on an oversized first key before snapshotting all object keys", () => {
+    const structuredContent = {
+      ["x".repeat(DATAHUB_MCP_BOUNDARY_POLICY.maxToolResultBytes)]: null,
+      later: null,
+    };
+    const getOwnPropertyNames = vi
+      .spyOn(Object, "getOwnPropertyNames")
+      .mockImplementation((value) => {
+        if (value === structuredContent) throw new Error("eager key snapshot");
+        return Reflect.ownKeys(value).filter((key): key is string => typeof key === "string");
+      });
+
+    try {
+      expect(() =>
+        assertMcpToolResultWithinBudget({ content: [], structuredContent } as CallToolResult),
+      ).toThrow("DataHub MCP tool result exceeded the application boundary.");
+      expect(getOwnPropertyNames.mock.calls.some(([value]) => value === structuredContent)).toBe(
+        false,
+      );
+    } finally {
+      getOwnPropertyNames.mockRestore();
+    }
   });
 
   it("rejects oversized ignored content", () => {

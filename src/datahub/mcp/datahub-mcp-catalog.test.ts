@@ -2132,7 +2132,9 @@ describe("DataHubMcpCatalog", () => {
     const serializedTrace = JSON.stringify(trace);
 
     expect(error).toBeInstanceOf(AppError);
-    expect(error).toMatchObject({ code: "DATAHUB_UNAVAILABLE", details: {} });
+    expect(error).toMatchObject({ code: "DATAHUB_UNAVAILABLE" });
+    expect((error as AppError).details).toEqual({});
+    expect(error).not.toHaveProperty("evidence");
     expect(trace).toHaveLength(1);
     expect(trace).toMatchObject([
       {
@@ -2147,6 +2149,7 @@ describe("DataHubMcpCatalog", () => {
         status: "error",
       },
     ]);
+    expect(trace[0]).not.toHaveProperty("evidence");
     expect(serializedError).not.toContain(secret);
     expect(serializedError).not.toContain(rawPayload);
     expect(serializedTrace).not.toContain(secret);
