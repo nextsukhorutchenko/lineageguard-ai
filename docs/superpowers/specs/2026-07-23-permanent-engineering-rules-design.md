@@ -193,7 +193,10 @@ The root instructions will require agents to:
   credential-free, and independent of live DataHub or OpenAI services;
 - make live checks explicit, environment-gated, bounded, and separately
   reported;
-- isolate temporary paths and clean up test resources; and
+- isolate temporary paths and clean up test resources;
+- prevent tests and runtime code from mutating committed fixtures in place,
+  while allowing an intentional fixture migration only through approved
+  authority and deterministic validation; and
 - verify what broad test filters selected before trusting their result.
 
 ### 4. Trust, AI, and Secret Boundaries
@@ -211,14 +214,14 @@ The root instructions will require agents to:
 - keep credentials server-only, untracked, absent from client bundles, logs,
   fixtures, screenshots, generated artifacts, and tool arguments;
 - keep only non-secret placeholders in example environment files;
-- avoid exposing or persisting chain-of-thought, runtime user or model prompt
-  contents, unsanitized MCP or provider handshakes and traces, control
-  characters, and unrestricted native paths in application responses,
-  browser/UI output, public CLI output, logs, persisted runs, downloads, and
-  submission artifacts;
-- permit committed versioned agent instructions and allowlisted, sanitized
-  provider, model, MCP, and dependency version metadata when required by
-  approved authority; and
+- avoid exposing or persisting hidden system or developer instructions,
+  chain-of-thought, raw MCP, provider, or model trace envelopes, unsafe
+  terminal or escape control sequences, and unrestricted native paths in
+  application responses, browser/UI output, public CLI output, logs, persisted
+  runs, downloads, and submission artifacts;
+- permit validated user-authored domain input required by an approved contract,
+  committed versioned agent instructions, and allowlisted sanitized provider,
+  model, MCP, and dependency version metadata; and
 - replace external dependency failures with bounded typed errors before they
   cross application boundaries.
 
@@ -232,8 +235,8 @@ The root instructions will require agents to:
   specification requires them and the current action is authorized;
 - enforce allowlists, timeouts, cancellation, and bounded retry behavior at
   external boundaries;
-- constrain repository writes to validated roots and fixed or validated file
-  names;
+- constrain runtime-generated or externally derived filesystem writes to
+  validated roots and fixed or validated file names;
 - use create-only or atomic final publication when partial output would be
   misleading; and
 - never mark failed, incomplete, timed-out, or cancelled work as completed.
