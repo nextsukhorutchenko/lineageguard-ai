@@ -463,6 +463,106 @@ describe("Task 1A bounded evidence collection", () => {
     ]);
   });
 
+  it.each([
+    { mode: "table", column: undefined },
+    { mode: "column", column: "customer_id" },
+  ])("merges complementary evidence from a repeated $mode lineage page", async ({ column }) => {
+    const firstUrn = "urn:li:dataset:(repeated-first)";
+    const secondUrn = "urn:li:dataset:(repeated-second)";
+    type LineageRecord = {
+      readonly entity: {
+        readonly urn: string;
+        readonly name?: string;
+        readonly platform?: { readonly name?: string };
+      };
+      readonly degree: number;
+      readonly lineageColumns: readonly string[];
+    };
+    const firstEvidence: readonly LineageRecord[] = [
+      {
+        entity: { urn: firstUrn, name: "zeta", platform: { name: "snowflake" } },
+        degree: 2,
+        lineageColumns: ["customer_key"],
+      },
+      {
+        entity: { urn: secondUrn, name: "beta", platform: { name: "snowflake" } },
+        degree: 2,
+        lineageColumns: ["order_id"],
+      },
+    ];
+    const complementaryEvidence: readonly LineageRecord[] = [
+      {
+        entity: { urn: firstUrn, name: "alpha", platform: { name: "dbt" } },
+        degree: 1,
+        lineageColumns: ["customer_id"],
+      },
+      {
+        entity: { urn: secondUrn, platform: { name: "looker" } },
+        degree: 1,
+        lineageColumns: ["order_key"],
+      },
+    ];
+    const collect = async (
+      firstPage: readonly LineageRecord[],
+      secondPage: readonly LineageRecord[],
+    ) =>
+      new DataHubMcpCatalog(
+        new RecordingMcpClient([
+          jsonResult({
+            downstreams: {
+              searchResults: firstPage,
+              offset: 0,
+              returned: 2,
+              hasMore: true,
+              truncatedDueToTokenBudget: false,
+            },
+          }),
+          jsonResult({
+            downstreams: {
+              searchResults: secondPage,
+              offset: 2,
+              returned: 2,
+              hasMore: false,
+              truncatedDueToTokenBudget: false,
+            },
+          }),
+        ]),
+      ).getDownstreamLineage(DATASET_URN, {
+        ...(column === undefined ? {} : { column }),
+        maxHops: 2,
+      });
+
+    const forward = await collect(firstEvidence, complementaryEvidence);
+    const reversed = await collect(complementaryEvidence, firstEvidence);
+
+    expect(reversed).toEqual(forward);
+    expect(forward).toEqual({
+      items: [
+        {
+          urn: firstUrn,
+          name: "alpha",
+          platform: "dbt",
+          hop: 1,
+          lineageColumns: ["customer_id", "customer_key"],
+        },
+        {
+          urn: secondUrn,
+          name: "beta",
+          platform: "looker",
+          hop: 1,
+          lineageColumns: ["order_id", "order_key"],
+        },
+      ],
+      completeness: {
+        complete: false,
+        pages: 2,
+        itemCount: 2,
+        offsets: [0, 2],
+        reasonCodes: ["REPEATED_PAGE"],
+      },
+    });
+  });
+
   const sortedKeys = (values: readonly string[]): readonly string[] =>
     [...values].sort((left, right) => left.localeCompare(right, "en-US"));
   const searchPageItems = sortedKeys(

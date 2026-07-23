@@ -344,14 +344,8 @@ export class DataHubMcpCatalog implements DataHubCatalog {
       }
       returnedCount += returned;
       const fingerprint = results.map(({ entity }) => entity.urn).join("\u0000");
-      if (fingerprints.has(fingerprint) && returned > 0) {
-        reasons.add("REPEATED_PAGE");
-        if (returnedCount >= MAX_LINEAGE_ITEMS) reasons.add("ITEM_LIMIT_REACHED");
-        if (offsets.length >= MAX_LINEAGE_PAGES) reasons.add("PAGE_LIMIT_REACHED");
-        if (hasMore) reasons.add("HAS_MORE");
-        break;
-      }
-      fingerprints.add(fingerprint);
+      const repeatedPage = returned > 0 && fingerprints.has(fingerprint);
+      if (!repeatedPage) fingerprints.add(fingerprint);
       const before = assets.size;
       const pageAssets = new Map<string, LineageAsset>();
       for (const result of results) {
@@ -373,6 +367,13 @@ export class DataHubMcpCatalog implements DataHubCatalog {
         } else if (assets.size < MAX_LINEAGE_ITEMS) {
           assets.set(asset.urn, asset);
         }
+      }
+      if (repeatedPage) {
+        reasons.add("REPEATED_PAGE");
+        if (returnedCount >= MAX_LINEAGE_ITEMS) reasons.add("ITEM_LIMIT_REACHED");
+        if (offsets.length >= MAX_LINEAGE_PAGES) reasons.add("PAGE_LIMIT_REACHED");
+        if (hasMore) reasons.add("HAS_MORE");
+        break;
       }
       let mustStop = false;
       if (returnedCount >= MAX_LINEAGE_ITEMS || assets.size >= MAX_LINEAGE_ITEMS) {
