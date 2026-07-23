@@ -1,13 +1,51 @@
 import { describe, expect, it } from "vitest";
 import { AppError } from "../errors/app-error.js";
 import type { ChangeIntent } from "./change-intent.js";
-import { resolveDataset } from "./resolve-dataset.js";
+import { findUniqueCanonicalDatasetUrnMatch, resolveDataset } from "./resolve-dataset.js";
 
 const intent = (datasetHint: string): ChangeIntent => ({
   kind: "rename_column",
   datasetHint,
   sourceColumn: "customer_id",
   targetColumn: "customer_key",
+});
+
+describe("findUniqueCanonicalDatasetUrnMatch", () => {
+  const canonical = "urn:li:dataset:(urn:li:dataPlatform:snowflake,Orders,PROD)";
+  const matching = {
+    urn: "urn:li:dataset:(urn:li:dataPlatform:snowflake,orders,PROD)",
+    name: "orders",
+    platform: "snowflake",
+  };
+
+  it("finds exactly one candidate by explicit canonical dataset URN", () => {
+    expect(findUniqueCanonicalDatasetUrnMatch(canonical, [matching])).toBe(matching);
+  });
+
+  it.each(["orders", "snowflake:orders"])("rejects noncanonical alias hint %s", (hint) => {
+    expect(findUniqueCanonicalDatasetUrnMatch(hint, [matching])).toBeUndefined();
+  });
+
+  it("rejects a canonical hint matched only through candidate name", () => {
+    expect(
+      findUniqueCanonicalDatasetUrnMatch(canonical, [
+        {
+          urn: "urn:li:dataset:(urn:li:dataPlatform:snowflake,other,PROD)",
+          name: canonical,
+        },
+      ]),
+    ).toBeUndefined();
+  });
+
+  it("rejects an absent canonical candidate URN", () => {
+    expect(findUniqueCanonicalDatasetUrnMatch(canonical, [])).toBeUndefined();
+  });
+
+  it("rejects duplicate normalized canonical candidate URNs", () => {
+    expect(
+      findUniqueCanonicalDatasetUrnMatch(canonical, [matching, { ...matching, urn: canonical }]),
+    ).toBeUndefined();
+  });
 });
 
 describe("resolveDataset", () => {
@@ -51,6 +89,18 @@ describe("resolveDataset", () => {
         },
       ]),
     ).toMatchObject({ platform: "snowflake" });
+  });
+
+  it("resolves an exact plain dataset name from a complete candidate set", () => {
+    const candidate = {
+      urn: "urn:li:dataset:(urn:li:dataPlatform:snowflake,orders,PROD)",
+      name: "orders",
+    };
+
+    expect(resolveDataset(intent("orders"), [candidate])).toMatchObject({
+      urn: candidate.urn,
+      name: "orders",
+    });
   });
 
   it("resolves a platform-qualified identity from a canonical DataHub dataset URN", () => {

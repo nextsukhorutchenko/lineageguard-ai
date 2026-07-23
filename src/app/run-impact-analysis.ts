@@ -11,7 +11,7 @@ import {
 } from "../domain/evidence.js";
 import { assessImpact, type ImpactAssessment } from "../domain/impact-assessment.js";
 import { calculateContextCoverage } from "../domain/context-coverage.js";
-import { resolveDataset } from "../domain/resolve-dataset.js";
+import { findUniqueCanonicalDatasetUrnMatch, resolveDataset } from "../domain/resolve-dataset.js";
 import type { RunStatus } from "../domain/run-result.js";
 import { AppError, type SuppressedFailure } from "../errors/app-error.js";
 
@@ -222,13 +222,15 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
     });
     deps.signal.throwIfAborted();
     let target;
-    try {
+    if (search.completeness.complete) {
       target = resolveDataset(intent, search.items);
-    } catch (error) {
-      if (!search.completeness.complete) {
+    } else {
+      const canonicalMatch = findUniqueCanonicalDatasetUrnMatch(intent.datasetHint, search.items);
+      if (canonicalMatch === undefined) {
         throw new AppError("DATAHUB_UNAVAILABLE", "Dataset search was incomplete.");
       }
-      throw error;
+
+      target = resolveDataset(intent, [canonicalMatch]);
     }
     const schema = await deps.catalog.listSchemaFields(target.urn, { signal: deps.signal });
     deps.signal.throwIfAborted();

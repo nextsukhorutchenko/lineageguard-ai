@@ -203,9 +203,10 @@ async function runWith(
   runsRoot: string,
   signal: AbortSignal = new AbortController().signal,
   secrets: readonly string[] = [],
+  request: string = REQUEST,
 ) {
   return runImpactAnalysis({
-    request: REQUEST,
+    request,
     catalog,
     clock: () => new Date("2026-07-22T12:00:00.000Z"),
     runId: RUN_ID,
@@ -685,25 +686,116 @@ describe("runImpactAnalysis", () => {
     expect(catalog.closeCount).toBe(1);
   });
 
-  it("allows one exact candidate from incomplete search but never infers absence", async () => {
-    const continued = await runWith(
-      new FakeCatalog({ searchReasons: ["PAGE_LIMIT_REACHED"] }),
-      await createRunsRoot(),
-    );
-    expect(continued.status).toBe("INCOMPLETE_EVIDENCE");
+  const incompleteSearchFailure = {
+    code: "DATAHUB_UNAVAILABLE",
+    message: "Dataset search was incomplete.",
+  };
 
+  async function expectIncompleteSearchFailure(
+    catalog: FakeCatalog,
+    runsRoot: string,
+    request: string,
+  ): Promise<void> {
     await expect(
-      runWith(
-        new FakeCatalog({ candidates: [], searchReasons: ["PAGE_LIMIT_REACHED"] }),
-        await createRunsRoot(),
-      ),
-    ).rejects.toMatchObject({
-      code: "DATAHUB_UNAVAILABLE",
-      message: "Dataset search was incomplete.",
+      runWith(catalog, runsRoot, new AbortController().signal, [], request),
+    ).rejects.toMatchObject(incompleteSearchFailure);
+    expect(catalog.operations).toEqual(["searchDatasets", "close"]);
+    expect(catalog.closeCount).toBe(1);
+    await expect(access(join(runsRoot, RUN_ID, "impact-report.md"))).rejects.toThrow();
+  }
+
+  it("rejects incomplete search with a first-page platform alias before downstream work", async () => {
+    const catalog = new FakeCatalog({ searchReasons: ["PAGE_LIMIT_REACHED"] });
+    await expectIncompleteSearchFailure(catalog, await createRunsRoot(), REQUEST);
+  });
+
+  it("rejects incomplete search with a first-page plain-name alias before downstream work", async () => {
+    const catalog = new FakeCatalog({ searchReasons: ["HAS_MORE"] });
+    await expectIncompleteSearchFailure(
+      catalog,
+      await createRunsRoot(),
+      "Rename column customer_id to customer_key in dataset orders",
+    );
+  });
+
+  it("rejects incomplete search when the canonical candidate URN is absent", async () => {
+    const catalog = new FakeCatalog({
+      candidates: [],
+      searchReasons: ["PAGE_LIMIT_REACHED"],
     });
-    await expect(
-      runWith(new FakeCatalog({ candidates: [] }), await createRunsRoot()),
-    ).rejects.toMatchObject({ code: "TARGET_NOT_FOUND" });
+    await expectIncompleteSearchFailure(
+      catalog,
+      await createRunsRoot(),
+      `Rename column customer_id to customer_key in dataset ${TARGET.urn}`,
+    );
+  });
+
+  it("rejects incomplete search when the canonical candidate URN is duplicated", async () => {
+    const catalog = new FakeCatalog({
+      candidates: [TARGET, { ...TARGET }],
+      searchReasons: ["REPEATED_PAGE"],
+    });
+    await expectIncompleteSearchFailure(
+      catalog,
+      await createRunsRoot(),
+      `Rename column customer_id to customer_key in dataset ${TARGET.urn}`,
+    );
+  });
+
+  it("rejects incomplete search when the canonical hint matches only candidate name", async () => {
+    const catalog = new FakeCatalog({
+      candidates: [
+        {
+          urn: "urn:li:dataset:(urn:li:dataPlatform:snowflake,other,PROD)",
+          name: TARGET.urn,
+        },
+      ],
+      searchReasons: ["HAS_MORE"],
+    });
+    await expectIncompleteSearchFailure(
+      catalog,
+      await createRunsRoot(),
+      `Rename column customer_id to customer_key in dataset ${TARGET.urn}`,
+    );
+  });
+
+  it("continues incomplete search for one explicit canonical candidate URN", async () => {
+    const catalog = new FakeCatalog({
+      candidates: [TARGET],
+      searchReasons: ["PAGE_LIMIT_REACHED"],
+    });
+    const runsRoot = await createRunsRoot();
+    const run = await runWith(
+      catalog,
+      runsRoot,
+      new AbortController().signal,
+      [],
+      `Rename column customer_id to customer_key in dataset ${TARGET.urn}`,
+    );
+
+    expect(run).toMatchObject({
+      status: "INCOMPLETE_EVIDENCE",
+      evidence: {
+        targetDataset: {
+          urn: TARGET.urn,
+          platform: "snowflake",
+          environment: "PROD",
+        },
+        completeness: {
+          complete: false,
+          search: { complete: false },
+        },
+      },
+    });
+    expect(catalog.operations).toEqual([
+      "searchDatasets",
+      "listSchemaFields",
+      "getDownstreamLineage:table",
+      "getDownstreamLineage:customer_id",
+      "getEntityContext",
+      "close",
+    ]);
+    await expect(access(run.artifactPath)).resolves.toBeUndefined();
   });
 
   it("allows a verified source field from incomplete schema but never infers absence", async () => {
