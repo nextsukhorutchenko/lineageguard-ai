@@ -20,7 +20,7 @@ DataHub access is read-only. The adapter launches the official pinned command:
 uvx mcp-server-datahub@0.6.0 --transport stdio
 ```
 
-It exposes only `search`, `list_schema_fields`, and `get_lineage`. The subprocess explicitly disables mutation and document tools. Traces contain normalized, redacted arguments rather than raw MCP payloads, authentication values, process stderr, or wall-clock durations.
+It exposes only `search`, `list_schema_fields`, `get_lineage`, and `get_entities` through an application-owned read-only allowlist. The subprocess explicitly disables mutation and document tools. Traces contain normalized, redacted arguments rather than raw MCP payloads, authentication values, process stderr, or wall-clock durations.
 
 ## Windows Prerequisites
 
