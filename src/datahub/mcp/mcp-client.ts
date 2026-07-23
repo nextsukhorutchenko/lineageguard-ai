@@ -9,10 +9,7 @@ import { AppError } from "../../errors/app-error.js";
 import { redact } from "../../security/redact.js";
 import { sanitizeBoundaryText } from "../../security/sanitize-output.js";
 import type { McpToolClient, ToolCallRequest } from "./datahub-mcp-catalog.js";
-import {
-  createBoundedMcpClose,
-  type OwnedMcpToolCallOptions,
-} from "./mcp-boundary-policy.js";
+import { createBoundedMcpClose, type OwnedMcpToolCallOptions } from "./mcp-boundary-policy.js";
 
 const MAX_STDERR_CHARACTERS = 4_096;
 
