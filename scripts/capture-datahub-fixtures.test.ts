@@ -964,4 +964,39 @@ describe("fixture capture CLI", () => {
     expect(stderr.chunks.join("")).not.toContain(token);
     expect(stderr.chunks.join("")).not.toContain("C:\\private");
   });
+
+  it("contains rejected asynchronous stderr writes without leaking raw diagnostics", async () => {
+    const repositoryRoot = await createTemporaryDirectory("lineageguard-capture-stderr-rejection-");
+    const stdout = createRecordingWriter();
+    const raw = new Error(`stderr rejected at C:\\private\\capture with ${token}`);
+    const chunks: string[] = [];
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => {
+      unhandledRejections.push(reason);
+    };
+    const stderr: FixtureCaptureTextWriter = {
+      write: (text) => {
+        chunks.push(text);
+        return Promise.reject(raw);
+      },
+    };
+    const dependencies = createCliDependencies(repositoryRoot, stdout.writer, {
+      capture: async () => {
+        throw raw;
+      },
+    });
+
+    process.on("unhandledRejection", onUnhandledRejection);
+    try {
+      await expect(runFixtureCaptureCommand(dependencies, stderr)).resolves.toBe(1);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally {
+      process.off("unhandledRejection", onUnhandledRejection);
+    }
+
+    expect(chunks).toEqual(["DataHub fixture capture failed.\n"]);
+    expect(chunks.join("")).not.toContain(token);
+    expect(chunks.join("")).not.toContain("C:\\private");
+    expect(unhandledRejections).toEqual([]);
+  });
 });

@@ -596,7 +596,7 @@ export async function runFixtureCaptureCommand(
     return 0;
   } catch {
     try {
-      stderr.write("DataHub fixture capture failed.\n");
+      await stderr.write("DataHub fixture capture failed.\n");
     } catch {
       // A broken output stream must not expose or replace the bounded public failure.
     }

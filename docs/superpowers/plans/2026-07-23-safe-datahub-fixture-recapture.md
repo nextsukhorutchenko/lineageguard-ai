@@ -268,7 +268,7 @@ describe("fixture writer", () => {
 Run:
 
 ```powershell
-pnpm vitest run scripts/capture-datahub-fixtures.test.ts
+node node_modules/vitest/vitest.mjs run scripts/capture-datahub-fixtures.test.ts
 ```
 
 Expected:
@@ -382,7 +382,7 @@ Run:
 
 ```powershell
 node node_modules/prettier/bin/prettier.cjs --write scripts/capture-datahub-fixtures.ts scripts/capture-datahub-fixtures.test.ts
-pnpm vitest run scripts/capture-datahub-fixtures.test.ts
+node node_modules/vitest/vitest.mjs run scripts/capture-datahub-fixtures.test.ts
 pnpm typecheck
 ```
 
@@ -1004,7 +1004,7 @@ describe("fixture capture CLI", () => {
 Run:
 
 ```powershell
-pnpm vitest run scripts/capture-datahub-fixtures.test.ts
+node node_modules/vitest/vitest.mjs run scripts/capture-datahub-fixtures.test.ts
 ```
 
 Expected:
@@ -1366,7 +1366,7 @@ Run:
 
 ```powershell
 node node_modules/prettier/bin/prettier.cjs --write scripts/capture-datahub-fixtures.ts scripts/capture-datahub-fixtures.test.ts
-pnpm vitest run scripts/capture-datahub-fixtures.test.ts
+node node_modules/vitest/vitest.mjs run scripts/capture-datahub-fixtures.test.ts
 pnpm typecheck
 ```
 
@@ -1461,7 +1461,7 @@ foreach ($document in @(
   @{ Name = "README"; Text = $readme },
   @{ Name = "Demo scenario"; Text = $demo }
 )) {
-  foreach ($requiredPhrase in @("lower bounds", "Context Coverage", "unmarked candidate is untrusted", "do not manually create, copy, or add `.complete`")) {
+  foreach ($requiredPhrase in @("lower bounds", "Context Coverage", "unmarked candidate is untrusted", 'do not manually create, copy, or add `.complete`')) {
     if (-not $document.Text.Contains($requiredPhrase)) {
       $problems += "$($document.Name) omits required operator semantics: $requiredPhrase"
     }
@@ -1605,7 +1605,7 @@ foreach ($document in @(
   @{ Name = "README"; Text = $readme },
   @{ Name = "Demo scenario"; Text = $demo }
 )) {
-  foreach ($requiredPhrase in @("lower bounds", "Context Coverage", "unmarked candidate is untrusted", "do not manually create, copy, or add `.complete`")) {
+  foreach ($requiredPhrase in @("lower bounds", "Context Coverage", "unmarked candidate is untrusted", 'do not manually create, copy, or add `.complete`')) {
     if (-not $document.Text.Contains($requiredPhrase)) {
       $problems += "$($document.Name) omits required operator semantics: $requiredPhrase"
     }
@@ -1639,7 +1639,7 @@ if ($missing.Count -gt 0) {
   throw "Focused test file is missing: $($missing -join ', ')"
 }
 $focused | ForEach-Object { Write-Output "Focused test: $_" }
-pnpm vitest run @focused
+node node_modules/vitest/vitest.mjs run @focused
 if ($LASTEXITCODE -ne 0) {
   throw "Focused regression slice failed."
 }
