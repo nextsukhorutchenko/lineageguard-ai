@@ -1,7 +1,9 @@
 import {
   access,
+  lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   rm,
@@ -9,13 +11,20 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   canonicalizeFixturePayloads,
+  fixtureCaptureRepositoryRoot,
+  fixtureCompletionMarker,
   fixtureFileNames,
+  runFixtureCaptureCli,
+  runFixtureCaptureCommand,
   serializeFixture,
   writeFixturePayloads,
+  type FixtureCaptureCliDependencies,
+  type FixtureCaptureTextWriter,
   type FixturePayloads,
 } from "./capture-datahub-fixtures.js";
 
@@ -128,6 +137,82 @@ async function render(payloads: FixturePayloads): Promise<readonly string[]> {
     serializeFixture(canonical.entityContext, token),
   ]);
 }
+
+function createRecordingWriter(): {
+  readonly chunks: string[];
+  readonly writer: FixtureCaptureTextWriter;
+} {
+  const chunks: string[] = [];
+  return {
+    chunks,
+    writer: {
+      write(text: string): void {
+        chunks.push(text);
+      },
+    },
+  };
+}
+
+function fixtureEnvironment(): NodeJS.ProcessEnv {
+  return {
+    DATAHUB_GMS_URL: "http://localhost:8080",
+    DATAHUB_GMS_TOKEN: token,
+    DATAHUB_MCP_UVX_PATH: "uvx",
+    LINEAGEGUARD_RUNS_DIR: "runs",
+  };
+}
+
+function createCliDependencies(
+  repositoryRoot: string,
+  stdout: FixtureCaptureTextWriter,
+  overrides: Partial<FixtureCaptureCliDependencies> = {},
+): FixtureCaptureCliDependencies {
+  const defaults: FixtureCaptureCliDependencies = {
+    repositoryRoot,
+    environment: fixtureEnvironment(),
+    stdout,
+    createDirectory: (path) => mkdir(path),
+    createCandidateDirectory: (prefix) => mkdtemp(prefix),
+    capture: async (config, destination) =>
+      writeFixturePayloads(ordered, config.datahubGmsToken, destination),
+    openCompletionMarker: (path) => open(path, "wx"),
+    removeCandidate: (path) =>
+      rm(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }),
+  };
+  return { ...defaults, ...overrides };
+}
+
+const invalidCandidateMutations: readonly {
+  readonly name: string;
+  readonly mutate: (destination: string, outside: string) => Promise<void>;
+}[] = [
+  {
+    name: "missing fixture",
+    mutate: async (destination) => {
+      await rm(join(destination, fixtureFileNames[0]));
+    },
+  },
+  {
+    name: "extra file",
+    mutate: async (destination) => {
+      await writeFile(join(destination, "extra.json"), "{}\n", "utf8");
+    },
+  },
+  {
+    name: "malformed fixture",
+    mutate: async (destination) => {
+      await writeFile(join(destination, fixtureFileNames[0]), "{not-json\n", "utf8");
+    },
+  },
+  {
+    name: "linked fixture",
+    mutate: async (destination, outside) => {
+      const fixture = join(destination, fixtureFileNames[0]);
+      await rm(fixture);
+      await symlink(outside, fixture, process.platform === "win32" ? "junction" : "dir");
+    },
+  },
+];
 
 describe("fixture canonicalization", () => {
   it("renders semantically equivalent permutations as byte-identical fixture content", async () => {
@@ -243,4 +328,404 @@ describe("fixture writer", () => {
       await expect(access(destination)).rejects.toThrow();
     },
   );
+});
+
+describe("fixture capture CLI", () => {
+  it("anchors the default repository root to the script module", () => {
+    expect(fixtureCaptureRepositoryRoot).toBe(
+      resolve(fileURLToPath(new URL("../", import.meta.url))),
+    );
+  });
+
+  it("creates a complete five-fixture candidate outside committed fixtures", async () => {
+    const repositoryRoot = await createTemporaryDirectory("lineageguard-capture-repository-");
+    const output = createRecordingWriter();
+
+    const result = await runFixtureCaptureCli(createCliDependencies(repositoryRoot, output.writer));
+
+    const relativeDestination = relative(repositoryRoot, result.destination).split(sep).join("/");
+    expect(relativeDestination).toMatch(/^tmp\/datahub-fixture-captures\/capture-[A-Za-z0-9_-]+$/);
+    expect(result.destination).not.toBe(resolve(repositoryRoot, "tests/fixtures/datahub"));
+    expect(result.written.map(({ basename }) => basename)).toEqual(fixtureFileNames);
+    expect(
+      (await readdir(result.destination)).toSorted((left, right) =>
+        left.localeCompare(right, "en-US"),
+      ),
+    ).toEqual(
+      [...fixtureFileNames, fixtureCompletionMarker].toSorted((left, right) =>
+        left.localeCompare(right, "en-US"),
+      ),
+    );
+    const marker = await lstat(join(result.destination, fixtureCompletionMarker));
+    expect(marker.isFile()).toBe(true);
+    expect(marker.isSymbolicLink()).toBe(false);
+    expect(marker.size).toBe(0);
+    for (const filename of fixtureFileNames) {
+      const fixture = await lstat(join(result.destination, filename));
+      expect(fixture.isFile()).toBe(true);
+      expect(fixture.isSymbolicLink()).toBe(false);
+    }
+    expect(output.chunks).toEqual([
+      `Captured 5 sanitized DataHub fixture candidates at ${relativeDestination}.\n`,
+    ]);
+  });
+
+  it("never reuses or removes an existing capture directory", async () => {
+    const repositoryRoot = await createTemporaryDirectory("lineageguard-capture-existing-");
+    const captureRoot = join(repositoryRoot, "tmp", "datahub-fixture-captures");
+    const existing = join(captureRoot, "capture-existing");
+    const sentinel = join(existing, "sentinel.txt");
+    await mkdir(existing, { recursive: true });
+    await writeFile(sentinel, "keep\n", "utf8");
+    const output = createRecordingWriter();
+
+    const result = await runFixtureCaptureCli(createCliDependencies(repositoryRoot, output.writer));
+
+    expect(result.destination).not.toBe(existing);
+    await expect(readFile(sentinel, "utf8")).resolves.toBe("keep\n");
+  });
+
+  it("rejects a candidate swapped to a link during capture before any fixture write", async () => {
+    const sandbox = await createTemporaryDirectory("lineageguard-capture-write-swap-");
+    const repositoryRoot = join(sandbox, "repository");
+    const outside = join(sandbox, "outside");
+    const sentinel = join(outside, "sentinel.txt");
+    await mkdir(repositoryRoot);
+    await mkdir(outside);
+    await writeFile(sentinel, "keep\\n", "utf8");
+    const output = createRecordingWriter();
+
+    await expect(
+      runFixtureCaptureCli(
+        createCliDependencies(repositoryRoot, output.writer, {
+          capture: async (config, destination) => {
+            await rm(destination, { recursive: true, force: true });
+            await symlink(outside, destination, process.platform === "win32" ? "junction" : "dir");
+            return writeFixturePayloads(ordered, config.datahubGmsToken, destination);
+          },
+        }),
+      ),
+    ).rejects.toThrow("Fixture destination is unsafe.");
+
+    await expect(readFile(sentinel, "utf8")).resolves.toBe("keep\\n");
+    expect(output.chunks).toEqual([]);
+  });
+
+  it("rejects a linked capture-root ancestor without writing outside the repository", async () => {
+    const sandbox = await createTemporaryDirectory("lineageguard-capture-root-link-");
+    const repositoryRoot = join(sandbox, "repository");
+    const outside = join(sandbox, "outside");
+    const sentinel = join(outside, "sentinel.txt");
+    await mkdir(repositoryRoot);
+    await mkdir(outside);
+    await writeFile(sentinel, "keep\n", "utf8");
+    await symlink(
+      outside,
+      join(repositoryRoot, "tmp"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const output = createRecordingWriter();
+
+    await expect(
+      runFixtureCaptureCli(createCliDependencies(repositoryRoot, output.writer)),
+    ).rejects.toThrow("Fixture capture path is unsafe.");
+
+    await expect(readFile(sentinel, "utf8")).resolves.toBe("keep\n");
+    expect(output.chunks).toEqual([]);
+  });
+
+  it("stops after a root component is swapped to a link before creating the nested root", async () => {
+    const sandbox = await createTemporaryDirectory("lineageguard-capture-root-swap-");
+    const repositoryRoot = join(sandbox, "repository");
+    const outside = join(sandbox, "outside");
+    const sentinel = join(outside, "sentinel.txt");
+    const nestedCaptureRoot = join(outside, "datahub-fixture-captures");
+    await mkdir(repositoryRoot);
+    await mkdir(outside);
+    await writeFile(sentinel, "keep\n", "utf8");
+    const output = createRecordingWriter();
+
+    await expect(
+      runFixtureCaptureCli(
+        createCliDependencies(repositoryRoot, output.writer, {
+          createDirectory: async (path) => {
+            await mkdir(path);
+            if (relative(repositoryRoot, path) === "tmp") {
+              await rm(path, { recursive: true });
+              await symlink(outside, path, process.platform === "win32" ? "junction" : "dir");
+            }
+          },
+        }),
+      ),
+    ).rejects.toThrow("Fixture capture path is unsafe.");
+
+    await expect(readFile(sentinel, "utf8")).resolves.toBe("keep\n");
+    await expect(access(nestedCaptureRoot)).rejects.toThrow();
+    expect(output.chunks).toEqual([]);
+  });
+
+  it("rejects a linked candidate without traversing it during cleanup", async () => {
+    const sandbox = await createTemporaryDirectory("lineageguard-capture-child-link-");
+    const repositoryRoot = join(sandbox, "repository");
+    const outside = join(sandbox, "outside");
+    const sentinel = join(outside, "sentinel.txt");
+    await mkdir(repositoryRoot);
+    await mkdir(outside);
+    await writeFile(sentinel, "keep\n", "utf8");
+    const output = createRecordingWriter();
+
+    await expect(
+      runFixtureCaptureCli(
+        createCliDependencies(repositoryRoot, output.writer, {
+          createCandidateDirectory: async (prefix) => {
+            const linkedCandidate = join(dirname(prefix), "capture-linked");
+            await symlink(
+              outside,
+              linkedCandidate,
+              process.platform === "win32" ? "junction" : "dir",
+            );
+            return linkedCandidate;
+          },
+        }),
+      ),
+    ).rejects.toThrow("Fixture capture path is unsafe.");
+
+    await expect(readFile(sentinel, "utf8")).resolves.toBe("keep\n");
+    expect(output.chunks).toEqual([]);
+  });
+
+  it("rejects a candidate path outside the validated capture root", async () => {
+    const sandbox = await createTemporaryDirectory("lineageguard-capture-escape-");
+    const repositoryRoot = join(sandbox, "repository");
+    const outsideCandidate = join(sandbox, "capture-outside");
+    const sentinel = join(outsideCandidate, "sentinel.txt");
+    await mkdir(repositoryRoot);
+    await mkdir(outsideCandidate);
+    await writeFile(sentinel, "keep\n", "utf8");
+    const output = createRecordingWriter();
+
+    await expect(
+      runFixtureCaptureCli(
+        createCliDependencies(repositoryRoot, output.writer, {
+          createCandidateDirectory: async () => outsideCandidate,
+        }),
+      ),
+    ).rejects.toThrow("Fixture capture path is unsafe.");
+
+    await expect(readFile(sentinel, "utf8")).resolves.toBe("keep\n");
+    expect(output.chunks).toEqual([]);
+  });
+
+  it.each(invalidCandidateMutations)(
+    "does not complete a candidate with a $name",
+    async ({ mutate }) => {
+      const sandbox = await createTemporaryDirectory("lineageguard-capture-invalid-set-");
+      const repositoryRoot = join(sandbox, "repository");
+      const outside = join(sandbox, "outside");
+      const sentinel = join(outside, "sentinel.txt");
+      await mkdir(repositoryRoot);
+      await mkdir(outside);
+      await writeFile(sentinel, "keep\n", "utf8");
+      const output = createRecordingWriter();
+      let candidate: string | undefined;
+
+      const dependencies = createCliDependencies(repositoryRoot, output.writer, {
+        createCandidateDirectory: async (prefix) => {
+          candidate = await mkdtemp(prefix);
+          return candidate;
+        },
+        capture: async (config, destination) => {
+          const written = await writeFixturePayloads(ordered, config.datahubGmsToken, destination);
+          await mutate(destination, outside);
+          return written;
+        },
+        removeCandidate: async () => {
+          throw new Error("simulated cleanup failure");
+        },
+      });
+
+      await expect(runFixtureCaptureCli(dependencies)).rejects.toThrow();
+      if (candidate === undefined) throw new Error("Expected a candidate directory.");
+      await expect(access(join(candidate, fixtureCompletionMarker))).rejects.toThrow();
+      await expect(readFile(sentinel, "utf8")).resolves.toBe("keep\n");
+      expect(output.chunks).toEqual([]);
+    },
+  );
+
+  it("removes a partial unmarked candidate and preserves the primary failure", async () => {
+    const repositoryRoot = await createTemporaryDirectory("lineageguard-capture-partial-");
+    const output = createRecordingWriter();
+    const primary = new Error("primary capture failure");
+    let candidate: string | undefined;
+    const dependencies = createCliDependencies(repositoryRoot, output.writer, {
+      createCandidateDirectory: async (prefix) => {
+        candidate = await mkdtemp(prefix);
+        return candidate;
+      },
+      capture: async (_config, destination) => {
+        await writeFile(join(destination, fixtureFileNames[0]), "{}\n", {
+          encoding: "utf8",
+          flag: "wx",
+        });
+        throw primary;
+      },
+    });
+
+    await expect(runFixtureCaptureCli(dependencies)).rejects.toBe(primary);
+    if (candidate === undefined) throw new Error("Expected a candidate directory.");
+    await expect(access(candidate)).rejects.toThrow();
+    expect(output.chunks).toEqual([]);
+  });
+
+  it("leaves cleanup-failed output unmarked and preserves the primary failure", async () => {
+    const repositoryRoot = await createTemporaryDirectory("lineageguard-capture-cleanup-");
+    const output = createRecordingWriter();
+    const primary = new Error("primary capture failure");
+    let candidate: string | undefined;
+    const dependencies = createCliDependencies(repositoryRoot, output.writer, {
+      createCandidateDirectory: async (prefix) => {
+        candidate = await mkdtemp(prefix);
+        return candidate;
+      },
+      capture: async (_config, destination) => {
+        await writeFile(join(destination, fixtureFileNames[0]), "{}\n", {
+          encoding: "utf8",
+          flag: "wx",
+        });
+        throw primary;
+      },
+      removeCandidate: async () => {
+        throw new Error("secondary cleanup failure");
+      },
+    });
+
+    await expect(runFixtureCaptureCli(dependencies)).rejects.toBe(primary);
+    if (candidate === undefined) throw new Error("Expected a candidate directory.");
+    await expect(access(candidate)).resolves.toBeUndefined();
+    await expect(access(join(candidate, fixtureCompletionMarker))).rejects.toThrow();
+    expect(output.chunks).toEqual([]);
+  });
+
+  it("refuses cleanup when an owned candidate contains a linked entry", async () => {
+    const sandbox = await createTemporaryDirectory("lineageguard-capture-linked-cleanup-");
+    const repositoryRoot = join(sandbox, "repository");
+    const outside = join(sandbox, "outside");
+    const sentinel = join(outside, "sentinel.txt");
+    await mkdir(repositoryRoot);
+    await mkdir(outside);
+    await writeFile(sentinel, "keep\n", "utf8");
+    const output = createRecordingWriter();
+    const primary = new Error("capture failed after linked output");
+    let candidate: string | undefined;
+    const dependencies = createCliDependencies(repositoryRoot, output.writer, {
+      createCandidateDirectory: async (prefix) => {
+        candidate = await mkdtemp(prefix);
+        return candidate;
+      },
+      capture: async (_config, destination) => {
+        await symlink(
+          outside,
+          join(destination, fixtureFileNames[0]),
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        throw primary;
+      },
+    });
+
+    await expect(runFixtureCaptureCli(dependencies)).rejects.toBe(primary);
+    if (candidate === undefined) throw new Error("Expected a candidate directory.");
+    await expect(access(candidate)).resolves.toBeUndefined();
+    await expect(access(join(candidate, fixtureCompletionMarker))).rejects.toThrow();
+    await expect(readFile(sentinel, "utf8")).resolves.toBe("keep\n");
+    expect(output.chunks).toEqual([]);
+  });
+
+  it("removes a candidate when exclusive marker open fails", async () => {
+    const repositoryRoot = await createTemporaryDirectory("lineageguard-capture-marker-open-");
+    const output = createRecordingWriter();
+    const primary = new Error("marker open failed");
+    let candidate: string | undefined;
+    const dependencies = createCliDependencies(repositoryRoot, output.writer, {
+      createCandidateDirectory: async (prefix) => {
+        candidate = await mkdtemp(prefix);
+        return candidate;
+      },
+      openCompletionMarker: async () => {
+        throw primary;
+      },
+    });
+
+    await expect(runFixtureCaptureCli(dependencies)).rejects.toBe(primary);
+    if (candidate === undefined) throw new Error("Expected a candidate directory.");
+    await expect(access(candidate)).rejects.toThrow();
+    expect(output.chunks).toEqual([]);
+  });
+
+  it("keeps completion authoritative when marker-handle close fails", async () => {
+    const repositoryRoot = await createTemporaryDirectory("lineageguard-capture-marker-close-");
+    const output = createRecordingWriter();
+    const closeFailure = new Error(`close failed at C:\\private\\capture with ${token}`);
+    const dependencies = createCliDependencies(repositoryRoot, output.writer, {
+      openCompletionMarker: async (path) => {
+        const handle = await open(path, "wx");
+        return {
+          close: async () => {
+            await handle.close();
+            throw closeFailure;
+          },
+        };
+      },
+    });
+
+    const result = await runFixtureCaptureCli(dependencies);
+
+    const marker = await lstat(join(result.destination, fixtureCompletionMarker));
+    expect(marker.isFile()).toBe(true);
+    expect(marker.size).toBe(0);
+    expect(output.chunks.join("")).not.toContain(token);
+    expect(output.chunks.join("")).not.toContain("C:\\private");
+  });
+
+  it("keeps a completed candidate successful when stdout throws", async () => {
+    const repositoryRoot = await createTemporaryDirectory("lineageguard-capture-stdout-failure-");
+    const stderr = createRecordingWriter();
+    let candidate: string | undefined;
+    const stdout: FixtureCaptureTextWriter = {
+      write: () => {
+        throw new Error(`stdout failed at C:\\\\private\\\\capture with ${token}`);
+      },
+    };
+    const dependencies = createCliDependencies(repositoryRoot, stdout, {
+      createCandidateDirectory: async (prefix) => {
+        candidate = await mkdtemp(prefix);
+        return candidate;
+      },
+    });
+
+    await expect(runFixtureCaptureCommand(dependencies, stderr.writer)).resolves.toBe(0);
+    if (candidate === undefined) throw new Error("Expected a candidate directory.");
+    await expect(lstat(join(candidate, fixtureCompletionMarker))).resolves.toMatchObject({
+      size: 0,
+    });
+    expect(stderr.chunks).toEqual([]);
+  });
+
+  it("maps raw failures to one fixed public CLI error", async () => {
+    const repositoryRoot = await createTemporaryDirectory("lineageguard-capture-public-error-");
+    const stdout = createRecordingWriter();
+    const stderr = createRecordingWriter();
+    const raw = new Error(`raw failure at C:\\private\\capture with ${token}`);
+    const dependencies = createCliDependencies(repositoryRoot, stdout.writer, {
+      capture: async () => {
+        throw raw;
+      },
+    });
+
+    await expect(runFixtureCaptureCli(dependencies)).rejects.toBe(raw);
+    await expect(runFixtureCaptureCommand(dependencies, stderr.writer)).resolves.toBe(1);
+    expect(stdout.chunks).toEqual([]);
+    expect(stderr.chunks).toEqual(["DataHub fixture capture failed.\n"]);
+    expect(stderr.chunks.join("")).not.toContain(token);
+    expect(stderr.chunks.join("")).not.toContain("C:\\private");
+  });
 });

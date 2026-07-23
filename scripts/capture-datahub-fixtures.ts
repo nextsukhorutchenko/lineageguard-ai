@@ -1,6 +1,16 @@
-import { lstat, readFile, realpath, writeFile } from "node:fs/promises";
-import { basename, relative, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { format } from "prettier";
 import { z } from "zod";
 import { loadRuntimeConfig, type RuntimeConfig } from "../src/config/runtime-config.js";
@@ -22,6 +32,35 @@ export const fixtureFileNames = [
   "lineage-order-details-customer-id.json",
   "entity-context-order-details-impact.json",
 ] as const;
+
+export const fixtureCompletionMarker = ".complete";
+export const fixtureCaptureRepositoryRoot = resolve(fileURLToPath(new URL("../", import.meta.url)));
+
+const candidateNamePattern = /^capture-[A-Za-z0-9_-]+$/;
+
+export interface FixtureCaptureMarkerHandle {
+  close(): Promise<void>;
+}
+
+export interface FixtureCaptureTextWriter {
+  write(text: string): unknown;
+}
+
+export interface FixtureCaptureCliDependencies {
+  readonly repositoryRoot: string;
+  readonly environment: NodeJS.ProcessEnv;
+  readonly stdout: FixtureCaptureTextWriter;
+  readonly createDirectory: (path: string) => Promise<void>;
+  readonly createCandidateDirectory: (prefix: string) => Promise<string>;
+  readonly capture: typeof captureDataHubFixtures;
+  readonly openCompletionMarker: (path: string) => Promise<FixtureCaptureMarkerHandle>;
+  readonly removeCandidate: (path: string) => Promise<void>;
+}
+
+export interface FixtureCaptureCliResult {
+  readonly destination: string;
+  readonly written: readonly CapturedFixture[];
+}
 
 export interface CapturedFixture {
   readonly path: string;
@@ -129,6 +168,140 @@ const fixtureSchemas = [
   collectionSchema(entityContextSchema),
 ] as const;
 
+function fixtureCapturePathError(): Error {
+  return new Error("Fixture capture path is unsafe.");
+}
+
+function assertDescendant(root: string, target: string): void {
+  const fromRoot = relative(root, target);
+  if (
+    fromRoot.length === 0 ||
+    isAbsolute(fromRoot) ||
+    fromRoot === ".." ||
+    fromRoot.startsWith(`..${sep}`)
+  ) {
+    throw fixtureCapturePathError();
+  }
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as { readonly code?: unknown }).code === "ENOENT"
+  );
+}
+
+async function assertNoLinkedExistingDirectoryComponents(
+  root: string,
+  target: string,
+): Promise<void> {
+  const absoluteRoot = resolve(root);
+  const absoluteTarget = resolve(target);
+  assertDescendant(absoluteRoot, absoluteTarget);
+
+  const rootStats = await lstat(absoluteRoot);
+  if (rootStats.isSymbolicLink() || !rootStats.isDirectory()) {
+    throw fixtureCapturePathError();
+  }
+
+  let current = absoluteRoot;
+  for (const component of relative(absoluteRoot, absoluteTarget).split(sep).filter(Boolean)) {
+    current = join(current, component);
+    try {
+      const stats = await lstat(current);
+      if (stats.isSymbolicLink() || !stats.isDirectory()) {
+        throw fixtureCapturePathError();
+      }
+    } catch (error) {
+      if (isMissingPathError(error)) return;
+      throw error;
+    }
+  }
+}
+
+function isExistingPathError(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as { readonly code?: unknown }).code === "EEXIST"
+  );
+}
+
+async function ensureSafeDirectoryComponent(
+  parent: string,
+  name: string,
+  createDirectory: (path: string) => Promise<void>,
+): Promise<string> {
+  const child = resolve(parent, name);
+  assertDescendant(parent, child);
+  try {
+    await createDirectory(child);
+  } catch (error) {
+    if (!isExistingPathError(error)) throw error;
+  }
+
+  const stats = await lstat(child);
+  if (stats.isSymbolicLink() || !stats.isDirectory()) {
+    throw fixtureCapturePathError();
+  }
+  const [physicalParent, physicalChild] = await Promise.all([realpath(parent), realpath(child)]);
+  assertDescendant(physicalParent, physicalChild);
+  return physicalChild;
+}
+
+async function prepareCaptureRoot(
+  repositoryRoot: string,
+  createDirectory: (path: string) => Promise<void>,
+): Promise<{
+  readonly repositoryRoot: string;
+  readonly captureRoot: string;
+}> {
+  const lexicalRepositoryRoot = resolve(repositoryRoot);
+  const repositoryStats = await lstat(lexicalRepositoryRoot);
+  if (repositoryStats.isSymbolicLink() || !repositoryStats.isDirectory()) {
+    throw fixtureCapturePathError();
+  }
+  const physicalRepositoryRoot = await realpath(lexicalRepositoryRoot);
+  const temporaryRoot = await ensureSafeDirectoryComponent(
+    physicalRepositoryRoot,
+    "tmp",
+    createDirectory,
+  );
+  const physicalCaptureRoot = await ensureSafeDirectoryComponent(
+    temporaryRoot,
+    "datahub-fixture-captures",
+    createDirectory,
+  );
+  return {
+    repositoryRoot: physicalRepositoryRoot,
+    captureRoot: physicalCaptureRoot,
+  };
+}
+
+async function assertOwnedCandidateDirectory(
+  captureRoot: string,
+  candidate: string,
+): Promise<string> {
+  const absoluteCandidate = resolve(candidate);
+  assertDescendant(captureRoot, absoluteCandidate);
+  const leaf = relative(captureRoot, absoluteCandidate);
+  if (leaf.includes(sep) || !candidateNamePattern.test(leaf)) {
+    throw fixtureCapturePathError();
+  }
+
+  await assertNoLinkedExistingDirectoryComponents(captureRoot, absoluteCandidate);
+  const stats = await lstat(absoluteCandidate);
+  if (stats.isSymbolicLink() || !stats.isDirectory()) {
+    throw fixtureCapturePathError();
+  }
+  const physicalCandidate = await realpath(absoluteCandidate);
+  assertDescendant(captureRoot, physicalCandidate);
+  return physicalCandidate;
+}
+
 async function validateCommittedFixtures(): Promise<void> {
   for (const [index, filename] of fixtureFileNames.entries()) {
     const text = await readFile(
@@ -137,6 +310,73 @@ async function validateCommittedFixtures(): Promise<void> {
     );
     fixtureSchemas[index]!.parse(JSON.parse(text));
   }
+}
+
+async function validateCapturedCandidate(destination: string): Promise<readonly CapturedFixture[]> {
+  const expected = [...fixtureFileNames].toSorted((left, right) =>
+    left.localeCompare(right, "en-US"),
+  );
+  const actual = (await readdir(destination)).toSorted((left, right) =>
+    left.localeCompare(right, "en-US"),
+  );
+  if (actual.length !== expected.length || actual.some((name, index) => name !== expected[index])) {
+    throw new Error("Captured fixture candidate has an invalid file set.");
+  }
+
+  const written: CapturedFixture[] = [];
+  for (const [index, filename] of fixtureFileNames.entries()) {
+    const path = resolve(destination, filename);
+    const stats = await lstat(path);
+    if (stats.isSymbolicLink() || !stats.isFile()) {
+      throw new Error("Captured fixture candidate contains an unsafe fixture.");
+    }
+    const text = await readFile(path, "utf8");
+    fixtureSchemas[index]!.parse(JSON.parse(text));
+    written.push({ path, basename: filename });
+  }
+  return written;
+}
+
+async function assertSafeCleanupEntries(candidate: string): Promise<void> {
+  for (const name of await readdir(candidate)) {
+    if (name === fixtureCompletionMarker) {
+      throw fixtureCapturePathError();
+    }
+    const entry = resolve(candidate, name);
+    assertDescendant(candidate, entry);
+    const stats = await lstat(entry);
+    if (stats.isSymbolicLink() || !stats.isFile()) {
+      throw fixtureCapturePathError();
+    }
+  }
+}
+
+async function cleanupOwnedCandidate(
+  captureRoot: string,
+  candidate: string,
+  removeCandidate: (path: string) => Promise<void>,
+): Promise<void> {
+  try {
+    const ownedCandidate = await assertOwnedCandidateDirectory(captureRoot, candidate);
+    await assertSafeCleanupEntries(ownedCandidate);
+    await removeCandidate(ownedCandidate);
+  } catch {
+    // Cleanup is best-effort. Never traverse an unverified path or replace the primary failure.
+  }
+}
+
+function createDefaultFixtureCaptureCliDependencies(): FixtureCaptureCliDependencies {
+  return {
+    repositoryRoot: fixtureCaptureRepositoryRoot,
+    environment: process.env,
+    stdout: process.stdout,
+    createDirectory: (path) => mkdir(path),
+    createCandidateDirectory: (prefix) => mkdtemp(prefix),
+    capture: captureDataHubFixtures,
+    openCompletionMarker: (path) => open(path, "wx"),
+    removeCandidate: (path) =>
+      rm(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }),
+  };
 }
 
 export async function serializeFixture(payload: unknown, token: string): Promise<string> {
@@ -222,11 +462,64 @@ export async function captureDataHubFixtures(
   }
 }
 
-async function main(): Promise<void> {
-  const config = loadRuntimeConfig(process.env);
-  const written = await captureDataHubFixtures(config, resolve("tests/fixtures/datahub"));
-  console.log(`Captured ${written.length} sanitized DataHub fixtures.`);
+export async function runFixtureCaptureCli(
+  dependencies: FixtureCaptureCliDependencies = createDefaultFixtureCaptureCliDependencies(),
+): Promise<FixtureCaptureCliResult> {
+  const config = loadRuntimeConfig(dependencies.environment);
+  const roots = await prepareCaptureRoot(dependencies.repositoryRoot, dependencies.createDirectory);
+  let candidate: string | undefined;
+  let completed = false;
+
+  try {
+    const created = await dependencies.createCandidateDirectory(
+      join(roots.captureRoot, "capture-"),
+    );
+    candidate = await assertOwnedCandidateDirectory(roots.captureRoot, created);
+    await dependencies.capture(config, candidate);
+    candidate = await assertOwnedCandidateDirectory(roots.captureRoot, candidate);
+    const written = await validateCapturedCandidate(candidate);
+
+    const markerHandle = await dependencies.openCompletionMarker(
+      resolve(candidate, fixtureCompletionMarker),
+    );
+    completed = true;
+    await markerHandle.close().catch(() => undefined);
+
+    const displayPath = relative(roots.repositoryRoot, candidate).split(sep).join("/");
+    try {
+      dependencies.stdout.write(
+        `Captured ${fixtureFileNames.length} sanitized DataHub fixture candidates at ${displayPath}.\n`,
+      );
+    } catch {
+      // Completion is authoritative; output failure cannot downgrade or delete the candidate.
+    }
+    return { destination: candidate, written };
+  } catch (error) {
+    if (candidate !== undefined && !completed) {
+      await cleanupOwnedCandidate(roots.captureRoot, candidate, dependencies.removeCandidate);
+    }
+    throw error;
+  }
+}
+
+export async function runFixtureCaptureCommand(
+  dependencies: FixtureCaptureCliDependencies = createDefaultFixtureCaptureCliDependencies(),
+  stderr: FixtureCaptureTextWriter = process.stderr,
+): Promise<number> {
+  try {
+    await runFixtureCaptureCli(dependencies);
+    return 0;
+  } catch {
+    try {
+      stderr.write("DataHub fixture capture failed.\n");
+    } catch {
+      // A broken output stream must not expose or replace the bounded public failure.
+    }
+    return 1;
+  }
 }
 
 const entrypoint = process.argv[1];
-if (entrypoint && import.meta.url === pathToFileURL(resolve(entrypoint)).href) void main();
+if (entrypoint && import.meta.url === pathToFileURL(resolve(entrypoint)).href) {
+  process.exitCode = await runFixtureCaptureCommand();
+}
