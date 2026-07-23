@@ -114,11 +114,14 @@ Report: <repository>\runs\20260722T120000Z-0123abcd\impact-report.md
 
 Report-producing statuses are:
 
-| Status                       | Meaning                                                                                                   |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `COMPLETED`                  | Downstream tables and at least one exact-URN column confirmation are available; coverage gaps may remain. |
-| `COMPLETED_WITH_LIMITATIONS` | Downstream tables exist, but no column-lineage result confirms an exact downstream table URN.             |
-| `INSUFFICIENT_METADATA`      | No downstream lineage was returned within the two-hop boundary.                                           |
+| Status                       | Meaning                                                                                                                |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `COMPLETED`                  | Downstream tables and at least one exact-URN column confirmation are available; coverage gaps may remain.              |
+| `COMPLETED_WITH_LIMITATIONS` | Downstream tables exist, but no column-lineage result confirms an exact downstream table URN.                          |
+| `INSUFFICIENT_METADATA`      | No downstream lineage was returned within the two-hop boundary.                                                        |
+| `INCOMPLETE_EVIDENCE`        | Search, schema, table-lineage, or column-lineage collection is incomplete; collected affected counts are lower bounds. |
+
+`INCOMPLETE_EVIDENCE` still produces a report when enough validated evidence exists to continue. Incomplete search or schema cannot prove that a dataset or source column is absent, and incomplete lineage cannot justify a direct rename. The status changes execution policy without changing the deterministic impact formula. Entity-context gaps remain separate Context Coverage information and do not, by themselves, select `INCOMPLETE_EVIDENCE`.
 
 Input, resolution, missing-column, DataHub/MCP, and artifact failures return actionable terminal guidance and do not fabricate a report.
 
@@ -152,11 +155,23 @@ pnpm vitest run src/security/redact.test.ts
 pnpm vitest run src/artifacts/write-run-artifacts.test.ts
 ```
 
-Recapture the four deterministic, sanitized fixtures when intentionally revalidating the pinned datapack:
+Capture a review candidate when intentionally revalidating the pinned datapack:
 
 ```powershell
 pnpm tsx scripts/capture-datahub-fixtures.ts
 ```
+
+The command writes a new create-only candidate beneath `tmp/datahub-fixture-captures/capture-*`; it never writes to or replaces `tests/fixtures/datahub/`. A candidate is complete only when all five strict regular fixture files are present and an empty `.complete` marker was created last:
+
+| Fixture                                    | Replay evidence                                                         |
+| ------------------------------------------ | ----------------------------------------------------------------------- |
+| `search-order-details.json`                | Exact dataset-search candidates and collection completeness.            |
+| `schema-order-details.json`                | Target schema fields and collection completeness.                       |
+| `lineage-order-details-table.json`         | Bounded downstream table lineage.                                       |
+| `lineage-order-details-customer-id.json`   | Bounded downstream lineage for the source column `customer_id`.         |
+| `entity-context-order-details-impact.json` | Allowlisted context for the target and deduplicated table-lineage URNs. |
+
+Each fixture is a canonical strict `{ items, completeness }` replay envelope. The entity-context schema rejects fields named `email`, `profile`, `relatedDocuments`, `rawSql`, `token`, and `diagnostics`, and rejects descriptions longer than 2,000 characters; serialization redacts the configured DataHub token literal. This is a field-name and configured-literal guarantee, not a general content scan for every possible SQL or credential string. Candidate output is replay-compatible review evidence, not proof of current live DataHub state. An unmarked candidate is untrusted even if its files look complete: do not manually create, copy, or add `.complete`; delete it and rerun capture. Promoting a candidate requires a separate owner-approved deterministic fixture migration and version-control review; do not copy `.complete` into committed fixtures.
 
 Verify that no tracked repository file contains the active token without printing the token itself:
 
