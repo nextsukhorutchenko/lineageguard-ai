@@ -1,5 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { basename, resolve } from "node:path";
+import { lstat, readFile, realpath, writeFile } from "node:fs/promises";
+import { basename, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { format } from "prettier";
 import { z } from "zod";
@@ -146,6 +146,51 @@ export async function serializeFixture(payload: unknown, token: string): Promise
   return format(serialized, { parser: "json", printWidth: 100 });
 }
 
+function fixturePayloadList(payloads: FixturePayloads): readonly unknown[] {
+  return [
+    payloads.candidates,
+    payloads.fields,
+    payloads.tableLineage,
+    payloads.columnLineage,
+    payloads.entityContext,
+  ];
+}
+
+async function resolveWritableFixtureDestination(destination: string): Promise<string> {
+  const lexicalDestination = resolve(destination);
+  const stats = await lstat(lexicalDestination);
+  if (stats.isSymbolicLink() || !stats.isDirectory()) {
+    throw new Error("Fixture destination is unsafe.");
+  }
+  const physicalDestination = await realpath(lexicalDestination);
+  if (relative(lexicalDestination, physicalDestination) !== "") {
+    throw new Error("Fixture destination is unsafe.");
+  }
+  return physicalDestination;
+}
+
+export async function writeFixturePayloads(
+  payloads: FixturePayloads,
+  token: string,
+  destination: string,
+): Promise<readonly CapturedFixture[]> {
+  const values = fixturePayloadList(payloads);
+  values.forEach((value, index) => fixtureSchemas[index]!.parse(value));
+  const rendered = await Promise.all(values.map((value) => serializeFixture(value, token)));
+
+  const safeDestination = await resolveWritableFixtureDestination(destination);
+  const written: CapturedFixture[] = [];
+  for (const [index, filename] of fixtureFileNames.entries()) {
+    const path = resolve(safeDestination, filename);
+    await writeFile(path, rendered[index]!, {
+      encoding: "utf8",
+      flag: "wx",
+    });
+    written.push({ path, basename: basename(path) as (typeof fixtureFileNames)[number] });
+  }
+  return written;
+}
+
 export async function captureDataHubFixtures(
   config: RuntimeConfig,
   destination: string,
@@ -170,26 +215,8 @@ export async function captureDataHubFixtures(
       columnLineage,
       entityContext,
     });
-    const payloads = [
-      canonical.candidates,
-      canonical.fields,
-      canonical.tableLineage,
-      canonical.columnLineage,
-      canonical.entityContext,
-    ] as const;
-    payloads.forEach((payload, index) => fixtureSchemas[index]!.parse(payload));
 
-    await mkdir(destination, { recursive: true });
-    const written: CapturedFixture[] = [];
-    for (const [index, filename] of fixtureFileNames.entries()) {
-      const path = resolve(destination, filename);
-      await writeFile(path, await serializeFixture(payloads[index], config.datahubGmsToken), {
-        encoding: "utf8",
-        flag: "wx",
-      });
-      written.push({ path, basename: basename(path) as (typeof fixtureFileNames)[number] });
-    }
-    return written;
+    return await writeFixturePayloads(canonical, config.datahubGmsToken, destination);
   } finally {
     await catalog.close();
   }
