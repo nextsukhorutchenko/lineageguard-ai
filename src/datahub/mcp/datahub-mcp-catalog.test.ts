@@ -19,7 +19,10 @@ import {
   listAndAssertRequiredReadOnlyTools,
   toDataHubMcpToolClient,
 } from "./mcp-client.js";
-import type { OwnedMcpToolCallOptions } from "./mcp-boundary-policy.js";
+import {
+  DATAHUB_MCP_BOUNDARY_POLICY,
+  type OwnedMcpToolCallOptions,
+} from "./mcp-boundary-policy.js";
 
 const DATASET_URN =
   "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.order_details,PROD)";
@@ -2099,6 +2102,55 @@ describe("DataHubMcpCatalog", () => {
         status: "error",
       },
     ]);
+  });
+
+  it("maps a secret-bearing oversized result budget failure to one safe error trace", async () => {
+    const secret = "result-budget-secret-token";
+    const rawPayload = "raw-result-budget-payload";
+    const client = new RecordingMcpClient([
+      jsonResult({
+        start: 0,
+        count: 1,
+        total: 1,
+        searchResults: [
+          {
+            entity: {
+              urn: DATASET_URN,
+              name: `${rawPayload}-${secret}-${"x".repeat(
+                DATAHUB_MCP_BOUNDARY_POLICY.maxToolResultBytes,
+              )}`,
+            },
+          },
+        ],
+      }),
+    ]);
+    const catalog = new DataHubMcpCatalog(client, [secret]);
+
+    const error = await catalog.searchDatasets("orders").catch((caught: unknown) => caught);
+    const trace = catalog.getTrace();
+    const serializedError = JSON.stringify(error);
+    const serializedTrace = JSON.stringify(trace);
+
+    expect(error).toBeInstanceOf(AppError);
+    expect(error).toMatchObject({ code: "DATAHUB_UNAVAILABLE", details: {} });
+    expect(trace).toHaveLength(1);
+    expect(trace).toMatchObject([
+      {
+        callId: "mcp-001",
+        tool: "search",
+        arguments: {
+          query: "/q orders",
+          filter: "entity_type = dataset",
+          num_results: 50,
+          offset: 0,
+        },
+        status: "error",
+      },
+    ]);
+    expect(serializedError).not.toContain(secret);
+    expect(serializedError).not.toContain(rawPayload);
+    expect(serializedTrace).not.toContain(secret);
+    expect(serializedTrace).not.toContain(rawPayload);
   });
 
   it("closes its MCP client", async () => {
