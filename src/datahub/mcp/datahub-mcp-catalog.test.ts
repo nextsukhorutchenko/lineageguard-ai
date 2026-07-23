@@ -132,6 +132,67 @@ const ownedReadCases = [
   },
 ] as const;
 
+interface OversizedCatalogCase {
+  readonly label: string;
+  readonly result: CallToolResult;
+  readonly invoke: (catalog: DataHubMcpCatalog) => Promise<unknown>;
+}
+
+const oversizedCatalogCases: readonly OversizedCatalogCase[] = [
+  {
+    label: "search",
+    result: jsonResult({
+      start: 0,
+      count: 51,
+      total: 51,
+      searchResults: Array.from({ length: 51 }, (_, index) => ({
+        entity: { urn: `urn:li:dataset:(search-${index})` },
+      })),
+    }),
+    invoke: (catalog) => catalog.searchDatasets("orders"),
+  },
+  {
+    label: "schema",
+    result: jsonResult({
+      urn: DATASET_URN,
+      offset: 0,
+      fields: Array.from({ length: 101 }, (_, index) => ({
+        fieldPath: `field_${index}`,
+      })),
+      totalFields: 101,
+      returned: 101,
+      remainingCount: 0,
+    }),
+    invoke: (catalog) => catalog.listSchemaFields(DATASET_URN),
+  },
+  {
+    label: "lineage",
+    result: jsonResult({
+      downstreams: {
+        searchResults: Array.from({ length: 101 }, (_, index) => ({
+          entity: { urn: `urn:li:dataset:(lineage-${index})` },
+          degree: 1,
+          lineageColumns: [],
+        })),
+        offset: 0,
+        returned: 101,
+        hasMore: false,
+      },
+    }),
+    invoke: (catalog) => catalog.getDownstreamLineage(DATASET_URN, { maxHops: 2 }),
+  },
+  {
+    label: "entities",
+    result: jsonResult(
+      Array.from({ length: 11 }, (_, index) => ({
+        urn: index === 0 ? DATASET_URN : `urn:li:dataset:(entity-${index})`,
+        type: "DATASET",
+      })),
+    ),
+    invoke: (catalog) => catalog.getEntityContext([DATASET_URN]),
+  },
+];
+
 describe("DataHubMcpCatalog owned boundary", () => {
   it.each(ownedReadCases)(
     "expires $tool without a caller signal after fifteen seconds",
@@ -1269,7 +1330,7 @@ describe("Task 1A bounded evidence collection", () => {
     const entity = (urn: string) => ({
       urn,
       type: "DATASET",
-      properties: { description: `${urn}${"Ж".repeat(1_990)}` },
+      properties: { description: "Ж".repeat(1_990) },
     });
     const results = [0, 10, 20].map((offset) => urns.slice(offset, offset + 10).map(entity));
     const forward = await new DataHubMcpCatalog(
@@ -1788,17 +1849,6 @@ describe("DataHubMcpCatalog", () => {
         remainingCount: 0,
       },
     },
-    {
-      invariant: "page field count stays within the requested limit",
-      page: {
-        urn: DATASET_URN,
-        offset: 0,
-        fields: Array.from({ length: 101 }, (_, index) => ({ fieldPath: `field_${index}` })),
-        totalFields: 101,
-        returned: 101,
-        remainingCount: 0,
-      },
-    },
   ])("marks schema incomplete when $invariant is inconsistent", async ({ page }) => {
     const client = new RecordingMcpClient([jsonResult(page)]);
     const catalog = new DataHubMcpCatalog(client);
@@ -1808,6 +1858,45 @@ describe("DataHubMcpCatalog", () => {
     });
     expect(client.calls).toHaveLength(1);
     expect(catalog.getTrace().map(({ status }) => status)).toEqual(["ok"]);
+  });
+
+  it.each(oversizedCatalogCases)(
+    "maps oversized $label arrays to a safe public failure",
+    async ({ result, invoke }) => {
+      const catalog = new DataHubMcpCatalog(new RecordingMcpClient([result]));
+      const error = await invoke(catalog).catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({ code: "DATAHUB_UNAVAILABLE", details: {} });
+      expect(catalog.getTrace()).toMatchObject([{ status: "error" }]);
+      expect(JSON.stringify(error)).not.toContain("field_100");
+    },
+  );
+
+  it("maps an oversized secret-bearing name to a safe public failure", async () => {
+    const secret = "schema-boundary-secret";
+    const rawName = `${secret}${"x".repeat(501 - secret.length)}`;
+    const catalog = new DataHubMcpCatalog(
+      new RecordingMcpClient([
+        jsonResult({
+          start: 0,
+          count: 1,
+          total: 1,
+          searchResults: [{ entity: { urn: DATASET_URN, name: rawName } }],
+        }),
+      ]),
+      [secret],
+    );
+
+    const error = await catalog.searchDatasets("orders").catch((caught: unknown) => caught);
+    const serializedError = JSON.stringify(error);
+    const serializedTrace = JSON.stringify(catalog.getTrace());
+
+    expect(error).toMatchObject({ code: "DATAHUB_UNAVAILABLE", details: {} });
+    expect(catalog.getTrace()).toMatchObject([{ status: "error" }]);
+    expect(serializedError).not.toContain(secret);
+    expect(serializedError).not.toContain(rawName);
+    expect(serializedTrace).not.toContain(secret);
+    expect(serializedTrace).not.toContain(rawName);
   });
 
   it("fails closed when schema totalFields changes between pages", async () => {

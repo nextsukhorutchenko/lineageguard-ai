@@ -1,6 +1,13 @@
 import { z } from "zod";
 
-const urnSchema = z.string().startsWith("urn:li:");
+const urnSchema = z.string().max(500).startsWith("urn:li:");
+const nameSchema = z.string().max(500);
+const fieldPathSchema = z.string().max(500);
+const platformSchema = z.string().max(100);
+const entityTypeSchema = z.string().max(100);
+const nativeDataTypeSchema = z.string().max(500);
+const descriptionSchema = z.string().max(2_000);
+const dependencyErrorSchema = z.string().max(2_000);
 
 export const searchResponseSchema = z
   .object({
@@ -14,15 +21,16 @@ export const searchResponseSchema = z
             entity: z
               .object({
                 urn: urnSchema,
-                name: z.string().optional(),
-                properties: z.object({ name: z.string().optional() }).passthrough().optional(),
-                type: z.string().optional(),
-                platform: z.object({ name: z.string().optional() }).passthrough().optional(),
+                name: nameSchema.optional(),
+                properties: z.object({ name: nameSchema.optional() }).passthrough().optional(),
+                type: entityTypeSchema.optional(),
+                platform: z.object({ name: platformSchema.optional() }).passthrough().optional(),
               })
               .passthrough(),
           })
           .passthrough(),
       )
+      .max(50)
       .default([]),
   })
   .passthrough();
@@ -31,16 +39,18 @@ export const schemaResponseSchema = z
   .object({
     urn: urnSchema,
     offset: z.number().int().nonnegative(),
-    fields: z.array(
-      z
-        .object({
-          fieldPath: z.string(),
-          nativeDataType: z.string().optional(),
-          nullable: z.boolean().optional(),
-          description: z.string().optional(),
-        })
-        .passthrough(),
-    ),
+    fields: z
+      .array(
+        z
+          .object({
+            fieldPath: fieldPathSchema,
+            nativeDataType: nativeDataTypeSchema.optional(),
+            nullable: z.boolean().optional(),
+            description: descriptionSchema.optional(),
+          })
+          .passthrough(),
+      )
+      .max(100),
     totalFields: z.number().int().nonnegative(),
     returned: z.number().int().nonnegative(),
     remainingCount: z.number().int().nonnegative(),
@@ -52,18 +62,18 @@ const lineageResultSchema = z
     entity: z
       .object({
         urn: urnSchema,
-        name: z.string().optional(),
-        platform: z.object({ name: z.string().optional() }).passthrough().optional(),
+        name: nameSchema.optional(),
+        platform: z.object({ name: platformSchema.optional() }).passthrough().optional(),
       })
       .passthrough(),
     degree: z.number().int().nonnegative(),
-    lineageColumns: z.array(z.string()).default([]),
+    lineageColumns: z.array(fieldPathSchema).max(100).default([]),
   })
   .passthrough();
 
 const lineageDirectionSchema = z
   .object({
-    searchResults: z.array(lineageResultSchema).default([]),
+    searchResults: z.array(lineageResultSchema).max(100).default([]),
     offset: z.number().int().nonnegative().optional(),
     returned: z.number().int().nonnegative().optional(),
     hasMore: z.boolean().optional(),
@@ -93,41 +103,43 @@ const qualityStatusSchema = z.enum([
 ]);
 const qualitySignalSchema = z.object({ status: qualityStatusSchema }).passthrough();
 
-export const getEntityErrorSchema = z.object({ urn: urnSchema, error: z.string() }).passthrough();
+export const getEntityErrorSchema = z
+  .object({ urn: urnSchema, error: dependencyErrorSchema })
+  .passthrough();
 
 export const getEntitySuccessSchema = z
   .object({
     urn: urnSchema,
     error: z.never().optional(),
-    type: z.string().default("UNKNOWN"),
-    name: z.string().optional(),
-    platform: z.object({ name: z.string().optional() }).passthrough().optional(),
+    type: entityTypeSchema.default("UNKNOWN"),
+    name: nameSchema.optional(),
+    platform: z.object({ name: platformSchema.optional() }).passthrough().optional(),
     properties: z
-      .object({ name: z.string().optional(), description: z.string().optional() })
+      .object({ name: nameSchema.optional(), description: descriptionSchema.optional() })
       .passthrough()
       .optional(),
     ownership: z
-      .object({ owners: z.array(ownerSchema).default([]) })
+      .object({ owners: z.array(ownerSchema).max(100).default([]) })
       .passthrough()
       .optional(),
     tags: z
-      .object({ tags: z.array(tagSchema).default([]) })
+      .object({ tags: z.array(tagSchema).max(100).default([]) })
       .passthrough()
       .optional(),
     glossaryTerms: z
-      .object({ terms: z.array(termSchema).default([]) })
+      .object({ terms: z.array(termSchema).max(100).default([]) })
       .passthrough()
       .optional(),
     siblings: z
-      .object({ siblings: z.array(siblingSchema).default([]) })
+      .object({ siblings: z.array(siblingSchema).max(100).default([]) })
       .passthrough()
       .optional(),
     dataQuality: z
-      .object({ assertions: z.array(qualitySignalSchema).default([]) })
+      .object({ assertions: z.array(qualitySignalSchema).max(100).default([]) })
       .passthrough()
       .optional(),
     quality: z
-      .object({ signals: z.array(qualitySignalSchema).default([]) })
+      .object({ signals: z.array(qualitySignalSchema).max(100).default([]) })
       .passthrough()
       .optional(),
   })
