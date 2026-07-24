@@ -5390,6 +5390,7 @@ export async function regeneratePackage(input: {
   const { snapshot: parent, context } = await loadRegenerationContext({
     runsRoot: input.runsRoot,
     runId: input.parentRunId,
+    expectedMode: input.mode,
   });
   if (
     parent.mode !== input.mode ||
@@ -6111,11 +6112,12 @@ Export `safeUnexpectedFailureSnapshot(runId, mode)` from the same file by parsin
 
 Use explicit local parameter types and `runtime = "nodejs"` in all three handlers. Do not depend on generated global `RouteContext`, because `.next/types` is absent in a clean checkout before the first Next build:
 
-Import `loadRunSnapshot`, `loadRegenerationContext`, `reserveGenerationRetry`, and
-`readCompletedPackageFile` from `src/runs/run-store.ts`; do not import persistence readers from the
-legacy artifact facade. Every handler must load configuration and call `assertTrustedRunsRoot`
-before storage access. Run creation must complete this preflight before provider, catalog, DataHub,
-or workflow construction.
+The reload and download routes import `loadRunSnapshot` and `readCompletedPackageFile` from
+`src/runs/run-store.ts`; `src/app/regenerate-package.ts` owns `loadRegenerationContext` and
+`reserveGenerationRetry` from the same module. Do not import persistence readers from the legacy
+artifact facade. Every handler must load configuration and call `assertTrustedRunsRoot` before
+storage access. Run creation must complete this preflight before provider, catalog, DataHub, or
+workflow construction.
 
 ```ts
 type RunRouteContext = { readonly params: Promise<{ readonly runId: string }> };
@@ -8690,7 +8692,7 @@ git diff --check
 git status --short --untracked-files=all
 ```
 
-Expected: frozen install succeeds; format, lint, typecheck, all offline Vitest tests, CLI build, Next.js production build, and all Chromium acceptance tests pass; `git diff --check` is clean; status lists exactly the Task 14 live integration test, generator script, `package.json`, five generated examples, `README.md`, `docs/demo-scenario.md`, `docs/architecture/agent-demo.md`, and `docs/live-verification.md`, with no unrelated or generated residue.
+Expected: frozen install succeeds; format, lint, typecheck, all offline Vitest tests, CLI build, Next.js production build, and all Chromium acceptance tests pass; `git diff --check` is clean; status lists exactly the Task 14 live integration test, generator script, `package.json`, four generated examples, `README.md`, `docs/demo-scenario.md`, `docs/architecture/agent-demo.md`, and `docs/live-verification.md`, with no unrelated or generated residue.
 
 - [ ] **Step 6: Commit the reproducible demo and documentation**
 
@@ -11329,7 +11331,7 @@ After Task 14A:
 3. Confirm every AC-001 through AC-021 has a named automated test, repository validator, or the documented opt-in live check.
 4. Run both tracked-plus-untracked working-tree and repository-history secret scans; confirm the branch contains no API keys, DataHub tokens, private traces, raw chain-of-thought, unrestricted tool access, database execution, DataHub mutation, GitHub automation, unapproved external publication, or false live-demo/OSS-contribution claims.
 5. Confirm `git diff origin/main...HEAD -- .github/workflows/ci.yml` retains immutable action SHAs.
-6. Confirm the dated submission checklist, attribution inventory, judging map, sample-output guide, local skill-candidate validator, and atomic-package integrity tests pass without network access.
+6. Confirm the dated submission checklist, attribution inventory, judging map, sample-output guide, local skill-candidate validator, and flat-envelope publication and integrity tests pass without network access.
 7. Confirm the documented live preflight distinguishes UI from GMS; separately inspect the dated,
    commit-bound `docs/live-verification.md` without treating repository phrase validation as
    execution proof. Also confirm the runtime-proof panel shows the four read operations and exact
