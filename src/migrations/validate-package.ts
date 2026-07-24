@@ -6,6 +6,11 @@ import type {
   RenderedMigrationPackage,
 } from "./render-snowflake-package.js";
 import {
+  parseSnowflakeObjectName,
+  quoteSnowflakeIdentifier,
+  renderSnowflakeObjectName,
+} from "./snowflake-identifiers.js";
+import {
   executableSqlStatements,
   parseSnowflakeRenameStatement,
   validateSqlArtifact,
@@ -18,6 +23,12 @@ const requiredArtifacts = [
   "validation.sql",
   "rollout-plan.md",
 ] as const satisfies readonly MigrationArtifactFilename[];
+const sqlArtifacts = ["migration-up.sql", "migration-down.sql", "validation.sql"] as const;
+
+type SqlArtifactFilename = (typeof sqlArtifacts)[number];
+type ExpectedSqlPlan = Readonly<Record<SqlArtifactFilename, readonly string[]>>;
+
+const executableNativeType = /^[A-Za-z][A-Za-z0-9_]*(?:\(\d+(?:,\d+)?\))?$/;
 
 function countExactHeading(markdown: string, heading: string): number {
   return markdown.split("\n").filter((line) => line === heading).length;
@@ -44,6 +55,65 @@ function hasExactEvidenceCitation(
     lines.has(`-- Evidence: ${contextEvidenceIds.join(", ")}`) ||
     lines.has(`-- Evidence: ${validDraftEvidenceIds.join(", ")}`) ||
     validDraftEvidenceIds.some((id) => lines.has(`-- Evidence: ${id}`))
+  );
+}
+
+function expectedSqlPlan(
+  context: ChangeContext,
+  draft: MigrationPackageDraft,
+): ExpectedSqlPlan | undefined {
+  if (draft.strategy === "NON_EXECUTABLE_TEMPLATE") {
+    return {
+      "migration-up.sql": [],
+      "migration-down.sql": [],
+      "validation.sql": [],
+    };
+  }
+
+  const objectName = parseSnowflakeObjectName(context.target.name);
+  const nativeType = context.sourceField.nativeDataType;
+  if (
+    context.target.platform?.toLocaleLowerCase("en-US") !== "snowflake" ||
+    objectName === undefined ||
+    nativeType === undefined ||
+    !executableNativeType.test(nativeType)
+  ) {
+    return undefined;
+  }
+
+  const table = renderSnowflakeObjectName(objectName);
+  const source = quoteSnowflakeIdentifier(context.sourceField.fieldPath);
+  const target = quoteSnowflakeIdentifier(context.intent.targetColumn);
+  const showColumns = `SHOW COLUMNS IN TABLE ${table}`;
+
+  if (draft.strategy === "DIRECT_RENAME") {
+    return {
+      "migration-up.sql": [`ALTER TABLE ${table} RENAME COLUMN ${source} TO ${target}`],
+      "migration-down.sql": [`ALTER TABLE ${table} RENAME COLUMN ${target} TO ${source}`],
+      "validation.sql": [
+        showColumns,
+        `SELECT COUNT(*) AS row_count, COUNT_IF(${target} IS NULL) AS target_null_count FROM ${table}`,
+      ],
+    };
+  }
+
+  return {
+    "migration-up.sql": [
+      `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${target} ${nativeType}`,
+      `UPDATE ${table} SET ${target} = ${source} WHERE ${target} IS NULL`,
+    ],
+    "migration-down.sql": [],
+    "validation.sql": [
+      showColumns,
+      `SELECT COUNT(*) AS row_count, COUNT_IF(${source} IS NULL) AS source_null_count, COUNT_IF(${target} IS NULL) AS target_null_count, COUNT_IF(${source} IS DISTINCT FROM ${target}) AS mismatched_count FROM ${table}`,
+    ],
+  };
+}
+
+function statementsEqual(actual: readonly string[], expected: readonly string[]): boolean {
+  return (
+    actual.length === expected.length &&
+    actual.every((statement, index) => statement === expected[index])
   );
 }
 
@@ -94,6 +164,20 @@ export function validatePackage(
     }
   }
 
+  const expectedPlan = expectedSqlPlan(context, draft);
+  for (const filename of sqlArtifacts) {
+    const content = runtimeFiles[filename];
+    const actual = typeof content === "string" ? executableSqlStatements(content) : [];
+    const expected = expectedPlan?.[filename];
+    if (expected === undefined || !statementsEqual(actual, expected)) {
+      findings.push({
+        code: "SQL_ARTIFACT_MISMATCH",
+        message: `${filename} does not match the context-grounded strategy plan.`,
+        filename,
+      });
+    }
+  }
+
   if (rendered.classification !== draft.executionClassification) {
     findings.push({
       code: "CLASSIFICATION_MISMATCH",
@@ -112,9 +196,7 @@ export function validatePackage(
   }
 
   if (rendered.classification !== "NON_EXECUTABLE_TEMPLATE") {
-    const hasSqlPlaceholder = (
-      ["migration-up.sql", "migration-down.sql", "validation.sql"] as const
-    ).some((filename) => {
+    const hasSqlPlaceholder = sqlArtifacts.some((filename) => {
       const content = runtimeFiles[filename];
       return typeof content === "string" && /<[A-Z][A-Z0-9_-]*>/u.test(content);
     });
@@ -191,7 +273,7 @@ export function validatePackage(
     }
   }
 
-  for (const filename of ["migration-up.sql", "migration-down.sql", "validation.sql"] as const) {
+  for (const filename of sqlArtifacts) {
     const content = runtimeFiles[filename];
     if (typeof content === "string") {
       findings.push(...validateSqlArtifact(filename, content, rendered.classification));

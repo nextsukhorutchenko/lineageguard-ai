@@ -25,41 +25,88 @@ type SupportedStatementKind =
 const quotedIdentifierPattern = String.raw`"(?:""|[^"\p{Cc}\p{Cf}\p{Zl}\p{Zp}])+"`;
 const snowflakeObjectPattern = `${quotedIdentifierPattern}\\.${quotedIdentifierPattern}\\.${quotedIdentifierPattern}`;
 const nativeTypePattern = String.raw`[A-Za-z][A-Za-z0-9_]*(?:\(\d+(?:,\d+)?\))?`;
+const spacing = String.raw`[ \t\n]`;
+const optionalSpacing = `${spacing}*`;
+const requiredSpacing = `${spacing}+`;
+const unsafeSqlCharacter = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 const addColumnPattern = new RegExp(
-  `^ALTER\\s+TABLE\\s+${snowflakeObjectPattern}\\s+ADD\\s+COLUMN\\s+IF\\s+NOT\\s+EXISTS\\s+${quotedIdentifierPattern}\\s+${nativeTypePattern}$`,
+  `^ALTER${requiredSpacing}TABLE${requiredSpacing}${snowflakeObjectPattern}${requiredSpacing}ADD${requiredSpacing}COLUMN${requiredSpacing}IF${requiredSpacing}NOT${requiredSpacing}EXISTS${requiredSpacing}${quotedIdentifierPattern}${requiredSpacing}${nativeTypePattern}$`,
   "iu",
 );
 const renameColumnPattern = new RegExp(
-  `^ALTER\\s+TABLE\\s+(${snowflakeObjectPattern})\\s+RENAME\\s+COLUMN\\s+(${quotedIdentifierPattern})\\s+TO\\s+(${quotedIdentifierPattern})$`,
+  `^ALTER${requiredSpacing}TABLE${requiredSpacing}(${snowflakeObjectPattern})${requiredSpacing}RENAME${requiredSpacing}COLUMN${requiredSpacing}(${quotedIdentifierPattern})${requiredSpacing}TO${requiredSpacing}(${quotedIdentifierPattern})$`,
   "iu",
 );
 const updateBackfillPattern = new RegExp(
-  `^UPDATE\\s+(${snowflakeObjectPattern})\\s+SET\\s+(${quotedIdentifierPattern})\\s*=\\s*(${quotedIdentifierPattern})\\s+WHERE\\s+(${quotedIdentifierPattern})\\s+IS\\s+NULL$`,
+  `^UPDATE${requiredSpacing}(${snowflakeObjectPattern})${requiredSpacing}SET${requiredSpacing}(${quotedIdentifierPattern})${optionalSpacing}=${optionalSpacing}(${quotedIdentifierPattern})${requiredSpacing}WHERE${requiredSpacing}(${quotedIdentifierPattern})${requiredSpacing}IS${requiredSpacing}NULL$`,
   "iu",
 );
 const showColumnsPattern = new RegExp(
-  `^SHOW\\s+COLUMNS\\s+IN\\s+TABLE\\s+${snowflakeObjectPattern}$`,
+  `^SHOW${requiredSpacing}COLUMNS${requiredSpacing}IN${requiredSpacing}TABLE${requiredSpacing}${snowflakeObjectPattern}$`,
   "iu",
 );
 const directValidationPattern = new RegExp(
-  `^SELECT\\s+COUNT\\s*\\(\\s*\\*\\s*\\)\\s+AS\\s+row_count\\s*,\\s*COUNT_IF\\s*\\(\\s*(${quotedIdentifierPattern})\\s+IS\\s+NULL\\s*\\)\\s+AS\\s+target_null_count\\s+FROM\\s+${snowflakeObjectPattern}$`,
+  `^SELECT${requiredSpacing}COUNT${optionalSpacing}\\(${optionalSpacing}\\*${optionalSpacing}\\)${requiredSpacing}AS${requiredSpacing}row_count${optionalSpacing},${optionalSpacing}COUNT_IF${optionalSpacing}\\(${optionalSpacing}(${quotedIdentifierPattern})${requiredSpacing}IS${requiredSpacing}NULL${optionalSpacing}\\)${requiredSpacing}AS${requiredSpacing}target_null_count${requiredSpacing}FROM${requiredSpacing}${snowflakeObjectPattern}$`,
   "iu",
 );
 const stagedValidationPattern = new RegExp(
-  `^SELECT\\s+COUNT\\s*\\(\\s*\\*\\s*\\)\\s+AS\\s+row_count\\s*,\\s*COUNT_IF\\s*\\(\\s*(${quotedIdentifierPattern})\\s+IS\\s+NULL\\s*\\)\\s+AS\\s+source_null_count\\s*,\\s*COUNT_IF\\s*\\(\\s*(${quotedIdentifierPattern})\\s+IS\\s+NULL\\s*\\)\\s+AS\\s+target_null_count\\s*,\\s*COUNT_IF\\s*\\(\\s*(${quotedIdentifierPattern})\\s+IS\\s+DISTINCT\\s+FROM\\s+(${quotedIdentifierPattern})\\s*\\)\\s+AS\\s+mismatched_count\\s+FROM\\s+${snowflakeObjectPattern}$`,
+  `^SELECT${requiredSpacing}COUNT${optionalSpacing}\\(${optionalSpacing}\\*${optionalSpacing}\\)${requiredSpacing}AS${requiredSpacing}row_count${optionalSpacing},${optionalSpacing}COUNT_IF${optionalSpacing}\\(${optionalSpacing}(${quotedIdentifierPattern})${requiredSpacing}IS${requiredSpacing}NULL${optionalSpacing}\\)${requiredSpacing}AS${requiredSpacing}source_null_count${optionalSpacing},${optionalSpacing}COUNT_IF${optionalSpacing}\\(${optionalSpacing}(${quotedIdentifierPattern})${requiredSpacing}IS${requiredSpacing}NULL${optionalSpacing}\\)${requiredSpacing}AS${requiredSpacing}target_null_count${optionalSpacing},${optionalSpacing}COUNT_IF${optionalSpacing}\\(${optionalSpacing}(${quotedIdentifierPattern})${requiredSpacing}IS${requiredSpacing}DISTINCT${requiredSpacing}FROM${requiredSpacing}(${quotedIdentifierPattern})${optionalSpacing}\\)${requiredSpacing}AS${requiredSpacing}mismatched_count${requiredSpacing}FROM${requiredSpacing}${snowflakeObjectPattern}$`,
   "iu",
 );
 
 export function executableSqlStatements(sql: string): readonly string[] {
-  return sql
-    .split("\n")
-    .map((line) => line.replace(/--.*$/u, "").trim())
-    .filter(Boolean)
-    .join("\n")
-    .split(";")
-    .map((statement) => statement.trim())
-    .filter(Boolean);
+  const statements: string[] = [];
+  let current = "";
+  let inComment = false;
+  let inQuotedIdentifier = false;
+
+  const appendCurrent = (): void => {
+    const statement = current.replace(/^[ \t\n]+|[ \t\n]+$/gu, "");
+    if (statement.length > 0) statements.push(statement);
+    current = "";
+  };
+
+  for (let index = 0; index < sql.length; index += 1) {
+    const character = sql[index]!;
+    const next = sql[index + 1];
+    if (inComment) {
+      if (character === "\n") {
+        inComment = false;
+        current += character;
+      }
+      continue;
+    }
+    if (inQuotedIdentifier) {
+      current += character;
+      if (character === '"') {
+        if (next === '"') {
+          current += next;
+          index += 1;
+        } else {
+          inQuotedIdentifier = false;
+        }
+      }
+      continue;
+    }
+    if (character === '"') {
+      inQuotedIdentifier = true;
+      current += character;
+      continue;
+    }
+    if (character === "-" && next === "-") {
+      inComment = true;
+      index += 1;
+      continue;
+    }
+    if (character === ";") {
+      appendCurrent();
+      continue;
+    }
+    current += character;
+  }
+  appendCurrent();
+  return statements;
 }
 
 export function parseSnowflakeRenameStatement(
@@ -96,10 +143,16 @@ function supportedStatementKind(statement: string): SupportedStatementKind | und
 }
 
 function parserCompatibleStatement(statement: string): string {
-  return statement.replace(
-    /^(\s*ALTER\s+TABLE\b[\s\S]*?\bADD\s+COLUMN)\s+IF\s+NOT\s+EXISTS\b/iu,
-    "$1",
-  );
+  return statement.replace(/\b(ADD[ \t\n]+COLUMN)[ \t\n]+IF[ \t\n]+NOT[ \t\n]+EXISTS\b/iu, "$1");
+}
+
+function containsUnsafeSqlCharacter(sql: string): boolean {
+  for (const character of sql) {
+    if (character !== "\t" && character !== "\n" && unsafeSqlCharacter.test(character)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function validateSqlArtifact(
@@ -108,6 +161,15 @@ export function validateSqlArtifact(
   classification: ExecutionClassification,
 ): readonly PackageFinding[] {
   const findings: PackageFinding[] = [];
+  if (containsUnsafeSqlCharacter(sql)) {
+    return [
+      {
+        code: "UNSAFE_SQL_CHARACTER",
+        message: "SQL contains an unsafe control or line-separator character.",
+        filename,
+      },
+    ];
+  }
   const statements = executableSqlStatements(sql);
   if (classification === "NON_EXECUTABLE_TEMPLATE") {
     return statements.length === 0

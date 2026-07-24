@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { makeChangeContext, makeMigrationDraft } from "../../tests/helpers/factories.js";
-import type { ChangeContext } from "../workflow/change-context.js";
+import {
+  makeChangeContext,
+  makeImpactReportDraft,
+  makeMigrationDraft,
+} from "../../tests/helpers/factories.js";
+import { buildChangeContext, type ChangeContext } from "../workflow/change-context.js";
 import type { MigrationPackageDraft } from "../workflow/migration-draft.js";
 import {
   renderMigrationPackage,
@@ -8,6 +12,7 @@ import {
   type RenderedMigrationPackage,
 } from "./render-snowflake-package.js";
 import { validatePackage } from "./validate-package.js";
+import { executableSqlStatements } from "./validate-sql.js";
 
 function directDraft(context: ChangeContext): MigrationPackageDraft {
   return {
@@ -47,6 +52,44 @@ function replaceFile(
   };
 }
 
+function sqlFileWithStatements(
+  rendered: RenderedMigrationPackage,
+  filename: Exclude<MigrationArtifactFilename, "rollout-plan.md">,
+  statements: readonly string[],
+): string {
+  const evidenceLine = rendered.files[filename]
+    .split("\n")
+    .find((line) => line.startsWith("-- Evidence:"));
+  if (evidenceLine === undefined) throw new Error("Expected rendered evidence.");
+  return `${evidenceLine}\n${statements.map((statement) => `${statement};`).join("\n")}\n`;
+}
+
+function punctuationIdentifierContext(): ChangeContext {
+  const report = makeImpactReportDraft({
+    datasetName: "ORDER_ENTRY_DB.ANALYTICS.ORDER_DETAILS",
+    score: 20,
+  });
+  const source = "customer;--id";
+  const target = "customer--key;next";
+  const sourceField = { fieldPath: source, nativeDataType: "NUMBER(38,0)" };
+  return buildChangeContext(
+    {
+      ...report,
+      intent: {
+        ...report.intent,
+        sourceColumn: source,
+        targetColumn: target,
+      },
+      evidence: {
+        ...report.evidence,
+        schemaFields: [sourceField, report.evidence.schemaFields[1]!],
+        sourceColumn: sourceField,
+      },
+    },
+    [],
+  );
+}
+
 function packageFor(mode: "template" | "direct" | "staged"): {
   readonly context: ChangeContext;
   readonly draft: MigrationPackageDraft;
@@ -78,6 +121,132 @@ it.each(["direct", "staged"] as const)("accepts a complete rendered %s package",
   const { context, draft, rendered } = packageFor(mode);
 
   expect(validatePackage(context, draft, rendered)).toEqual([]);
+});
+
+it("accepts rendered identifiers containing quoted semicolons and comment markers", () => {
+  const context = punctuationIdentifierContext();
+  const draft = makeMigrationDraft(context);
+  const rendered = renderMigrationPackage(context, draft);
+
+  expect(validatePackage(context, draft, rendered)).toEqual([]);
+});
+
+it("rejects mutually inverse direct renames for another table and columns", () => {
+  const { context, draft, rendered } = packageFor("direct");
+  const foreignTable = '"OTHER_DB"."OTHER_SCHEMA"."OTHER_TABLE"';
+  const forward = `ALTER TABLE ${foreignTable} RENAME COLUMN "FOREIGN_SOURCE" TO "FOREIGN_TARGET"`;
+  const rollback = `ALTER TABLE ${foreignTable} RENAME COLUMN "FOREIGN_TARGET" TO "FOREIGN_SOURCE"`;
+  const invalidUp = replaceFile(
+    rendered,
+    "migration-up.sql",
+    sqlFileWithStatements(rendered, "migration-up.sql", [forward]),
+  );
+  const invalid = replaceFile(
+    invalidUp,
+    "migration-down.sql",
+    sqlFileWithStatements(rendered, "migration-down.sql", [rollback]),
+  );
+
+  expect(validatePackage(context, draft, invalid)).toContainEqual(
+    expect.objectContaining({
+      code: "SQL_ARTIFACT_MISMATCH",
+      filename: "migration-up.sql",
+    }),
+  );
+});
+
+it("rejects supported staged statements in the wrong artifacts", () => {
+  const { context, draft, rendered } = packageFor("staged");
+  const invalidUp = replaceFile(rendered, "migration-up.sql", rendered.files["validation.sql"]);
+  const invalid = replaceFile(invalidUp, "validation.sql", rendered.files["migration-up.sql"]);
+
+  expect(validatePackage(context, draft, invalid)).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        code: "SQL_ARTIFACT_MISMATCH",
+        filename: "migration-up.sql",
+      }),
+      expect.objectContaining({
+        code: "SQL_ARTIFACT_MISMATCH",
+        filename: "validation.sql",
+      }),
+    ]),
+  );
+});
+
+it("rejects supported staged statements in the wrong order", () => {
+  const { context, draft, rendered } = packageFor("staged");
+  const reversed = [...executableSqlStatements(rendered.files["migration-up.sql"])].reverse();
+  const invalid = replaceFile(
+    rendered,
+    "migration-up.sql",
+    sqlFileWithStatements(rendered, "migration-up.sql", reversed),
+  );
+
+  expect(validatePackage(context, draft, invalid)).toContainEqual(
+    expect.objectContaining({
+      code: "SQL_ARTIFACT_MISMATCH",
+      filename: "migration-up.sql",
+    }),
+  );
+});
+
+it("rejects a staged target and native type not grounded in ChangeContext", () => {
+  const { context, draft, rendered } = packageFor("staged");
+  const table = '"ORDER_ENTRY_DB"."ANALYTICS"."ORDER_DETAILS"';
+  const invalid = replaceFile(
+    rendered,
+    "migration-up.sql",
+    sqlFileWithStatements(rendered, "migration-up.sql", [
+      `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS "OTHER_TARGET" VARCHAR(42)`,
+      `UPDATE ${table} SET "OTHER_TARGET" = "customer_id" WHERE "OTHER_TARGET" IS NULL`,
+    ]),
+  );
+
+  expect(validatePackage(context, draft, invalid)).toContainEqual(
+    expect.objectContaining({
+      code: "SQL_ARTIFACT_MISMATCH",
+      filename: "migration-up.sql",
+    }),
+  );
+});
+
+it("rejects an additional valid statement outside the rendered plan", () => {
+  const { context, draft, rendered } = packageFor("staged");
+  const statements = executableSqlStatements(rendered.files["migration-up.sql"]);
+  const invalid = replaceFile(
+    rendered,
+    "migration-up.sql",
+    sqlFileWithStatements(rendered, "migration-up.sql", [
+      ...statements,
+      'SHOW COLUMNS IN TABLE "ORDER_ENTRY_DB"."ANALYTICS"."ORDER_DETAILS"',
+    ]),
+  );
+
+  expect(validatePackage(context, draft, invalid)).toContainEqual(
+    expect.objectContaining({
+      code: "SQL_ARTIFACT_MISMATCH",
+      filename: "migration-up.sql",
+    }),
+  );
+});
+
+it("rejects a supported rename used as direct validation SQL", () => {
+  const { context, draft, rendered } = packageFor("direct");
+  const invalid = replaceFile(
+    rendered,
+    "validation.sql",
+    sqlFileWithStatements(rendered, "validation.sql", [
+      'ALTER TABLE "ORDER_ENTRY_DB"."ANALYTICS"."ORDER_DETAILS" RENAME COLUMN "customer_id" TO "customer_key"',
+    ]),
+  );
+
+  expect(validatePackage(context, draft, invalid)).toContainEqual(
+    expect.objectContaining({
+      code: "SQL_ARTIFACT_MISMATCH",
+      filename: "validation.sql",
+    }),
+  );
 });
 
 it.each(["template", "direct", "staged"] as const)(

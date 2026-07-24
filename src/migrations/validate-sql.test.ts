@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validateSqlArtifact } from "./validate-sql.js";
+import { executableSqlStatements, validateSqlArtifact } from "./validate-sql.js";
 
 it("accepts the deterministic Snowflake staged statements", () => {
   expect(
@@ -43,6 +43,64 @@ it.each([
   expect(validateSqlArtifact("migration-up.sql", sql, "ADVISORY_ONLY")).toContainEqual(
     expect.objectContaining({ code: "PROHIBITED_SQL" }),
   );
+});
+
+it("preserves semicolons and comment markers inside quoted identifiers", () => {
+  const statement =
+    'ALTER TABLE "DB"."PUBLIC"."T" RENAME COLUMN "A;--in""side" TO "B--still;in""side"';
+  const sql = `-- leading comment\n${statement}; -- trailing comment with ;\n`;
+
+  expect(executableSqlStatements(sql)).toEqual([statement]);
+  expect(validateSqlArtifact("migration-up.sql", sql, "EXECUTABLE_WITH_REVIEW")).toEqual([]);
+});
+
+it("splits real comments and statement delimiters outside quoted identifiers", () => {
+  expect(
+    executableSqlStatements(
+      '-- comment with ; and "quotes"\nSHOW COLUMNS IN TABLE "DB"."PUBLIC"."T"; -- trailing ;\nSELECT COUNT(*) AS row_count, COUNT_IF("B" IS NULL) AS target_null_count FROM "DB"."PUBLIC"."T";\n',
+    ),
+  ).toEqual([
+    'SHOW COLUMNS IN TABLE "DB"."PUBLIC"."T"',
+    'SELECT COUNT(*) AS row_count, COUNT_IF("B" IS NULL) AS target_null_count FROM "DB"."PUBLIC"."T"',
+  ]);
+});
+
+it.each([
+  ["vertical tab", "\u000b"],
+  ["form feed", "\u000c"],
+  ["carriage return", "\r"],
+  ["NUL", "\u0000"],
+  ["Unicode line separator", "\u2028"],
+  ["Unicode paragraph separator", "\u2029"],
+] as const)("rejects unsafe %s before parser-exempt statements", (_label, unsafe) => {
+  for (const sql of [
+    `SHOW${unsafe}COLUMNS IN TABLE "DB"."PUBLIC"."T";`,
+    `ALTER TABLE "DB"."PUBLIC"."T"${unsafe}RENAME COLUMN "A" TO "B";`,
+  ]) {
+    expect(validateSqlArtifact("migration-up.sql", sql, "ADVISORY_ONLY")).toContainEqual(
+      expect.objectContaining({ code: "UNSAFE_SQL_CHARACTER" }),
+    );
+  }
+});
+
+it("rejects unsafe controls in comments before tokenization", () => {
+  expect(
+    validateSqlArtifact(
+      "migration-up.sql",
+      '-- metadata\u0000\nSHOW COLUMNS IN TABLE "DB"."PUBLIC"."T";',
+      "ADVISORY_ONLY",
+    ),
+  ).toContainEqual(expect.objectContaining({ code: "UNSAFE_SQL_CHARACTER" }));
+});
+
+it("does not treat non-ASCII whitespace as SQL grammar spacing", () => {
+  expect(
+    validateSqlArtifact(
+      "validation.sql",
+      'SHOW\u00a0COLUMNS IN TABLE "DB"."PUBLIC"."T";',
+      "ADVISORY_ONLY",
+    ),
+  ).toContainEqual(expect.objectContaining({ code: "PROHIBITED_SQL" }));
 });
 
 describe("SQL classification safety", () => {
