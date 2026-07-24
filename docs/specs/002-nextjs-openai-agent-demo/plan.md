@@ -5921,7 +5921,13 @@ export function createDeadline(
 
 Only this helper converts timeout causes into public errors. Every nested scope delegates parent abort classification to the parent, so a browser abort remains `CANCELLED`, an upstream agent deadline remains `GENERATION_FAILED`, and a child deadline owns only its own timer. Use the injected/global `setTimeout` and `clearTimeout` pair shown above rather than `AbortSignal.timeout`, because the pinned Vitest fake timers must control every deadline deterministically. Call `dispose()` in `finally` when each owner finishes to clear the timer and remove listeners; never inspect or persist `signal.reason`.
 
-Extend `AppErrorCode` in `src/errors/app-error.ts` with `GENERATION_FAILED` and `CANCELLED` before compiling this helper. Update the CLI's exhaustive `Record<AppErrorCode, number>` with exit code `5` for generation failure and `130` for cancellation, add fixed non-secret guidance for both, and extend `src/cli.test.ts` so every code has a stable exit/guidance case. Do not weaken the exhaustive map with `Partial` or a catch-all key.
+The approved flat-run-storage amendment introduces `CANCELLED` in `AppErrorCode`, its fixed
+non-secret guidance, its CLI test, and exit code `130` during amended Task 2. Preserve that mapping.
+Extend `AppErrorCode` in `src/errors/app-error.ts` only with the still-missing
+`GENERATION_FAILED` before compiling this helper. Update the CLI's exhaustive
+`Record<AppErrorCode, number>` with exit code `5` and fixed non-secret guidance for generation
+failure, and extend `src/cli.test.ts` so every code retains a stable exit/guidance case. Do not
+weaken the exhaustive map with `Partial` or a catch-all key.
 
 Serialize the six configured values once through `WorkflowSnapshot.deadlinePolicy`. The 60-second Agents SDK analysis-tool limit is policy-only because the application-owned 55-second DataHub deadline is the authoritative event owner. Append instantiated owned events through `WorkflowSnapshot.deadlineEvents` with `{ kind, durationMs, attempt, outcome }`; never persist raw exceptions or provider traces. `MCP_CONNECT_TIMEOUT`, `DATAHUB_ANALYSIS_TIMEOUT`, `AGENT_TIMEOUT`, and `WORKFLOW_TIMEOUT` may appear only with `attempt: 1`; `GENERATION_TIMEOUT` may appear once for attempt 1 and once for attempt 2. Thus a run has at most six unique owner/attempt events. Add schema tests for the exact policy, the five event kinds, generation attempts 1–2, duplicate rejection, policy/event duration agreement, inconsistent Context Coverage, and rejection of any unexpected raw-reason field.
 

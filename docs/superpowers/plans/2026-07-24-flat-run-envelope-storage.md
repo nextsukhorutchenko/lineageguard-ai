@@ -442,13 +442,17 @@ git commit -m "feat: define immutable run envelopes"
 
 - Create: `src/artifacts/run-envelope-files.ts`
 - Create: `src/artifacts/run-envelope-files.test.ts`
+- Modify: `src/errors/app-error.ts`
+- Modify: `src/cli.ts`
+- Modify: `src/cli.test.ts`
 
 **Interfaces:**
 
 - Consumes: serialized terminal and reservation envelopes from Task 1.
 - Produces: `assertTrustedRunsRoot(runsRoot)`, `publishRunEnvelope(options)`,
   `readRunEnvelope(options)`, `publishRetryReservation(options)`,
-  `readRetryReservation(options)`, and test-only publication hooks.
+  `readRetryReservation(options)`, typed `CANCELLED` application errors, stable CLI cancellation
+  mapping, and test-only publication hooks.
 
 - [ ] **Step 1: Write failing atomicity, bounded-read, and cleanup tests**
 
@@ -505,6 +509,11 @@ temporary-name collision, short writes, maximum and maximum-plus-one bytes, trun
 non-regular final entry, secret-bearing filesystem errors, cancellation before publication,
 post-link temporary cleanup failure, and a competitor replacing a temporary name. Cleanup must
 never unlink a final name or a temporary name whose recorded identity no longer matches.
+
+Add a CLI regression test whose analysis dependency throws
+`new AppError("CANCELLED", "The run was cancelled.")` while a secret-bearing abort reason exists
+only in the test setup. Assert exit code `130`, the fixed cancellation message and recovery
+guidance, and absence of the secret-bearing reason.
 
 - [ ] **Step 2: Run focused tests and prove RED**
 
@@ -611,6 +620,36 @@ must become `AppError("ARTIFACT_WRITE_FAILED", "The run already exists.")` for t
 rethrow `signal.reason`. All other publication failures become
 `AppError("ARTIFACT_WRITE_FAILED", "Unable to persist the run.")` without details or cause.
 
+Advance the already-approved `CANCELLED` portion of the main plan's Task 9 contract so this boundary
+remains strictly typed:
+
+```ts
+// src/errors/app-error.ts
+export type AppErrorCode =
+  | "INVALID_REQUEST"
+  | "TARGET_NOT_FOUND"
+  | "NEEDS_USER_CLARIFICATION"
+  | "COLUMN_NOT_FOUND"
+  | "DATAHUB_UNAVAILABLE"
+  | "MCP_UNAVAILABLE"
+  | "ARTIFACT_WRITE_FAILED"
+  | "CANCELLED";
+
+// src/cli.ts
+const guidance = {
+  // Preserve every existing entry.
+  CANCELLED: "The operation was cancelled. Retry when ready.",
+} as const;
+
+const exitCodes = {
+  // Preserve every existing entry.
+  CANCELLED: 130,
+} as const satisfies Readonly<Record<AppErrorCode, number>>;
+```
+
+Keep the CLI maps exhaustive; do not use `Partial`, a cast, or a catch-all code. Task 9 later adds
+only its still-missing `GENERATION_FAILED` entry and retains this cancellation mapping.
+
 Bound reads by checking the final entry with `lstat` before opening, then requiring a regular-file
 `FileHandle.stat()`, checking the applicable run or reservation byte limit, reading at most
 maximum-plus-one bytes through that handle, and calling the matching strict parser. Do not follow a
@@ -622,7 +661,7 @@ unavailable error.
 Run:
 
 ```powershell
-& .\node_modules\.bin\vitest.cmd run src/artifacts/run-envelope-files.test.ts
+& .\node_modules\.bin\vitest.cmd run src/artifacts/run-envelope-files.test.ts src/cli.test.ts
 pnpm typecheck
 pnpm format:check
 pnpm lint
@@ -633,7 +672,7 @@ Expected: atomicity, byte limits, cleanup identity, fixed errors, and compatibil
 - [ ] **Step 5: Commit the filesystem boundary**
 
 ```powershell
-git add src/artifacts/run-envelope-files.ts src/artifacts/run-envelope-files.test.ts
+git add src/artifacts/run-envelope-files.ts src/artifacts/run-envelope-files.test.ts src/errors/app-error.ts src/cli.ts src/cli.test.ts
 git commit -m "feat: publish flat run envelopes atomically"
 ```
 
