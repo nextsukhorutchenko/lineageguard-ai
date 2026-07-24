@@ -299,6 +299,26 @@ describe("runCli", () => {
     },
   );
 
+  it("maps typed cancellation to stable safe CLI output", async () => {
+    const secretAbortReason = "secret-abort-reason";
+    const test = harness(async () => {
+      const controller = new AbortController();
+      controller.abort(new Error(secretAbortReason));
+      throw new AppError("CANCELLED", "The run was cancelled.");
+    });
+
+    const exitCode = await runCli(["--request", REQUEST], test.dependencies);
+
+    expect(exitCode).toBe(130);
+    expect(test.stdout).toEqual([]);
+    expect(test.stderr.join("")).toBe(
+      "Status: CANCELLED\n" +
+        "The run was cancelled.\n" +
+        "Recovery: The operation was cancelled. Retry when ready.\n",
+    );
+    expect(test.stderr.join("")).not.toContain(secretAbortReason);
+  });
+
   it("neutralizes terminal controls and injected lines in external diagnostics", async () => {
     const test = harness(async () => {
       throw new AppError(

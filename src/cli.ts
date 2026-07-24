@@ -38,7 +38,8 @@ const guidance = {
   COLUMN_NOT_FOUND: "Choose one of the actual schema fields listed above.",
   ARTIFACT_WRITE_FAILED:
     "Verify that the configured runs directory is writable and has no symbolic-link or junction ancestors.",
-} as const;
+  CANCELLED: "The operation was cancelled. Retry when ready.",
+} as const satisfies Readonly<Record<Exclude<AppErrorCode, "INVALID_REQUEST">, string>>;
 
 const exitCodes = {
   INVALID_REQUEST: 2,
@@ -48,6 +49,7 @@ const exitCodes = {
   DATAHUB_UNAVAILABLE: 3,
   MCP_UNAVAILABLE: 3,
   ARTIFACT_WRITE_FAILED: 4,
+  CANCELLED: 130,
 } as const satisfies Readonly<Record<AppErrorCode, number>>;
 
 type SuccessfulStatus = Extract<
