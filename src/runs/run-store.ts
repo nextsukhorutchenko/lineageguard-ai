@@ -1,18 +1,12 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, open, realpath, rmdir, unlink } from "node:fs/promises";
-import { resolve } from "node:path";
+import { z } from "zod";
 import {
-  assertNoLinkedExistingPathComponents,
-  assertSafeRunId,
-  assertWithinRunsRoot,
-  commitPackageAtomically,
-  isMissingPathError,
-  readCompletedPackageFile,
-  readRunArtifact,
-  readRunMetadataFile,
-  writeRunArtifact,
-  type PackageCommitHooks,
-} from "../artifacts/write-run-artifacts.js";
+  assertTrustedRunsRoot,
+  publishRetryReservation,
+  publishRunEnvelope,
+  readRunEnvelope,
+  type RunEnvelopePublicationHooks,
+} from "../artifacts/run-envelope-files.js";
 import { AppError } from "../errors/app-error.js";
 import type { RenderedMigrationPackage } from "../migrations/render-snowflake-package.js";
 import type { PackageFinding } from "../migrations/validate-sql.js";
@@ -22,45 +16,276 @@ import {
   hashChangeContext,
   type ChangeContext,
 } from "../workflow/change-context.js";
-import { WorkflowSnapshotSchema, type WorkflowSnapshot } from "../workflow/contracts.js";
 import {
+  DemoModeSchema,
+  WorkflowSnapshotSchema,
+  type DemoMode,
+  type WorkflowSnapshot,
+} from "../workflow/contracts.js";
+import {
+  ExecutionClassificationSchema,
   MigrationPackageDraftSchema,
   type MigrationPackageDraft,
 } from "../workflow/migration-draft.js";
+import {
+  PersistedFindingSchema,
+  RunEnvelopeSchema,
+  SafeRunIdSchema,
+  serializeRetryReservation,
+  serializeRunEnvelope,
+  virtualArtifactFilenames,
+  type RunEnvelope,
+  type VirtualArtifactFilename,
+} from "./run-envelope.js";
 
-const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
-const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
 const reservedChildBrand: unique symbol = Symbol("reserved-child-run");
+const reservedChildHandles = new WeakSet<object>();
+const eligibleRegenerationStatuses = new Set([
+  "COMPLETED",
+  "GENERATION_FAILED",
+  "VALIDATION_FAILED",
+]);
+
+const ArtifactFilesSchema = z
+  .object({
+    "migration-up.sql": z.string(),
+    "migration-down.sql": z.string(),
+    "validation.sql": z.string(),
+    "rollout-plan.md": z.string(),
+  })
+  .strict();
+const RenderedMigrationPackageSchema = z
+  .object({
+    classification: ExecutionClassificationSchema,
+    files: ArtifactFilesSchema,
+  })
+  .strict();
+const PersistedFindingsSchema = z.array(PersistedFindingSchema).max(200);
 
 export interface ReservedChildRun {
-  readonly runsRoot: string;
+  readonly canonicalRunsRoot: string;
   readonly parentRunId: string;
   readonly childRunId: string;
+  readonly childMode: DemoMode;
+  readonly generationAttempt: 2;
   readonly [reservedChildBrand]: true;
 }
 
-function assertReservedChild(
-  snapshot: WorkflowSnapshot,
-  runsRoot: string,
-  runId: string,
-  reservedChild: ReservedChildRun | undefined,
-): void {
-  if (snapshot.parentRunId === undefined) return;
-  if (
-    reservedChild?.[reservedChildBrand] !== true ||
-    reservedChild.runsRoot !== resolve(runsRoot) ||
-    reservedChild.parentRunId !== snapshot.parentRunId ||
-    reservedChild.childRunId !== runId
-  ) {
-    throw new AppError("INVALID_REQUEST", "The child run has not been reserved.");
-  }
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function validationSummary(findings: readonly PackageFinding[]) {
+function canonicalJson(schema: z.ZodType, value: unknown): string {
+  return `${JSON.stringify(schema.parse(value), null, 2)}\n`;
+}
+
+function storageUnavailable(): AppError {
+  return new AppError("ARTIFACT_WRITE_FAILED", "The stored run is unavailable.");
+}
+
+function completedRunInconsistent(): AppError {
+  return new AppError("ARTIFACT_WRITE_FAILED", "The completed run is inconsistent.");
+}
+
+function failedRunInconsistent(): AppError {
+  return new AppError("ARTIFACT_WRITE_FAILED", "The failed run is inconsistent.");
+}
+
+function invalidReservation(): AppError {
+  return new AppError("INVALID_REQUEST", "The child run has not been reserved.");
+}
+
+function invalidRegenerationParent(): AppError {
+  return new AppError("INVALID_REQUEST", "The parent run cannot be regenerated.");
+}
+
+function validationSummary(findings: readonly PackageFinding[]): {
+  readonly findingCount: number;
+  readonly findingCodes: readonly string[];
+} {
   const findingCodes = [...new Set(findings.map(({ code }) => code))]
     .sort((left, right) => left.localeCompare(right, "en"))
     .slice(0, 20);
   return { findingCount: findings.length, findingCodes };
+}
+
+function assertContextIntegrity(context: ChangeContext): void {
+  const { contextHash, ...payload } = context;
+  if (hashChangeContext(payload) !== contextHash) throw new Error("Context hash mismatch.");
+}
+
+async function generationAttemptForSnapshot(
+  runsRoot: string,
+  runId: string,
+  snapshot: WorkflowSnapshot,
+  reservedChild: ReservedChildRun | undefined,
+): Promise<1 | 2> {
+  if (snapshot.parentRunId === undefined) {
+    if (reservedChild !== undefined) throw invalidReservation();
+    return 1;
+  }
+  if (reservedChild === undefined || !reservedChildHandles.has(reservedChild)) {
+    throw invalidReservation();
+  }
+
+  let canonicalRunsRoot: string;
+  try {
+    canonicalRunsRoot = await assertTrustedRunsRoot(runsRoot);
+  } catch {
+    throw invalidReservation();
+  }
+  if (
+    reservedChild[reservedChildBrand] !== true ||
+    reservedChild.canonicalRunsRoot !== canonicalRunsRoot ||
+    reservedChild.parentRunId !== snapshot.parentRunId ||
+    reservedChild.childRunId !== runId ||
+    reservedChild.childMode !== snapshot.mode ||
+    reservedChild.generationAttempt !== 2
+  ) {
+    throw invalidReservation();
+  }
+  return 2;
+}
+
+function buildArtifactHashes(files: z.infer<typeof ArtifactFilesSchema>) {
+  return {
+    "migration-up.sql": sha256(files["migration-up.sql"]),
+    "migration-down.sql": sha256(files["migration-down.sql"]),
+    "validation.sql": sha256(files["validation.sql"]),
+    "rollout-plan.md": sha256(files["rollout-plan.md"]),
+  };
+}
+
+function buildSnapshotArtifacts(files: z.infer<typeof ArtifactFilesSchema>) {
+  return [...virtualArtifactFilenames]
+    .sort((left, right) => left.localeCompare(right, "en"))
+    .map((filename) => ({
+      filename,
+      sha256: sha256(files[filename]),
+      validated: true as const,
+    }));
+}
+
+async function buildCompletedEnvelope(input: {
+  readonly runsRoot: string;
+  readonly runId: string;
+  readonly context: ChangeContext;
+  readonly draft: MigrationPackageDraft;
+  readonly rendered: RenderedMigrationPackage;
+  readonly snapshot: WorkflowSnapshot;
+  readonly reservedChild?: ReservedChildRun;
+}): Promise<{ readonly envelope: RunEnvelope; readonly snapshot: WorkflowSnapshot }> {
+  const context = ChangeContextSchema.parse(input.context);
+  assertContextIntegrity(context);
+  const draft = MigrationPackageDraftSchema.parse(input.draft);
+  const rendered = RenderedMigrationPackageSchema.parse(input.rendered);
+  const uncommittedSnapshot = WorkflowSnapshotSchema.parse(input.snapshot);
+  if (
+    uncommittedSnapshot.status !== "COMPLETED" ||
+    uncommittedSnapshot.runId !== input.runId ||
+    uncommittedSnapshot.contextHash !== context.contextHash ||
+    uncommittedSnapshot.executionClassification !== rendered.classification ||
+    draft.executionClassification !== rendered.classification
+  ) {
+    throw new Error("Completed snapshot mismatch.");
+  }
+  const generationAttempt = await generationAttemptForSnapshot(
+    input.runsRoot,
+    input.runId,
+    uncommittedSnapshot,
+    input.reservedChild,
+  );
+  const snapshot = WorkflowSnapshotSchema.parse({
+    ...uncommittedSnapshot,
+    artifacts: buildSnapshotArtifacts(rendered.files),
+  });
+  const findings: z.infer<typeof PersistedFindingsSchema> = [];
+  const envelope = RunEnvelopeSchema.parse({
+    schemaVersion: "1",
+    kind: "completed",
+    runId: input.runId,
+    mode: snapshot.mode,
+    ...(snapshot.parentRunId === undefined ? {} : { parentRunId: snapshot.parentRunId }),
+    generationAttempt,
+    snapshot,
+    context,
+    draft,
+    findings,
+    package: {
+      classification: rendered.classification,
+      files: rendered.files,
+    },
+    hashes: {
+      snapshot: sha256(canonicalJson(WorkflowSnapshotSchema, snapshot)),
+      context: sha256(canonicalJson(ChangeContextSchema, context)),
+      draft: sha256(canonicalJson(MigrationPackageDraftSchema, draft)),
+      findings: sha256(canonicalJson(PersistedFindingsSchema, findings)),
+      artifacts: buildArtifactHashes(rendered.files),
+    },
+  });
+  return { envelope, snapshot };
+}
+
+async function buildFailedEnvelope(input: {
+  readonly runsRoot: string;
+  readonly runId: string;
+  readonly snapshot: WorkflowSnapshot;
+  readonly secrets: readonly string[];
+  readonly context?: ChangeContext;
+  readonly draft?: MigrationPackageDraft;
+  readonly findings?: readonly PackageFinding[];
+  readonly reservedChild?: ReservedChildRun;
+}): Promise<RunEnvelope> {
+  const findings = [...sanitizeValidationFindings(input.findings ?? [], input.secrets)];
+  PersistedFindingsSchema.parse(findings);
+  const snapshot = WorkflowSnapshotSchema.parse(input.snapshot);
+  const summary = validationSummary(findings);
+  if (
+    snapshot.status === "COMPLETED" ||
+    snapshot.runId !== input.runId ||
+    snapshot.validation === undefined ||
+    snapshot.validation.findingCount !== summary.findingCount ||
+    snapshot.validation.findingCodes.length !== summary.findingCodes.length ||
+    snapshot.validation.findingCodes.some((code, index) => code !== summary.findingCodes[index])
+  ) {
+    throw new Error("Failed snapshot mismatch.");
+  }
+  const context =
+    input.context === undefined ? undefined : ChangeContextSchema.parse(input.context);
+  if (context !== undefined) {
+    assertContextIntegrity(context);
+    if (snapshot.contextHash !== context.contextHash) throw new Error("Context mismatch.");
+  }
+  const draft =
+    input.draft === undefined ? undefined : MigrationPackageDraftSchema.parse(input.draft);
+  const generationAttempt = await generationAttemptForSnapshot(
+    input.runsRoot,
+    input.runId,
+    snapshot,
+    input.reservedChild,
+  );
+  return RunEnvelopeSchema.parse({
+    schemaVersion: "1",
+    kind: "failed",
+    runId: input.runId,
+    mode: snapshot.mode,
+    ...(snapshot.parentRunId === undefined ? {} : { parentRunId: snapshot.parentRunId }),
+    generationAttempt,
+    snapshot,
+    ...(context === undefined ? {} : { context }),
+    ...(draft === undefined ? {} : { draft }),
+    findings,
+    hashes: {
+      snapshot: sha256(canonicalJson(WorkflowSnapshotSchema, snapshot)),
+      ...(context === undefined
+        ? {}
+        : { context: sha256(canonicalJson(ChangeContextSchema, context)) }),
+      ...(draft === undefined
+        ? {}
+        : { draft: sha256(canonicalJson(MigrationPackageDraftSchema, draft)) }),
+      findings: sha256(canonicalJson(PersistedFindingsSchema, findings)),
+    },
+  });
 }
 
 export async function persistCompletedRun(input: {
@@ -72,42 +297,24 @@ export async function persistCompletedRun(input: {
   readonly snapshot: WorkflowSnapshot;
   readonly signal?: AbortSignal;
   readonly reservedChild?: ReservedChildRun;
-  readonly hooks?: PackageCommitHooks;
+  readonly hooks?: RunEnvelopePublicationHooks;
 }): Promise<WorkflowSnapshot> {
-  const context = ChangeContextSchema.parse(input.context);
-  const { contextHash, ...contextPayload } = context;
-  if (hashChangeContext(contextPayload) !== contextHash) {
-    throw new AppError("ARTIFACT_WRITE_FAILED", "The completed context is inconsistent.");
+  let prepared: Awaited<ReturnType<typeof buildCompletedEnvelope>>;
+  try {
+    prepared = await buildCompletedEnvelope(input);
+  } catch (error) {
+    if (error instanceof AppError && error.code === "INVALID_REQUEST") throw error;
+    throw completedRunInconsistent();
   }
-  const draft = MigrationPackageDraftSchema.parse(input.draft);
-  const artifacts = Object.entries(input.rendered.files).map(([filename, content]) => ({
-    filename: filename as keyof typeof input.rendered.files,
-    sha256: sha256(content),
-    validated: true,
-  }));
-  const snapshot = WorkflowSnapshotSchema.parse({ ...input.snapshot, artifacts });
-  if (
-    snapshot.status !== "COMPLETED" ||
-    snapshot.runId !== input.runId ||
-    snapshot.contextHash !== context.contextHash
-  ) {
-    throw new AppError("ARTIFACT_WRITE_FAILED", "Only a completed snapshot can be committed.");
-  }
-  assertReservedChild(snapshot, input.runsRoot, input.runId, input.reservedChild);
-  await commitPackageAtomically({
+
+  await publishRunEnvelope({
     runsRoot: input.runsRoot,
     runId: input.runId,
-    files: {
-      ...input.rendered.files,
-      "change-context.json": json(context),
-      "migration-package-draft.json": json(draft),
-      "validation-findings.json": json([]),
-      "run-metadata.json": json(snapshot),
-    },
+    serialized: serializeRunEnvelope(prepared.envelope),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
     ...(input.hooks === undefined ? {} : { hooks: input.hooks }),
   });
-  return snapshot;
+  return prepared.snapshot;
 }
 
 export async function persistFailedRun(input: {
@@ -118,60 +325,24 @@ export async function persistFailedRun(input: {
   readonly context?: ChangeContext;
   readonly draft?: MigrationPackageDraft;
   readonly findings?: readonly PackageFinding[];
+  readonly signal?: AbortSignal;
   readonly reservedChild?: ReservedChildRun;
+  readonly hooks?: RunEnvelopePublicationHooks;
 }): Promise<void> {
-  const boundedFindings = sanitizeValidationFindings(input.findings ?? [], input.secrets);
-  const parsedSnapshot = WorkflowSnapshotSchema.parse(input.snapshot);
-  const summary = validationSummary(boundedFindings);
-  if (
-    parsedSnapshot.status === "COMPLETED" ||
-    parsedSnapshot.runId !== input.runId ||
-    parsedSnapshot.validation === undefined ||
-    parsedSnapshot.validation.findingCount !== summary.findingCount ||
-    JSON.stringify(parsedSnapshot.validation.findingCodes) !== JSON.stringify(summary.findingCodes)
-  ) {
-    throw new AppError("ARTIFACT_WRITE_FAILED", "The diagnostic snapshot is inconsistent.");
+  let envelope: RunEnvelope;
+  try {
+    envelope = await buildFailedEnvelope(input);
+  } catch (error) {
+    if (error instanceof AppError && error.code === "INVALID_REQUEST") throw error;
+    throw failedRunInconsistent();
   }
-  assertReservedChild(parsedSnapshot, input.runsRoot, input.runId, input.reservedChild);
 
-  if (input.context !== undefined) {
-    const context = ChangeContextSchema.parse(input.context);
-    const { contextHash, ...payload } = context;
-    if (
-      hashChangeContext(payload) !== contextHash ||
-      parsedSnapshot.contextHash !== context.contextHash
-    ) {
-      throw new AppError("ARTIFACT_WRITE_FAILED", "The diagnostic context is inconsistent.");
-    }
-    await writeRunArtifact({
-      runsRoot: input.runsRoot,
-      runId: input.runId,
-      filename: "change-context.json",
-      content: json(context),
-    });
-  }
-  if (input.draft !== undefined) {
-    const draft = MigrationPackageDraftSchema.parse(input.draft);
-    await writeRunArtifact({
-      runsRoot: input.runsRoot,
-      runId: input.runId,
-      filename: "migration-package-draft.json",
-      content: json(draft),
-    });
-  }
-  if (input.findings !== undefined) {
-    await writeRunArtifact({
-      runsRoot: input.runsRoot,
-      runId: input.runId,
-      filename: "validation-findings.json",
-      content: json(boundedFindings),
-    });
-  }
-  await writeRunArtifact({
+  await publishRunEnvelope({
     runsRoot: input.runsRoot,
     runId: input.runId,
-    filename: "run-metadata.json",
-    content: json(parsedSnapshot),
+    serialized: serializeRunEnvelope(envelope),
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
+    ...(input.hooks === undefined ? {} : { hooks: input.hooks }),
   });
 }
 
@@ -179,103 +350,126 @@ export async function loadRunSnapshot(input: {
   readonly runsRoot: string;
   readonly runId: string;
 }): Promise<WorkflowSnapshot> {
-  const stored = await readRunMetadataFile(input);
-  const snapshot = WorkflowSnapshotSchema.parse(JSON.parse(stored.content));
-  if (stored.source === "diagnostic" && snapshot.status === "COMPLETED") {
-    throw new AppError("ARTIFACT_WRITE_FAILED", "Completed package metadata is unavailable.");
+  try {
+    const envelope = await readRunEnvelope(input);
+    if (envelope.kind === "impact-report") throw new Error("Not a workflow envelope.");
+    return envelope.snapshot;
+  } catch {
+    throw storageUnavailable();
   }
-  return snapshot;
+}
+
+function regenerationContextFromEnvelope(
+  envelope: RunEnvelope,
+  expectedMode: DemoMode,
+): { readonly snapshot: WorkflowSnapshot; readonly context: ChangeContext } {
+  if (
+    envelope.kind === "impact-report" ||
+    envelope.mode !== expectedMode ||
+    envelope.parentRunId !== undefined ||
+    envelope.generationAttempt !== 1 ||
+    !eligibleRegenerationStatuses.has(envelope.snapshot.status) ||
+    envelope.context === undefined
+  ) {
+    throw new Error("Ineligible parent.");
+  }
+  assertContextIntegrity(envelope.context);
+  if (envelope.snapshot.contextHash !== envelope.context.contextHash) {
+    throw new Error("Context mismatch.");
+  }
+  return { snapshot: envelope.snapshot, context: envelope.context };
 }
 
 export async function loadRegenerationContext(input: {
   readonly runsRoot: string;
   readonly runId: string;
+  readonly expectedMode: DemoMode;
 }): Promise<{ readonly snapshot: WorkflowSnapshot; readonly context: ChangeContext }> {
   try {
-    const snapshot = await loadRunSnapshot(input);
-    const raw =
-      snapshot.status === "COMPLETED"
-        ? await readCompletedPackageFile({ ...input, filename: "change-context.json" })
-        : snapshot.status === "GENERATION_FAILED" || snapshot.status === "VALIDATION_FAILED"
-          ? await readRunArtifact({ ...input, filename: "change-context.json" })
-          : undefined;
-    if (raw === undefined) throw new Error("Ineligible parent.");
-    const context = ChangeContextSchema.parse(JSON.parse(raw));
-    const { contextHash, ...payload } = context;
-    if (hashChangeContext(payload) !== contextHash || snapshot.contextHash !== contextHash) {
-      throw new Error("Context integrity failure.");
-    }
-    return { snapshot, context };
+    const expectedMode = DemoModeSchema.parse(input.expectedMode);
+    const envelope = await readRunEnvelope(input);
+    return regenerationContextFromEnvelope(envelope, expectedMode);
   } catch {
-    throw new AppError("INVALID_REQUEST", "The parent run cannot be regenerated.");
+    throw invalidRegenerationParent();
   }
+}
+
+export async function readCompletedPackageFile(input: {
+  readonly runsRoot: string;
+  readonly runId: string;
+  readonly filename: VirtualArtifactFilename;
+}): Promise<string> {
+  try {
+    if (!virtualArtifactFilenames.includes(input.filename)) {
+      throw new Error("Unknown virtual artifact.");
+    }
+    const envelope = await readRunEnvelope(input);
+    if (envelope.kind !== "completed") throw new Error("Completed package unavailable.");
+    return envelope.package.files[input.filename];
+  } catch {
+    throw storageUnavailable();
+  }
+}
+
+function createReservedChildRun(input: {
+  readonly canonicalRunsRoot: string;
+  readonly parentRunId: string;
+  readonly childRunId: string;
+  readonly childMode: DemoMode;
+}): ReservedChildRun {
+  const handle = Object.freeze({
+    canonicalRunsRoot: input.canonicalRunsRoot,
+    parentRunId: input.parentRunId,
+    childRunId: input.childRunId,
+    childMode: input.childMode,
+    generationAttempt: 2 as const,
+    [reservedChildBrand]: true as const,
+  });
+  reservedChildHandles.add(handle);
+  return handle;
 }
 
 export async function reserveGenerationRetry(input: {
   readonly runsRoot: string;
   readonly parentRunId: string;
   readonly childRunId: string;
-  readonly hooks?: {
-    readonly afterChildCreated?: () => void | Promise<void>;
-  };
+  readonly signal?: AbortSignal;
+  readonly hooks?: RunEnvelopePublicationHooks;
 }): Promise<ReservedChildRun> {
   try {
-    assertSafeRunId(input.parentRunId);
-    assertSafeRunId(input.childRunId);
+    SafeRunIdSchema.parse(input.parentRunId);
+    SafeRunIdSchema.parse(input.childRunId);
     if (input.parentRunId === input.childRunId) throw new Error("Run IDs must differ.");
-    const unresolvedRoot = resolve(input.runsRoot);
-    await assertNoLinkedExistingPathComponents(unresolvedRoot);
-    const root = await realpath(unresolvedRoot);
-    const parentDirectory = resolve(root, input.parentRunId);
-    await assertNoLinkedExistingPathComponents(parentDirectory);
-    const parentStats = await lstat(parentDirectory);
-    if (parentStats.isSymbolicLink() || !parentStats.isDirectory()) {
-      throw new Error("Invalid parent.");
-    }
-    const realParentDirectory = await realpath(parentDirectory);
-    assertWithinRunsRoot(root, realParentDirectory);
-    const childDirectory = resolve(root, input.childRunId);
-    assertWithinRunsRoot(root, childDirectory);
-
-    try {
-      try {
-        await lstat(childDirectory);
-        throw new Error("Child exists.");
-      } catch (error) {
-        if (!isMissingPathError(error)) throw error;
-      }
-      await assertNoLinkedExistingPathComponents(childDirectory);
-      await mkdir(childDirectory);
-    } catch {
-      throw new AppError("INVALID_REQUEST", "The child run ID is unavailable.");
-    }
-    let lockCreated = false;
-    const lockPath = resolve(realParentDirectory, "generation-retry.lock");
-    try {
-      await input.hooks?.afterChildCreated?.();
-      const handle = await open(lockPath, "wx");
-      lockCreated = true;
-      try {
-        await handle.writeFile(json({ schemaVersion: "1", childRunId: input.childRunId }), "utf8");
-      } finally {
-        await handle.close();
-      }
-    } catch (error) {
-      if (lockCreated) await unlink(lockPath).catch(() => undefined);
-      await assertNoLinkedExistingPathComponents(childDirectory);
-      await rmdir(childDirectory).catch(() => undefined);
-      if (error instanceof AppError) throw error;
-      throw new AppError("INVALID_REQUEST", "The parent run cannot be regenerated.");
-    }
-
-    return Object.freeze({
-      runsRoot: root,
+    const envelope = await readRunEnvelope({
+      runsRoot: input.runsRoot,
+      runId: input.parentRunId,
+    });
+    if (envelope.kind === "impact-report") throw new Error("Ineligible parent.");
+    const { snapshot } = regenerationContextFromEnvelope(envelope, envelope.mode);
+    const canonicalRunsRoot = await assertTrustedRunsRoot(input.runsRoot);
+    const reservation = {
+      schemaVersion: "1" as const,
+      kind: "retry-reservation" as const,
       parentRunId: input.parentRunId,
       childRunId: input.childRunId,
-      [reservedChildBrand]: true as const,
+      childMode: snapshot.mode,
+      generationAttempt: 2 as const,
+    };
+    await publishRetryReservation({
+      runsRoot: canonicalRunsRoot,
+      parentRunId: input.parentRunId,
+      serialized: serializeRetryReservation(reservation),
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
+      ...(input.hooks === undefined ? {} : { hooks: input.hooks }),
+    });
+    return createReservedChildRun({
+      canonicalRunsRoot,
+      parentRunId: input.parentRunId,
+      childRunId: input.childRunId,
+      childMode: snapshot.mode,
     });
   } catch (error) {
-    if (error instanceof AppError && error.code === "INVALID_REQUEST") throw error;
-    throw new AppError("INVALID_REQUEST", "The parent run cannot be regenerated.");
+    if (error instanceof AppError && error.code === "CANCELLED") throw error;
+    throw invalidRegenerationParent();
   }
 }

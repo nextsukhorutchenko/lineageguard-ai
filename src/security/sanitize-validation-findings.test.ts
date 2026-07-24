@@ -1,25 +1,32 @@
 import { describe, expect, it } from "vitest";
+import { PersistedFindingSchema } from "../runs/run-envelope.js";
 import { sanitizeValidationFindings } from "./sanitize-validation-findings.js";
 
 describe("sanitizeValidationFindings", () => {
-  it("rebuilds a closed, bounded, secret-free finding shape", () => {
+  it("rebuilds a closed, secret-free finding that satisfies the persisted schema", () => {
     const secret = "provider-secret-value";
-    const finding = {
-      code: "PROHIBITED_SQL",
-      message: `Provider failed with ${secret}\ntrace`,
-      filename: "migration-up.sql",
-    };
+    const result = sanitizeValidationFindings(
+      [
+        {
+          code: "PROHIBITED_SQL",
+          message: `Provider failed with ${secret}\ntrace`,
+          filename: "migration-up.sql",
+        },
+      ],
+      [secret],
+    );
 
-    expect(sanitizeValidationFindings([finding], [secret])).toEqual([
+    expect(result).toEqual([
       {
         code: "PROHIBITED_SQL",
         message: "Provider failed with [REDACTED]\\ntrace",
         filename: "migration-up.sql",
       },
     ]);
+    expect(() => result.forEach((finding) => PersistedFindingSchema.parse(finding))).not.toThrow();
   });
 
-  it("rejects extra keys and native exception objects", () => {
+  it("rejects extra keys, invalid values, and native exception objects", () => {
     const error = Object.assign(new Error("native failure"), {
       code: "NATIVE_FAILURE",
       filename: "validation.sql" as const,
@@ -34,6 +41,8 @@ describe("sanitizeValidationFindings", () => {
             filename: "validation.sql",
             nativeError: "trace envelope",
           },
+          { code: "invalid-code", message: "invalid code" },
+          { code: "INVALID_FILENAME", message: "invalid filename", filename: "../../secret.txt" },
           error,
         ],
         [],
@@ -41,32 +50,84 @@ describe("sanitizeValidationFindings", () => {
     ).toEqual([]);
   });
 
-  it("drops invalid codes and filenames and caps output at 200 findings", () => {
-    const findings = Array.from({ length: 201 }, (_, index) => ({
-      code: index === 0 ? "invalid-code" : "VALID_FINDING",
-      message: `Finding ${index}`,
-      filename: index === 1 ? "../../secret.txt" : "validation.sql",
-    }));
-
-    const sanitized = sanitizeValidationFindings(findings, []);
-
-    expect(sanitized).toHaveLength(198);
-    expect(sanitized.every(({ code }) => code === "VALID_FINDING")).toBe(true);
-    expect(sanitized.every(({ filename }) => filename === "validation.sql")).toBe(true);
-  });
-
-  it("returns findings in deterministic canonical order", () => {
+  it("drops messages that are empty after sanitization", () => {
     expect(
       sanitizeValidationFindings(
         [
-          { code: "Z_CODE", message: "z", filename: "validation.sql" },
-          { code: "A_CODE", message: "a", filename: "migration-down.sql" },
+          { code: "EMPTY", message: "" },
+          { code: "VALID", message: "Visible message", filename: "validation.sql" },
+        ],
+        [],
+      ),
+    ).toEqual([{ code: "VALID", message: "Visible message", filename: "validation.sql" }]);
+  });
+
+  it("deduplicates by the complete canonical tuple after sanitization", () => {
+    expect(
+      sanitizeValidationFindings(
+        [
+          { code: "A_CODE", message: "same", filename: "migration-up.sql" },
+          { code: "A_CODE", message: "same", filename: "migration-up.sql" },
+          { code: "A_CODE", message: "same", filename: "migration-down.sql" },
+          { code: "A_CODE", message: "different", filename: "migration-up.sql" },
         ],
         [],
       ),
     ).toEqual([
+      { code: "A_CODE", message: "same", filename: "migration-down.sql" },
+      { code: "A_CODE", message: "different", filename: "migration-up.sql" },
+      { code: "A_CODE", message: "same", filename: "migration-up.sql" },
+    ]);
+  });
+
+  it("returns findings in canonical code, filename, and message order", () => {
+    expect(
+      sanitizeValidationFindings(
+        [
+          { code: "Z_CODE", message: "z", filename: "validation.sql" },
+          { code: "A_CODE", message: "z", filename: "migration-down.sql" },
+          { code: "A_CODE", message: "a", filename: "migration-down.sql" },
+          { code: "A_CODE", message: "no filename" },
+        ],
+        [],
+      ),
+    ).toEqual([
+      { code: "A_CODE", message: "no filename" },
       { code: "A_CODE", message: "a", filename: "migration-down.sql" },
+      { code: "A_CODE", message: "z", filename: "migration-down.sql" },
       { code: "Z_CODE", message: "z", filename: "validation.sql" },
     ]);
+  });
+
+  it("accepts exactly 200 unique valid findings", () => {
+    const findings = Array.from({ length: 200 }, (_, index) => ({
+      code: "VALID_FINDING",
+      message: `Finding ${index.toString().padStart(3, "0")}`,
+      filename: "validation.sql",
+    }));
+
+    const result = sanitizeValidationFindings(findings, []);
+
+    expect(result).toHaveLength(200);
+    expect(() => result.forEach((finding) => PersistedFindingSchema.parse(finding))).not.toThrow();
+  });
+
+  it("caps at 200 only after validation and deduplication", () => {
+    const findings = [
+      { code: "invalid-code", message: "drop me" },
+      { code: "VALID_FINDING", message: "Finding 000", filename: "validation.sql" },
+      ...Array.from({ length: 201 }, (_, index) => ({
+        code: "VALID_FINDING",
+        message: `Finding ${index.toString().padStart(3, "0")}`,
+        filename: "validation.sql",
+      })),
+    ];
+
+    const result = sanitizeValidationFindings(findings, []);
+
+    expect(result).toHaveLength(200);
+    expect(result[0]?.message).toBe("Finding 000");
+    expect(result.at(-1)?.message).toBe("Finding 199");
+    expect(() => result.forEach((finding) => PersistedFindingSchema.parse(finding))).not.toThrow();
   });
 });
