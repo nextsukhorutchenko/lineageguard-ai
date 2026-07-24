@@ -3,6 +3,7 @@ import {
   AgentRunMetadataSchema,
   ContextCoverageSchema,
   ContextIndicatorSummarySchema,
+  DataHubRunMetadataSchema,
   DeadlineEventSchema,
   DeadlinePolicySchema,
   EntityContextRetrievalSchema,
@@ -495,5 +496,403 @@ describe("workflow contracts", () => {
         },
       }),
     ).not.toThrow();
+  });
+
+  it("accepts exact deadline policy durations for generation attempts one and two", () => {
+    expect(() =>
+      WorkflowEventSchema.parse({
+        type: "snapshot",
+        snapshot: {
+          ...emptySnapshot,
+          status: "DRAFT",
+          validation: undefined,
+          deadlinePolicy: {
+            mcpConnectMs: 15_000,
+            datahubAnalysisMs: 55_000,
+            analysisToolMs: 60_000,
+            generationToolMs: 30_000,
+            agentMs: 90_000,
+            workflowMs: 95_000,
+          },
+          deadlineEvents: [
+            { kind: "GENERATION_TIMEOUT", durationMs: 30_000, attempt: 1, outcome: "completed" },
+            { kind: "GENERATION_TIMEOUT", durationMs: 30_000, attempt: 2, outcome: "expired" },
+          ],
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects duplicate deadline ownership and attempts", () => {
+    const deadlinePolicy = {
+      mcpConnectMs: 15_000,
+      datahubAnalysisMs: 55_000,
+      analysisToolMs: 60_000,
+      generationToolMs: 30_000,
+      agentMs: 90_000,
+      workflowMs: 95_000,
+    };
+    expect(() =>
+      WorkflowEventSchema.parse({
+        type: "snapshot",
+        snapshot: {
+          ...emptySnapshot,
+          status: "DRAFT",
+          validation: undefined,
+          deadlinePolicy,
+          deadlineEvents: [
+            { kind: "GENERATION_TIMEOUT", durationMs: 30_000, attempt: 1, outcome: "expired" },
+            { kind: "GENERATION_TIMEOUT", durationMs: 30_000, attempt: 1, outcome: "cancelled" },
+          ],
+        },
+      }),
+    ).toThrow("Deadline events must be unique by owner and attempt");
+  });
+
+  it.each([
+    ["MCP_CONNECT_TIMEOUT", 15_000],
+    ["DATAHUB_ANALYSIS_TIMEOUT", 55_000],
+    ["AGENT_TIMEOUT", 90_000],
+    ["WORKFLOW_TIMEOUT", 95_000],
+  ] as const)("rejects a second attempt for non-generation owner %s", (kind, durationMs) => {
+    expect(() =>
+      WorkflowEventSchema.parse({
+        type: "snapshot",
+        snapshot: {
+          ...emptySnapshot,
+          status: "DRAFT",
+          validation: undefined,
+          deadlinePolicy: {
+            mcpConnectMs: 15_000,
+            datahubAnalysisMs: 55_000,
+            analysisToolMs: 60_000,
+            generationToolMs: 30_000,
+            agentMs: 90_000,
+            workflowMs: 95_000,
+          },
+          deadlineEvents: [{ kind, durationMs, attempt: 2, outcome: "expired" }],
+        },
+      }),
+    ).toThrow("Only generation may have a second attempt");
+  });
+
+  it("rejects deadline events without a policy", () => {
+    expect(() =>
+      WorkflowEventSchema.parse({
+        type: "snapshot",
+        snapshot: {
+          ...emptySnapshot,
+          status: "DRAFT",
+          validation: undefined,
+          deadlineEvents: [
+            { kind: "GENERATION_TIMEOUT", durationMs: 30_000, attempt: 1, outcome: "expired" },
+          ],
+        },
+      }),
+    ).toThrow("Deadline events require a deadline policy");
+  });
+
+  it.each([
+    ["MCP_CONNECT_TIMEOUT", 15_000],
+    ["DATAHUB_ANALYSIS_TIMEOUT", 55_000],
+    ["GENERATION_TIMEOUT", 30_000],
+    ["AGENT_TIMEOUT", 90_000],
+    ["WORKFLOW_TIMEOUT", 95_000],
+  ] as const)("rejects a mismatched deadline duration for %s", (kind, durationMs) => {
+    expect(() =>
+      WorkflowEventSchema.parse({
+        type: "snapshot",
+        snapshot: {
+          ...emptySnapshot,
+          status: "DRAFT",
+          validation: undefined,
+          deadlinePolicy: {
+            mcpConnectMs: 15_000,
+            datahubAnalysisMs: 55_000,
+            analysisToolMs: 60_000,
+            generationToolMs: 30_000,
+            agentMs: 90_000,
+            workflowMs: 95_000,
+          },
+          deadlineEvents: [{ kind, durationMs: durationMs + 1, attempt: 1, outcome: "expired" }],
+        },
+      }),
+    ).toThrow("Deadline event duration must match the configured policy");
+  });
+
+  it.each([
+    [false, false, false, true],
+    [true, true, true, true],
+    [true, false, false, false],
+    [false, true, false, false],
+    [false, false, true, false],
+    [true, true, false, false],
+    [true, false, true, false],
+    [false, true, true, false],
+  ])(
+    "serializes entity-context data only as an all-or-nothing group: %s/%s/%s",
+    (hasRetrieval, hasCoverage, hasIndicators, valid) => {
+      const event = {
+        type: "snapshot",
+        snapshot: {
+          ...emptySnapshot,
+          status: "DRAFT",
+          validation: undefined,
+          ...(hasRetrieval
+            ? {
+                entityContextRetrieval: {
+                  complete: true,
+                  pages: 1,
+                  itemCount: 1,
+                  offsets: [0],
+                  reasonCodes: [],
+                },
+              }
+            : {}),
+          ...(hasCoverage
+            ? {
+                contextCoverage: {
+                  retrievalComplete: true,
+                  relevantAssets: 1,
+                  inspectedAssets: 1,
+                  retrievalPercentage: 100,
+                  possibleSignals: 3,
+                  coveredSignals: 0,
+                  percentage: 0,
+                  withDescriptions: 0,
+                  withOwners: 0,
+                  withGovernance: 0,
+                  missingMetadataUrns: [],
+                  unknownMetadataUrns: [],
+                },
+              }
+            : {}),
+          ...(hasIndicators
+            ? {
+                contextIndicators: {
+                  quality: { assetsWithSignals: 0, signalCount: 0 },
+                  usage: {
+                    status: "NOT_COLLECTED",
+                    assetsWithSignals: 0,
+                    signalCount: 0,
+                    reason: "OUTSIDE_FOUR_TOOL_SLICE",
+                  },
+                },
+              }
+            : {}),
+        },
+      };
+      if (valid) expect(() => WorkflowEventSchema.parse(event)).not.toThrow();
+      else expect(() => WorkflowEventSchema.parse(event)).toThrow("must be serialized together");
+    },
+  );
+
+  it.each([
+    ["REPLAY", "fixture", "REPLAY_FIXTURE", true],
+    ["REPLAY", "mcp", "CAPABILITY_GATE_PASSED", false],
+    ["LIVE", "mcp", "CAPABILITY_GATE_PASSED", true],
+    ["LIVE", "fixture", "REPLAY_FIXTURE", false],
+  ] as const)(
+    "enforces DataHub-only runtime proof %s/%s/%s",
+    (mode, source, verification, valid) => {
+      const event = {
+        type: "snapshot",
+        snapshot: {
+          ...emptySnapshot,
+          mode,
+          status: "DRAFT",
+          validation: undefined,
+          datahub: { ...datahubMetadata, source, verification },
+        },
+      };
+      if (valid) expect(() => WorkflowEventSchema.parse(event)).not.toThrow();
+      else
+        expect(() => WorkflowEventSchema.parse(event)).toThrow(
+          "Runtime proof metadata contradicts the run mode",
+        );
+    },
+  );
+
+  it.each([
+    ["REPLAY", "fixture", true],
+    ["REPLAY", "openai", false],
+    ["LIVE", "openai", true],
+    ["LIVE", "fixture", false],
+  ] as const)("enforces agent-only runtime proof %s/%s", (mode, provider, valid) => {
+    const event = {
+      type: "snapshot",
+      snapshot: {
+        ...emptySnapshot,
+        mode,
+        status: "DRAFT",
+        validation: undefined,
+        agent: { ...agentMetadata, provider },
+      },
+    };
+    if (valid) expect(() => WorkflowEventSchema.parse(event)).not.toThrow();
+    else
+      expect(() => WorkflowEventSchema.parse(event)).toThrow(
+        "Runtime proof metadata contradicts the run mode",
+      );
+  });
+
+  it.each([
+    ["accepted", "analysis"],
+    ["clarification", "analysis"],
+    ["failed", "analysis"],
+    ["accepted", "generation"],
+    ["clarification", "generation"],
+    ["failed", "generation"],
+  ] as const)("rejects every non-not-called zero-call %s outcome for %s", (outcome, tool) => {
+    const toolCalls: unknown[] = [...agentMetadata.toolCalls];
+    const index = tool === "analysis" ? 0 : 1;
+    toolCalls[index] = {
+      name: tool === "analysis" ? "analyze_rename_change" : "generate_migration_package",
+      calls: 0,
+      outcome,
+    };
+    expect(() => AgentRunMetadataSchema.parse({ ...agentMetadata, toolCalls })).toThrow(
+      "Agent tool-call metadata is inconsistent",
+    );
+  });
+
+  it.each([
+    [0, 0],
+    [0, 1],
+    [1, 1],
+    [1, 2],
+  ] as const)(
+    "accepts exact analysis/generation call boundaries %i/%i",
+    (analysisCalls, generationCalls) => {
+      expect(() =>
+        AgentRunMetadataSchema.parse({
+          ...agentMetadata,
+          generationAttempts: generationCalls,
+          toolCalls: [
+            {
+              ...agentMetadata.toolCalls[0],
+              calls: analysisCalls,
+              outcome: analysisCalls === 0 ? "not_called" : "accepted",
+            },
+            {
+              ...agentMetadata.toolCalls[1],
+              calls: generationCalls,
+              outcome: generationCalls === 0 ? "not_called" : "accepted",
+            },
+          ],
+        }),
+      ).not.toThrow();
+    },
+  );
+
+  it.each([
+    {
+      toolCalls: [
+        { ...agentMetadata.toolCalls[0], calls: 1, outcome: "not_called" },
+        agentMetadata.toolCalls[1],
+      ],
+    },
+    {
+      toolCalls: [
+        agentMetadata.toolCalls[0],
+        { ...agentMetadata.toolCalls[1], calls: 1, outcome: "not_called" },
+      ],
+    },
+    {
+      toolCalls: [
+        agentMetadata.toolCalls[0],
+        { ...agentMetadata.toolCalls[1], calls: 2, outcome: "not_called" },
+      ],
+    },
+    {
+      toolCalls: [
+        agentMetadata.toolCalls[0],
+        { ...agentMetadata.toolCalls[1], calls: 1, outcome: "clarification" },
+      ],
+    },
+    {
+      toolCalls: [
+        agentMetadata.toolCalls[0],
+        { ...agentMetadata.toolCalls[1], calls: 2, outcome: "clarification" },
+      ],
+    },
+    {
+      toolCalls: [
+        { ...agentMetadata.toolCalls[0], calls: 2, outcome: "accepted" },
+        agentMetadata.toolCalls[1],
+      ],
+    },
+    {
+      toolCalls: [
+        agentMetadata.toolCalls[0],
+        { ...agentMetadata.toolCalls[1], calls: 3, outcome: "accepted" },
+      ],
+    },
+  ])("rejects invalid positive agent call boundaries and outcomes", ({ toolCalls }) => {
+    expect(() => AgentRunMetadataSchema.parse({ ...agentMetadata, toolCalls })).toThrow();
+  });
+
+  it.each([
+    [1, 0],
+    [1, 2],
+    [2, 0],
+    [2, 1],
+  ] as const)(
+    "rejects generation attempt mismatches in both directions: calls %i, attempts %i",
+    (calls, generationAttempts) => {
+      expect(() =>
+        AgentRunMetadataSchema.parse({
+          ...agentMetadata,
+          generationAttempts,
+          toolCalls: [
+            agentMetadata.toolCalls[0],
+            { ...agentMetadata.toolCalls[1], calls, outcome: "accepted" },
+          ],
+        }),
+      ).toThrow("Agent tool-call metadata is inconsistent");
+    },
+  );
+
+  it.each([
+    [datahubMetadata.allowedTools.slice(0, 3)],
+    [["search", "search", "get_lineage", "get_entities"]],
+    [["get_entities", "get_lineage", "list_schema_fields", "search"]],
+    [["search", "list_schema_fields", "get_lineage", "get_entities", "search"]],
+    [["search", "wrong", "get_lineage", "get_entities"]],
+  ])("rejects malformed DataHub allowed-tools tuple", (allowedTools) => {
+    expect(() => DataHubRunMetadataSchema.parse({ ...datahubMetadata, allowedTools })).toThrow();
+  });
+
+  it("accepts exact validation limits", () => {
+    expect(
+      ValidationSummarySchema.parse({
+        outcome: "REJECTED",
+        findingCount: 200,
+        findingCodes: Array.from(
+          { length: 20 },
+          (_, index) => `CODE_${String(index).padStart(2, "0")}`,
+        ),
+      }),
+    ).toMatchObject({ findingCount: 200 });
+  });
+
+  it("rejects validation limits immediately above each boundary", () => {
+    expect(() =>
+      ValidationSummarySchema.parse({
+        outcome: "REJECTED",
+        findingCount: 1,
+        findingCodes: Array.from(
+          { length: 21 },
+          (_, index) => `CODE_${String(index).padStart(2, "0")}`,
+        ),
+      }),
+    ).toThrow();
+    expect(() =>
+      ValidationSummarySchema.parse({
+        outcome: "REJECTED",
+        findingCount: 201,
+        findingCodes: ["CODE"],
+      }),
+    ).toThrow();
   });
 });
