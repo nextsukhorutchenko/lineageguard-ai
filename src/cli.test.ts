@@ -21,6 +21,7 @@ const ENVIRONMENT = {
   DATAHUB_GMS_URL: "http://localhost:8080",
   DATAHUB_GMS_TOKEN: "secret-test-token",
 };
+const RECOGNIZABLE_RUNS_ROOT = "C:\\recognizable-private-runs-root";
 
 class TestCatalog implements DataHubCatalog {
   closeCount = 0;
@@ -84,7 +85,7 @@ function harness(
   analyze: CliDependencies["runImpactAnalysis"] = async (input) => ({
     status: "COMPLETED",
     runId: input.runId,
-    artifactPath: `${input.runsRoot}/${input.runId}/impact-report.md`,
+    artifactFilename: "impact-report.md",
   }),
   catalog = new TestCatalog(),
 ): CliHarness {
@@ -175,22 +176,27 @@ describe("runCli", () => {
     const test = harness(async (input) => ({
       status,
       runId: input.runId,
-      artifactPath: `reports/${input.runId}/impact-report.md`,
+      artifactFilename: "impact-report.md",
     }));
 
     const exitCode = await runCli(
-      ["--request", REQUEST, "--runs-dir", "reports"],
+      ["--request", REQUEST, "--runs-dir", RECOGNIZABLE_RUNS_ROOT],
       test.dependencies,
     );
 
     expect(exitCode).toBe(0);
     expect(test.stdout.join("")).toMatch(
       new RegExp(
-        `^Status: ${status}\\nRun ID: 20260722T123456Z-[0-9a-f]{8}\\nReport: reports/20260722T123456Z-[0-9a-f]{8}/impact-report\\.md\\n$`,
+        `^Status: ${status}\\nRun ID: 20260722T123456Z-[0-9a-f]{8}\\nReport: impact-report\\.md\\n$`,
       ),
     );
     expect(test.stderr).toEqual([]);
-    expect(test.received.analysis).toMatchObject({ request: REQUEST, runsRoot: "reports" });
+    expect(test.stdout.join("")).not.toContain(RECOGNIZABLE_RUNS_ROOT);
+    expect(test.stderr.join("")).not.toContain(RECOGNIZABLE_RUNS_ROOT);
+    expect(test.received.analysis).toMatchObject({
+      request: REQUEST,
+      runsRoot: RECOGNIZABLE_RUNS_ROOT,
+    });
     expect(test.received.analysis?.secrets).toEqual([ENVIRONMENT.DATAHUB_GMS_TOKEN]);
     expect(test.received.analysis?.signal).toBe(test.received.catalogSignal);
     expect(test.received.config).toMatchObject({ runsRoot: "runs" });
@@ -211,7 +217,7 @@ describe("runCli", () => {
       expect(input.catalog.getServerInfo()).toEqual({ reportedServerName: "test-datahub" });
       await input.catalog.close();
       await input.catalog.close();
-      return { status: "COMPLETED", runId: input.runId, artifactPath: "report.md" };
+      return { status: "COMPLETED", runId: input.runId, artifactFilename: "impact-report.md" };
     }, catalog);
 
     await expect(runCli(["--request", REQUEST], test.dependencies)).resolves.toBe(0);
@@ -262,12 +268,9 @@ describe("runCli", () => {
     },
     {
       code: "ARTIFACT_WRITE_FAILED",
-      details: {
-        attemptedPath: `C:\\runs\\${ENVIRONMENT.DATAHUB_GMS_TOKEN}\u001b[2J\nforged\\impact-report.md`,
-      },
       exitCode: 4,
       recovery:
-        "Verify that the configured runs directory is writable and has no symbolic-link or junction ancestors.",
+        "Verify that the configured runs root is a pre-created writable real directory with no symbolic-link or junction path components.",
     },
   ];
 
@@ -346,28 +349,24 @@ describe("runCli", () => {
     const test = harness(async () => ({
       status: "COMPLETED",
       runId: token,
-      artifactPath: `C:\\runs\\${token}\\impact-report.md`,
+      artifactFilename: "impact-report.md",
     }));
 
     const exitCode = await runCli(["--request", REQUEST], test.dependencies);
 
     expect(exitCode).toBe(0);
     expect(test.stdout.join("")).toBe(
-      "Status: COMPLETED\nRun ID: [REDACTED]\nReport: C:\\runs\\[REDACTED]\\impact-report.md\n",
+      "Status: COMPLETED\nRun ID: [REDACTED]\nReport: impact-report.md\n",
     );
     expect(test.stdout.join("")).not.toContain(token);
   });
 
   it("redacts the configured token from error messages and typed diagnostics", async () => {
     const token = ENVIRONMENT.DATAHUB_GMS_TOKEN;
-    const recognizableRunsRoot = "C:\\recognizable-private-runs-root";
     const test = harness(async () => {
       throw new AppError(
         "ARTIFACT_WRITE_FAILED",
-        `Could not write ${recognizableRunsRoot}\\${token}.`,
-        {
-          attemptedPath: `${recognizableRunsRoot}\\${token}\\impact-report.md`,
-        },
+        `Could not write ${RECOGNIZABLE_RUNS_ROOT}\\${token}.`,
       );
     });
 
@@ -377,10 +376,10 @@ describe("runCli", () => {
     expect(test.stderr.join("")).toBe(
       "Status: ARTIFACT_WRITE_FAILED\n" +
         "The artifact operation failed.\n" +
-        "Recovery: Verify that the configured runs directory is writable and has no symbolic-link or junction ancestors.\n",
+        "Recovery: Verify that the configured runs root is a pre-created writable real directory with no symbolic-link or junction path components.\n",
     );
     expect(test.stderr.join("")).not.toContain(token);
-    expect(test.stderr.join("")).not.toContain(recognizableRunsRoot);
+    expect(test.stderr.join("")).not.toContain(RECOGNIZABLE_RUNS_ROOT);
   });
 
   it("returns stable configuration guidance without exposing validation details", async () => {
@@ -461,7 +460,7 @@ describe("runCli", () => {
             resolve({
               status: "COMPLETED",
               runId: input.runId,
-              artifactPath: `${input.runsRoot}/${input.runId}/impact-report.md`,
+              artifactFilename: "impact-report.md",
             });
           input.signal.addEventListener("abort", abortObserved, { once: true });
           analysisStarted();

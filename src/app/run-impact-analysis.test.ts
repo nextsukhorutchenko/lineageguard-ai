@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
@@ -13,6 +13,7 @@ import type {
 } from "../domain/evidence.js";
 import type { DatasetCandidate } from "../domain/resolve-dataset.js";
 import { AppError } from "../errors/app-error.js";
+import { readImpactReport } from "../artifacts/write-run-artifacts.js";
 import * as impactAnalysisModule from "./run-impact-analysis.js";
 import { runImpactAnalysis } from "./run-impact-analysis.js";
 
@@ -200,6 +201,11 @@ async function createRunsRoot(): Promise<string> {
   return root;
 }
 
+const finalEnvelopePath = (runsRoot: string): string => join(runsRoot, `run-${RUN_ID}.json`);
+
+const readPersistedImpactReport = (runsRoot: string): Promise<string> =>
+  readImpactReport({ runsRoot, runId: RUN_ID });
+
 async function runWith(
   catalog: FakeCatalog,
   runsRoot: string,
@@ -231,13 +237,13 @@ describe("runImpactAnalysis", () => {
 
     const run = await runWith(catalog, runsRoot);
 
-    expectTypeOf(run.artifactPath).toEqualTypeOf<string>();
+    expectTypeOf(run.artifactFilename).toEqualTypeOf<"impact-report.md">();
     expect(run).toMatchObject({
       runId: RUN_ID,
       createdAt: "2026-07-22T12:00:00.000Z",
       request: REQUEST,
       status: "COMPLETED",
-      artifactPath: join(runsRoot, RUN_ID, "impact-report.md"),
+      artifactFilename: "impact-report.md",
       evidence: {
         evidenceLevel: "column",
         downstreamAssets: [DOWNSTREAM],
@@ -254,13 +260,13 @@ describe("runImpactAnalysis", () => {
       "close",
     ]);
     expect(catalog.closeCount).toBe(1);
-    expect(run.artifactPath).toBeDefined();
+    expect(run.artifactFilename).toBe("impact-report.md");
     expect(run.evidence.targetDataset).toMatchObject({
       platform: "snowflake",
       environment: "PROD",
     });
     expect(run.facts).toContain("Selected dataset environment is PROD.");
-    await expect(readFile(run.artifactPath!, "utf8")).resolves.toContain(
+    await expect(readPersistedImpactReport(runsRoot)).resolves.toContain(
       "# LineageGuard AI Impact Report",
     );
 
@@ -276,7 +282,7 @@ describe("runImpactAnalysis", () => {
 
   it("closes successfully before the final report becomes visible", async () => {
     const runsRoot = await createRunsRoot();
-    const finalPath = join(runsRoot, RUN_ID, "impact-report.md");
+    const finalPath = finalEnvelopePath(runsRoot);
     let reportExistedWhenCloseStarted = true;
     const catalog = new FakeCatalog({
       onClose: async () => {
@@ -291,7 +297,8 @@ describe("runImpactAnalysis", () => {
 
     expect(reportExistedWhenCloseStarted).toBe(false);
     expect(catalog.closeCount).toBe(1);
-    await expect(readFile(run.artifactPath, "utf8")).resolves.toContain(
+    expect(run.artifactFilename).toBe("impact-report.md");
+    await expect(readPersistedImpactReport(runsRoot)).resolves.toContain(
       "# LineageGuard AI Impact Report",
     );
   });
@@ -317,8 +324,9 @@ describe("runImpactAnalysis", () => {
       columnLineage: [COLUMN_DOWNSTREAM, UNMATCHED_COLUMN_DOWNSTREAM],
     });
 
-    const run = await runWith(catalog, await createRunsRoot());
-    const report = await readFile(run.artifactPath, "utf8");
+    const runsRoot = await createRunsRoot();
+    const run = await runWith(catalog, runsRoot);
+    const report = await readPersistedImpactReport(runsRoot);
 
     expect(run.evidence.searchCandidateUrns).toEqual([otherCandidate.urn, TARGET.urn].sort());
     expect(run.evidence.unmatchedColumnAssets).toEqual([UNMATCHED_COLUMN_DOWNSTREAM]);
@@ -343,7 +351,7 @@ describe("runImpactAnalysis", () => {
       signal: new AbortController().signal,
       secrets: [],
     });
-    const report = await readFile(run.artifactPath, "utf8");
+    const report = await readPersistedImpactReport(runsRoot);
 
     expect(run.evidence.targetDataset).toEqual({
       ...unnamedTarget,
@@ -386,7 +394,7 @@ describe("runImpactAnalysis", () => {
       signal: new AbortController().signal,
       secrets: [secret],
     });
-    const report = await readFile(run.artifactPath, "utf8");
+    const report = await readPersistedImpactReport(runsRoot);
 
     expect(run.request).toContain(secret);
     expect(run.evidence.targetDataset.urn).toContain(secret);
@@ -397,16 +405,16 @@ describe("runImpactAnalysis", () => {
 
   it("writes a metadata-limited report when no downstream lineage is returned", async () => {
     const catalog = new FakeCatalog({ tableLineage: [], columnLineage: [] });
-    const run = await runWith(catalog, await createRunsRoot());
+    const runsRoot = await createRunsRoot();
+    const run = await runWith(catalog, runsRoot);
 
     expect(run.status).toBe("INSUFFICIENT_METADATA");
     expect(run.evidence.evidenceLevel).toBe("none");
     expect(run.unknowns).toContain(
       "No downstream impact is proven because DataHub returned no downstream lineage.",
     );
-    expect(run.artifactPath).toBeDefined();
-    await expect(stat(run.artifactPath!)).resolves.toMatchObject({ size: expect.any(Number) });
-    const report = await readFile(run.artifactPath!, "utf8");
+    expect(run.artifactFilename).toBe("impact-report.md");
+    const report = await readPersistedImpactReport(runsRoot);
     expect(report).toContain("INSUFFICIENT_METADATA");
     expect(report).toContain(
       "No downstream impact is proven because DataHub returned no downstream lineage.",
@@ -460,9 +468,7 @@ describe("runImpactAnalysis", () => {
     await expect(runWith(catalog, runsRoot)).rejects.toMatchObject({
       code: "NEEDS_USER_CLARIFICATION",
     });
-    await expect(stat(join(runsRoot, RUN_ID, "impact-report.md"))).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+    await expect(access(finalEnvelopePath(runsRoot))).rejects.toThrow();
     expect(catalog.operations).toEqual(["searchDatasets", "close"]);
     expect(catalog.closeCount).toBe(1);
   });
@@ -547,7 +553,7 @@ describe("runImpactAnalysis", () => {
     expect(JSON.stringify(caught)).not.toContain("raw close failure");
     expect(JSON.stringify(caught)).not.toContain("secret-token");
     expect(catalog.closeCount).toBe(1);
-    await expect(access(join(runsRoot, RUN_ID, "impact-report.md"))).rejects.toThrow();
+    await expect(access(finalEnvelopePath(runsRoot))).rejects.toThrow();
   });
 
   it("never replaces a primary error when suppressed metadata cannot be attached", async () => {
@@ -567,7 +573,7 @@ describe("runImpactAnalysis", () => {
 
   it("rejects close failure without publishing a final report", async () => {
     const runsRoot = await createRunsRoot();
-    const finalPath = join(runsRoot, RUN_ID, "impact-report.md");
+    const finalPath = finalEnvelopePath(runsRoot);
     const closeFailure = new AppError(
       "MCP_UNAVAILABLE",
       "The DataHub MCP client could not be closed.",
@@ -582,7 +588,7 @@ describe("runImpactAnalysis", () => {
   it("rejects an owned close deadline without publishing a final report", async () => {
     vi.useFakeTimers();
     const runsRoot = await createRunsRoot();
-    const finalPath = join(runsRoot, RUN_ID, "impact-report.md");
+    const finalPath = finalEnvelopePath(runsRoot);
     const closeStarted = Promise.withResolvers<void>();
     const timeoutFailure = new AppError(
       "MCP_UNAVAILABLE",
@@ -606,7 +612,7 @@ describe("runImpactAnalysis", () => {
     expect(catalog.closeCount).toBe(1);
   });
 
-  it("preserves the safe in-memory report and attempted path after a real writer failure", async () => {
+  it("preserves the safe in-memory report and virtual filename after a real writer failure", async () => {
     const sandbox = await createRunsRoot();
     const blockedRoot = join(sandbox, "runs-file");
     const catalog = new FakeCatalog({
@@ -620,8 +626,8 @@ describe("runImpactAnalysis", () => {
     expect(caught).toMatchObject({
       name: "ImpactReportPersistenceError",
       code: "ARTIFACT_WRITE_FAILED",
-      attemptedPath: join(blockedRoot, RUN_ID, "impact-report.md"),
-      details: { attemptedPath: join(blockedRoot, RUN_ID, "impact-report.md") },
+      artifactFilename: "impact-report.md",
+      details: {},
       report: {
         runId: RUN_ID,
         request: REQUEST,
@@ -635,23 +641,31 @@ describe("runImpactAnalysis", () => {
         },
       },
     });
+    expect(JSON.stringify(caught)).not.toContain(blockedRoot);
     expect(JSON.stringify(caught)).not.toContain("secret");
     expect(catalog.closeCount).toBe(1);
     expect(catalog.operations.at(-1)).toBe("close");
-    await expect(access(join(blockedRoot, RUN_ID, "impact-report.md"))).rejects.toThrow();
+    await expect(access(blockedRoot)).resolves.toBeUndefined();
   });
 
   it("rechecks caller cancellation after successful close and before publication", async () => {
     const controller = new AbortController();
+    const secretAbortReason = "secret-bearing-application-abort-reason";
     const runsRoot = await createRunsRoot();
-    const finalPath = join(runsRoot, RUN_ID, "impact-report.md");
+    const finalPath = finalEnvelopePath(runsRoot);
     const catalog = new FakeCatalog({
-      onClose: () => controller.abort(),
+      onClose: () => controller.abort(new Error(secretAbortReason)),
     });
 
-    await expect(runWith(catalog, runsRoot, controller.signal)).rejects.toMatchObject({
-      name: "AbortError",
+    const caught = await runWith(catalog, runsRoot, controller.signal).catch(
+      (error: unknown) => error,
+    );
+    expect(caught).toMatchObject({
+      code: "CANCELLED",
+      message: "The run was cancelled.",
     });
+    expect(JSON.stringify(caught)).not.toContain(secretAbortReason);
+    expect(JSON.stringify(caught)).not.toContain(runsRoot);
     await expect(access(finalPath)).rejects.toThrow();
     expect(catalog.closeCount).toBe(1);
   });
@@ -674,7 +688,10 @@ describe("runImpactAnalysis", () => {
       secrets: [],
     });
 
-    await expect(operation).rejects.toMatchObject({ name: "AbortError" });
+    await expect(operation).rejects.toMatchObject({
+      code: "CANCELLED",
+      message: "The run was cancelled.",
+    });
     expect(catalog.operations).toEqual([
       "searchDatasets",
       "listSchemaFields",
@@ -683,7 +700,7 @@ describe("runImpactAnalysis", () => {
       "getEntityContext",
       "close",
     ]);
-    await expect(access(join(runsRoot, RUN_ID, "impact-report.md"))).rejects.toThrow();
+    await expect(access(finalEnvelopePath(runsRoot))).rejects.toThrow();
   });
 
   it("does not expose the pre-write report builder as public application API", () => {
@@ -742,7 +759,10 @@ describe("runImpactAnalysis", () => {
       secrets: [],
     });
 
-    await expect(operation).rejects.toMatchObject({ name: "AbortError" });
+    await expect(operation).rejects.toMatchObject({
+      code: "CANCELLED",
+      message: "The run was cancelled.",
+    });
     expect(catalog.operations).toEqual([
       "searchDatasets",
       "listSchemaFields",
@@ -753,7 +773,7 @@ describe("runImpactAnalysis", () => {
     ]);
     expect(catalog.closeCount).toBe(1);
     expect(clockCalls).toBe(0);
-    await expect(access(join(runsRoot, RUN_ID, "impact-report.md"))).rejects.toThrow();
+    await expect(access(finalEnvelopePath(runsRoot))).rejects.toThrow();
   });
 
   it("treats a non-aborted get_entities transport failure as DATAHUB_UNAVAILABLE", async () => {
@@ -782,7 +802,7 @@ describe("runImpactAnalysis", () => {
     ).rejects.toMatchObject(incompleteSearchFailure);
     expect(catalog.operations).toEqual(["searchDatasets", "close"]);
     expect(catalog.closeCount).toBe(1);
-    await expect(access(join(runsRoot, RUN_ID, "impact-report.md"))).rejects.toThrow();
+    await expect(access(finalEnvelopePath(runsRoot))).rejects.toThrow();
   }
 
   it("rejects incomplete search with a first-page platform alias before downstream work", async () => {
@@ -876,7 +896,8 @@ describe("runImpactAnalysis", () => {
       "getEntityContext",
       "close",
     ]);
-    await expect(access(run.artifactPath)).resolves.toBeUndefined();
+    expect(run.artifactFilename).toBe("impact-report.md");
+    await expect(access(finalEnvelopePath(runsRoot))).resolves.toBeUndefined();
   });
 
   it("allows a verified source field from incomplete schema but never infers absence", async () => {

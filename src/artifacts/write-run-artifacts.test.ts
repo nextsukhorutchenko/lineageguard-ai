@@ -1,205 +1,115 @@
-import { access, mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { readRunArtifact, writeRunArtifact } from "./write-run-artifacts.js";
+import { WorkflowSnapshotSchema } from "../workflow/contracts.js";
+import { persistFailedRun } from "../runs/run-store.js";
+import { readImpactReport, writeRunArtifact } from "./write-run-artifacts.js";
 
 async function createFreshRunsRoot(): Promise<{
   readonly sandbox: string;
   readonly runsRoot: string;
 }> {
   const sandbox = await mkdtemp(join(tmpdir(), "lineageguard-artifacts-"));
-  const runsRoot = await mkdtemp(join(sandbox, "runs-"));
+  const runsRoot = await mkdtemp(join(sandbox, "recognizable-private-runs-root-"));
   return { sandbox, runsRoot };
 }
 
-describe("writeRunArtifact", () => {
-  it("writes every allowlisted run-level diagnostic artifact", async () => {
-    const { sandbox, runsRoot } = await createFreshRunsRoot();
-    try {
-      for (const filename of [
-        "impact-report.md",
-        "change-context.json",
-        "migration-package-draft.json",
-        "validation-findings.json",
-        "run-metadata.json",
-      ] as const) {
+describe("impact report compatibility", () => {
+  it.each([
+    "COMPLETED",
+    "COMPLETED_WITH_LIMITATIONS",
+    "INSUFFICIENT_METADATA",
+    "INCOMPLETE_EVIDENCE",
+  ] as const)(
+    "publishes %s as one strict flat envelope behind a virtual filename",
+    async (status) => {
+      const { sandbox, runsRoot } = await createFreshRunsRoot();
+      const report = `# Sanitized ${status} impact report\n`;
+
+      try {
         await expect(
-          writeRunArtifact({ runsRoot, runId: `run-${filename}`, filename, content: "safe" }),
-        ).resolves.toContain(filename);
+          writeRunArtifact({
+            runsRoot,
+            runId: `run-${status.toLowerCase()}`,
+            filename: "impact-report.md",
+            content: report,
+            status,
+          }),
+        ).resolves.toBe("impact-report.md");
+
+        const runId = `run-${status.toLowerCase()}`;
+        expect(await readdir(runsRoot)).toEqual([`run-${runId}.json`]);
+        await expect(readImpactReport({ runsRoot, runId })).resolves.toBe(report);
+
+        const stored = await readFile(join(runsRoot, `run-${runId}.json`), "utf8");
+        expect(JSON.parse(stored)).toMatchObject({
+          schemaVersion: "1",
+          kind: "impact-report",
+          runId,
+          status,
+          report,
+        });
+        expect(stored).not.toContain(runsRoot);
+      } finally {
+        await rm(sandbox, { recursive: true, force: true });
       }
-    } finally {
-      await rm(sandbox, { recursive: true, force: true });
-    }
-  });
+    },
+  );
 
-  it("rejects filenames outside the fixed allowlist", async () => {
-    const { sandbox, runsRoot } = await createFreshRunsRoot();
-    try {
-      await expect(
-        writeRunArtifact({
-          runsRoot,
-          runId: "run-1",
-          filename: "../../secret.txt" as never,
-          content: "unsafe",
-        }),
-      ).rejects.toMatchObject({ code: "ARTIFACT_WRITE_FAILED" });
-    } finally {
-      await rm(sandbox, { recursive: true, force: true });
-    }
-  });
-
-  it("reads only a real allowlisted file beneath the run root", async () => {
-    const { sandbox, runsRoot } = await createFreshRunsRoot();
-    try {
-      await writeRunArtifact({
-        runsRoot,
-        runId: "run-1",
-        filename: "impact-report.md",
-        content: "# Sanitized impact report\n",
-      });
-      await expect(
-        readRunArtifact({ runsRoot, runId: "run-1", filename: "impact-report.md" }),
-      ).resolves.toBe("# Sanitized impact report\n");
-    } finally {
-      await rm(sandbox, { recursive: true, force: true });
-    }
-  });
-
-  it("does not create an artifact when its signal is already aborted", async () => {
+  it("returns a fixed typed cancellation without persisting the root or custom abort reason", async () => {
     const { sandbox, runsRoot } = await createFreshRunsRoot();
     const controller = new AbortController();
-    controller.abort();
+    const secretAbortReason = "secret-bearing-custom-abort-reason";
+    controller.abort(new Error(secretAbortReason));
 
     try {
-      await expect(
-        writeRunArtifact({
-          runsRoot,
-          runId: "run-aborted",
-          filename: "impact-report.md",
-          content: "# Impact report\n",
-          signal: controller.signal,
-        }),
-      ).rejects.toMatchObject({ name: "AbortError" });
-      await expect(access(join(runsRoot, "run-aborted", "impact-report.md"))).rejects.toThrow();
-    } finally {
-      await rm(sandbox, { recursive: true, force: true });
-    }
-  });
-
-  it("writes impact-report.md beneath the configured runs directory", async () => {
-    const { sandbox, runsRoot } = await createFreshRunsRoot();
-
-    try {
-      const output = await writeRunArtifact({
+      const caught = await writeRunArtifact({
         runsRoot,
-        runId: "run-001",
+        runId: "run-aborted",
         filename: "impact-report.md",
         content: "# Impact report\n",
+        status: "COMPLETED",
+        signal: controller.signal,
+      }).catch((error: unknown) => error);
+
+      expect(caught).toMatchObject({
+        code: "CANCELLED",
+        message: "The run was cancelled.",
       });
-
-      expect(output).toBe(join(runsRoot, "run-001", "impact-report.md"));
-      await expect(readFile(output, "utf8")).resolves.toBe("# Impact report\n");
+      expect(JSON.stringify(caught)).not.toContain(runsRoot);
+      expect(JSON.stringify(caught)).not.toContain(secretAbortReason);
+      await expect(access(join(runsRoot, "run-run-aborted.json"))).rejects.toThrow();
+      expect(await readdir(runsRoot)).toEqual([]);
     } finally {
       await rm(sandbox, { recursive: true, force: true });
     }
   });
 
-  it("rejects an existing run-directory symlink that points outside the runs root", async () => {
+  it("does not interpret another strict terminal envelope as an impact report", async () => {
     const { sandbox, runsRoot } = await createFreshRunsRoot();
-    const outside = join(sandbox, "outside");
-    const linkedRun = join(runsRoot, "run-link");
-    const escapedOutput = join(outside, "impact-report.md");
+    const runId = "failed-run";
+    const snapshot = WorkflowSnapshotSchema.parse({
+      runId,
+      mode: "REPLAY",
+      status: "GENERATION_FAILED",
+      activity: [],
+      evidence: [],
+      facts: [],
+      assumptions: [],
+      unknowns: [],
+      validation: { outcome: "NOT_RUN", findingCount: 0, findingCodes: [] },
+      artifacts: [],
+      failure: { code: "GENERATION_FAILED", message: "Generation failed." },
+    });
 
     try {
-      await mkdir(outside);
-      await symlink(outside, linkedRun, process.platform === "win32" ? "junction" : "dir");
+      await persistFailedRun({ runsRoot, runId, snapshot, secrets: [] });
 
-      await expect(
-        writeRunArtifact({
-          runsRoot,
-          runId: "run-link",
-          filename: "impact-report.md",
-          content: "# Impact report\n",
-        }),
-      ).rejects.toMatchObject({ code: "ARTIFACT_WRITE_FAILED" });
-      await expect(access(escapedOutput)).rejects.toThrow();
-    } finally {
-      await rm(sandbox, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects a configured runs-root junction that points elsewhere", async () => {
-    const sandbox = await mkdtemp(join(tmpdir(), "lineageguard-artifacts-root-link-"));
-    const outside = join(sandbox, "outside");
-    const linkedRoot = join(sandbox, "linked-runs");
-    const escapedOutput = join(outside, "run-001", "impact-report.md");
-
-    try {
-      await mkdir(outside);
-      await symlink(outside, linkedRoot, process.platform === "win32" ? "junction" : "dir");
-
-      await expect(
-        writeRunArtifact({
-          runsRoot: linkedRoot,
-          runId: "run-001",
-          filename: "impact-report.md",
-          content: "# Impact report\n",
-        }),
-      ).rejects.toMatchObject({ code: "ARTIFACT_WRITE_FAILED" });
-      await expect(access(escapedOutput)).rejects.toThrow();
-    } finally {
-      await rm(sandbox, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects a linked ancestor of a not-yet-created runs root", async () => {
-    const sandbox = await mkdtemp(join(tmpdir(), "lineageguard-artifacts-parent-link-"));
-    const outside = join(sandbox, "outside");
-    const linkedParent = join(sandbox, "linked-parent");
-    const linkedRoot = join(linkedParent, "runs");
-    const escapedOutput = join(outside, "runs", "run-001", "impact-report.md");
-
-    try {
-      await mkdir(outside);
-      await symlink(outside, linkedParent, process.platform === "win32" ? "junction" : "dir");
-
-      await expect(
-        writeRunArtifact({
-          runsRoot: linkedRoot,
-          runId: "run-001",
-          filename: "impact-report.md",
-          content: "# Impact report\n",
-        }),
-      ).rejects.toMatchObject({ code: "ARTIFACT_WRITE_FAILED" });
-      await expect(access(escapedOutput)).rejects.toThrow();
-    } finally {
-      await rm(sandbox, { recursive: true, force: true });
-    }
-  });
-
-  it.each([
-    "../outside",
-    "..\\outside",
-    "C:\\outside",
-    "/outside",
-    "run-001/../../outside",
-    "run-001/../run-002",
-    "run-001\\..\\run-002",
-    "run-001/child",
-    "run-001\\child",
-  ])("rejects unsafe run ID %s with ARTIFACT_WRITE_FAILED", async (runId) => {
-    const { sandbox, runsRoot } = await createFreshRunsRoot();
-
-    try {
-      await expect(
-        writeRunArtifact({
-          runsRoot,
-          runId,
-          filename: "impact-report.md",
-          content: "# Impact report\n",
-        }),
-      ).rejects.toMatchObject({ code: "ARTIFACT_WRITE_FAILED" });
+      await expect(readImpactReport({ runsRoot, runId })).rejects.toMatchObject({
+        code: "ARTIFACT_WRITE_FAILED",
+        message: "The stored impact report is unavailable.",
+      });
     } finally {
       await rm(sandbox, { recursive: true, force: true });
     }

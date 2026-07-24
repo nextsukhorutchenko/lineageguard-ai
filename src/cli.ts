@@ -37,7 +37,7 @@ const guidance = {
   NEEDS_USER_CLARIFICATION: "Choose one of the listed dataset URNs and retry with that exact URN.",
   COLUMN_NOT_FOUND: "Choose one of the actual schema fields listed above.",
   ARTIFACT_WRITE_FAILED:
-    "Verify that the configured runs directory is writable and has no symbolic-link or junction ancestors.",
+    "Verify that the configured runs root is a pre-created writable real directory with no symbolic-link or junction path components.",
   CANCELLED: "The operation was cancelled. Retry when ready.",
 } as const satisfies Readonly<Record<Exclude<AppErrorCode, "INVALID_REQUEST">, string>>;
 
@@ -60,7 +60,7 @@ type SuccessfulStatus = Extract<
 interface CliAnalysisResult {
   readonly status: SuccessfulStatus;
   readonly runId: string;
-  readonly artifactPath: string;
+  readonly artifactFilename: "impact-report.md";
 }
 
 interface TextWriter {
@@ -328,7 +328,7 @@ export async function runCli(
       }
 
       dependencies.stdout.write(
-        `Status: ${outcome.run.status}\nRun ID: ${sanitizeTerminalText(outcome.run.runId, outputSecrets)}\nReport: ${sanitizeTerminalText(outcome.run.artifactPath, outputSecrets)}\n`,
+        `Status: ${outcome.run.status}\nRun ID: ${sanitizeTerminalText(outcome.run.runId, outputSecrets)}\nReport: ${outcome.run.artifactFilename}\n`,
       );
       return 0;
     } finally {

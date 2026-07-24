@@ -12,7 +12,18 @@ The pinned demo analyzes `customer_id` to `customer_key` on the official DataHub
 
 ## Architecture and Safety Boundary
 
-The project is one TypeScript package with a thin CLI, an application orchestrator, pure domain modules, a typed DataHub catalog port, an MCP stdio adapter, and a Markdown artifact writer. Generated reports are confined beneath the configured runs directory at `<runs-dir>/<run-id>/`. For that boundary to be trustworthy, the writer rejects a runs root, or any existing ancestor of it, that is a symbolic link or Windows junction.
+The project is one TypeScript package with a thin CLI, an application orchestrator, pure domain modules, a typed DataHub catalog port, an MCP stdio adapter, and a Markdown artifact writer. Generated values are stored as strict immutable JSON envelopes directly beneath a trusted runs root. Public artifacts such as `impact-report.md` are virtual filenames inside those envelopes; application responses never return a native storage path.
+
+`LINEAGEGUARD_RUNS_DIR` is a deployment trust boundary. Before starting LineageGuard, pre-create it as a real directory, make it writable by the application account, and use operating-system permissions to prevent untrusted writers from replacing its contents. The application rejects a root that is missing, a symbolic link, or a Windows junction, and it never creates the configured root. It does not claim to defend against a process that can rename or replace this trusted root.
+
+For the Windows example in `.env.example`, prepare the non-secret path before running the demo:
+
+```powershell
+New-Item -ItemType Directory -Path C:\lineageguard-runs
+$env:LINEAGEGUARD_RUNS_DIR = "C:\lineageguard-runs"
+```
+
+The flat envelope format has not shipped as a supported storage format, so no migration from the previous development-only layout is required.
 
 DataHub access is read-only. The adapter launches the official pinned command:
 
@@ -104,12 +115,12 @@ To analyze another rename that follows the supported grammar, invoke the CLI dir
 pnpm tsx src/cli.ts --request "Rename column order_id to order_key in dataset snowflake:b2fd91.order_entry_db.analytics.order_details"
 ```
 
-A successful run prints its status, run ID, and a path like:
+A successful run prints its status, run ID, and the virtual report filename:
 
 ```text
 Status: COMPLETED
 Run ID: 20260722T120000Z-0123abcd
-Report: <repository>\runs\20260722T120000Z-0123abcd\impact-report.md
+Report: impact-report.md
 ```
 
 Report-producing statuses are:

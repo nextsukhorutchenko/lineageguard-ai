@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { runImpactAnalysis } from "../src/app/run-impact-analysis.js";
+import { readImpactReport } from "../src/artifacts/write-run-artifacts.js";
 import type { CollectionResult, DataHubCatalog } from "../src/datahub/catalog.js";
 import type {
   EntityContext,
@@ -211,7 +212,10 @@ async function runFixturePipeline() {
     signal: new AbortController().signal,
     secrets: [],
   });
-  return { run, markdown: await readFile(run.artifactPath, "utf8") };
+  return {
+    run,
+    markdown: await readImpactReport({ runsRoot, runId: run.runId }),
+  };
 }
 
 afterEach(async () => {
