@@ -193,6 +193,103 @@ it("hashes all canonical narrative candidates before retaining the first one hun
   expect(first.contextHash).not.toBe(second.contextHash);
 });
 
+it("redacts ordinary copied text before it enters the change context", () => {
+  const secret = "server-secret";
+  const context = buildChangeContext(
+    {
+      ...makeImpactReportDraft(),
+      request: `Rename a column with ${secret}.`,
+      facts: [`DataHub supplied ${secret}.`],
+      assumptions: [`The ${secret} connection was available.`],
+      unknowns: [`The ${secret} owner remains unknown.`],
+    },
+    [secret],
+  );
+
+  expect(JSON.stringify(context)).not.toContain(secret);
+  expect(context.request).toContain("[REDACTED]");
+  expect(context.facts).toEqual(["DataHub supplied [REDACTED]."]);
+});
+
+it("rejects a required identity that is redacted at the context boundary", () => {
+  const secret = "customer_secret";
+  const base = makeImpactReportDraft();
+  const report = {
+    ...base,
+    intent: { ...base.intent, sourceColumn: secret },
+    evidence: {
+      ...base.evidence,
+      schemaFields: [{ fieldPath: secret, nativeDataType: "VARCHAR" }],
+      sourceColumn: { fieldPath: secret, nativeDataType: "VARCHAR" },
+    },
+  };
+
+  expect(() => buildChangeContext(report, [secret])).toThrow("Invalid sanitized ChangeContext.");
+});
+
+it("rejects identities that collide after boundary normalization", () => {
+  const base = makeImpactReportDraft();
+  const report = {
+    ...base,
+    evidence: {
+      ...base.evidence,
+      schemaFields: [
+        base.evidence.sourceColumn,
+        { fieldPath: "e\u0301", nativeDataType: "VARCHAR" },
+        { fieldPath: "é", nativeDataType: "VARCHAR" },
+      ],
+    },
+  };
+
+  expect(() => buildChangeContext(report, [])).toThrow("Invalid sanitized ChangeContext.");
+});
+
+it("ignores unknown runtime collection properties rather than reading them", () => {
+  const base = makeImpactReportDraft();
+  const search = { ...base.evidence.completeness.search } as Record<string, unknown>;
+  Object.defineProperty(search, "unsafeFutureProperty", {
+    enumerable: true,
+    get: () => {
+      throw new Error("raw-secret-must-not-be-read");
+    },
+  });
+  const report = {
+    ...base,
+    evidence: {
+      ...base.evidence,
+      completeness: { ...base.evidence.completeness, search },
+    },
+  };
+
+  expect(buildChangeContext(report as unknown as typeof base, [])).toMatchObject({
+    evidenceCompleteness: { search: base.evidence.completeness.search },
+  });
+});
+
+it("exposes only the fixed boundary error when untrusted conversion fails", () => {
+  const base = makeImpactReportDraft();
+  const unsafeIdentity = {
+    toString: () => {
+      throw new Error("raw-secret-must-not-escape");
+    },
+  };
+  const report = {
+    ...base,
+    evidence: {
+      ...base.evidence,
+      schemaFields: [{ fieldPath: unsafeIdentity, nativeDataType: "VARCHAR" }],
+      sourceColumn: { fieldPath: unsafeIdentity, nativeDataType: "VARCHAR" },
+    },
+  };
+
+  expect(() => buildChangeContext(report as unknown as typeof base, [])).toThrow(
+    "Invalid sanitized ChangeContext.",
+  );
+  expect(() => buildChangeContext(report as unknown as typeof base, [])).not.toThrow(
+    "raw-secret-must-not-escape",
+  );
+});
+
 it("requires entity-context and unknown metadata to partition relevant URNs exactly", () => {
   const context = buildChangeContext(makeImpactReportDraft(), []);
   const relevant = context.evidence.find(({ kind }) => kind === "downstream")!.urn;

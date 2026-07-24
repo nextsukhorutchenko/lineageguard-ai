@@ -377,12 +377,42 @@ function sanitizeImpactReportDraft(
       trace: unsafeReport.evidence.trace.map((entry) => sanitizeTrace(entry, secrets)),
       completeness: {
         complete: unsafeReport.evidence.completeness.complete,
-        search: { ...unsafeReport.evidence.completeness.search },
-        schema: { ...unsafeReport.evidence.completeness.schema },
-        tableLineage: { ...unsafeReport.evidence.completeness.tableLineage },
-        columnLineage: { ...unsafeReport.evidence.completeness.columnLineage },
+        search: {
+          complete: unsafeReport.evidence.completeness.search.complete,
+          pages: unsafeReport.evidence.completeness.search.pages,
+          itemCount: unsafeReport.evidence.completeness.search.itemCount,
+          offsets: [...unsafeReport.evidence.completeness.search.offsets],
+          reasonCodes: [...unsafeReport.evidence.completeness.search.reasonCodes],
+        },
+        schema: {
+          complete: unsafeReport.evidence.completeness.schema.complete,
+          pages: unsafeReport.evidence.completeness.schema.pages,
+          itemCount: unsafeReport.evidence.completeness.schema.itemCount,
+          offsets: [...unsafeReport.evidence.completeness.schema.offsets],
+          reasonCodes: [...unsafeReport.evidence.completeness.schema.reasonCodes],
+        },
+        tableLineage: {
+          complete: unsafeReport.evidence.completeness.tableLineage.complete,
+          pages: unsafeReport.evidence.completeness.tableLineage.pages,
+          itemCount: unsafeReport.evidence.completeness.tableLineage.itemCount,
+          offsets: [...unsafeReport.evidence.completeness.tableLineage.offsets],
+          reasonCodes: [...unsafeReport.evidence.completeness.tableLineage.reasonCodes],
+        },
+        columnLineage: {
+          complete: unsafeReport.evidence.completeness.columnLineage.complete,
+          pages: unsafeReport.evidence.completeness.columnLineage.pages,
+          itemCount: unsafeReport.evidence.completeness.columnLineage.itemCount,
+          offsets: [...unsafeReport.evidence.completeness.columnLineage.offsets],
+          reasonCodes: [...unsafeReport.evidence.completeness.columnLineage.reasonCodes],
+        },
       },
-      entityContextRetrieval: { ...unsafeReport.evidence.entityContextRetrieval },
+      entityContextRetrieval: {
+        complete: unsafeReport.evidence.entityContextRetrieval.complete,
+        pages: unsafeReport.evidence.entityContextRetrieval.pages,
+        itemCount: unsafeReport.evidence.entityContextRetrieval.itemCount,
+        offsets: [...unsafeReport.evidence.entityContextRetrieval.offsets],
+        reasonCodes: [...unsafeReport.evidence.entityContextRetrieval.reasonCodes],
+      },
       entityContext,
       contextCoverage: {
         retrievalComplete: unsafeReport.evidence.contextCoverage.retrievalComplete,
@@ -472,158 +502,160 @@ export function buildChangeContext(
   unsafeReport: ImpactReportDraft,
   secrets: readonly string[],
 ): ChangeContext {
-  const report = sanitizeImpactReportDraft(unsafeReport, secrets);
-  const narratives = summarizeNarratives(report, secrets);
-  const columnUrns = new Set(report.evidence.columnAffectedAssets.map(({ urn }) => urn));
-  const allSchemaFields = [...report.evidence.schemaFields]
-    .map(({ fieldPath, nativeDataType }) => ({
-      fieldPath,
-      ...(nativeDataType === undefined ? {} : { nativeDataType }),
-    }))
-    .sort((left, right) => left.fieldPath.localeCompare(right.fieldPath, "en"));
-  const sourceIndex = allSchemaFields.findIndex(
-    ({ fieldPath }) => fieldPath === report.evidence.sourceColumn.fieldPath,
-  );
-  const sourceFirst =
-    sourceIndex < 0
-      ? allSchemaFields
-      : [
-          allSchemaFields[sourceIndex]!,
-          ...allSchemaFields.filter((_, index) => index !== sourceIndex),
-        ];
-  const knownFields = sourceFirst.slice(0, 100);
-  const evidence = [
-    {
-      id: "datahub:target-dataset",
-      kind: "target_dataset" as const,
-      level: "dataset" as const,
-      urn: report.evidence.targetDataset.urn,
-    },
-    {
-      id: `datahub:source-column:${report.evidence.sourceColumn.fieldPath}`,
-      kind: "source_column" as const,
-      level: "schema" as const,
-      urn: report.evidence.targetDataset.urn,
-      fieldPath: report.evidence.sourceColumn.fieldPath,
-    },
-    ...report.evidence.downstreamAssets.map((asset, index) => ({
-      id: `datahub:downstream:${String(index + 1).padStart(3, "0")}`,
-      kind: "downstream" as const,
-      level: columnUrns.has(asset.urn) ? ("column" as const) : ("table" as const),
-      urn: asset.urn,
-      hop: asset.hop,
-    })),
-  ];
-  const payload: Omit<ChangeContext, "contextHash"> = {
-    schemaVersion: "1",
-    request: report.request,
-    intent: report.intent,
-    target: report.evidence.targetDataset,
-    sourceField: {
-      fieldPath: report.evidence.sourceColumn.fieldPath,
-      ...(report.evidence.sourceColumn.nativeDataType === undefined
-        ? {}
-        : { nativeDataType: report.evidence.sourceColumn.nativeDataType }),
-    },
-    knownFields,
-    schemaSummary: {
-      totalFields: allSchemaFields.length,
-      includedFields: knownFields.length,
-      truncated: knownFields.length < allSchemaFields.length,
-      fingerprint: hashPayload(allSchemaFields),
-    },
-    assessment: {
-      score: report.assessment.score,
-      level: report.assessment.level,
-      confidence: report.assessment.confidence,
-      factors: report.assessment.factors.map((factor) => ({ ...factor })),
-    },
-    advisoryDecision: decideRisk(report.assessment.score),
-    facts: narratives.facts,
-    assumptions: narratives.assumptions,
-    unknowns: narratives.unknowns,
-    narrativeSummary: narratives.summary,
-    evidence,
-    provenance: report.evidence.trace.map((entry) => ({
-      callId: entry.callId,
-      tool: entry.tool,
-      ...(typeof entry.arguments.urn === "string" ? { urn: entry.arguments.urn } : {}),
-      ...(Array.isArray(entry.arguments.urns)
-        ? {
-            urns: entry.arguments.urns.filter(
-              (value): value is string => typeof value === "string",
-            ),
-          }
-        : {}),
-      ...(entry.tool === "get_lineage" ? { direction: "downstream" as const } : {}),
-      ...(typeof entry.arguments.max_hops === "number" ? { depth: entry.arguments.max_hops } : {}),
-      page: entry.page,
-      ...(typeof entry.arguments.offset === "number" ? { offset: entry.arguments.offset } : {}),
-      at: entry.at,
-    })),
-    evidenceCompleteness: {
-      complete: report.evidence.completeness.complete,
-      search: {
-        ...report.evidence.completeness.search,
-        offsets: [...report.evidence.completeness.search.offsets],
-        reasonCodes: [...report.evidence.completeness.search.reasonCodes],
-      },
-      schema: {
-        ...report.evidence.completeness.schema,
-        offsets: [...report.evidence.completeness.schema.offsets],
-        reasonCodes: [...report.evidence.completeness.schema.reasonCodes],
-      },
-      tableLineage: {
-        ...report.evidence.completeness.tableLineage,
-        offsets: [...report.evidence.completeness.tableLineage.offsets],
-        reasonCodes: [...report.evidence.completeness.tableLineage.reasonCodes],
-      },
-      columnLineage: {
-        ...report.evidence.completeness.columnLineage,
-        offsets: [...report.evidence.completeness.columnLineage.offsets],
-        reasonCodes: [...report.evidence.completeness.columnLineage.reasonCodes],
-      },
-    },
-    entityContextRetrieval: {
-      ...report.evidence.entityContextRetrieval,
-      offsets: [...report.evidence.entityContextRetrieval.offsets],
-      reasonCodes: [...report.evidence.entityContextRetrieval.reasonCodes],
-    },
-    contextCoverage: {
-      ...report.evidence.contextCoverage,
-      missingMetadataUrns: [...report.evidence.contextCoverage.missingMetadataUrns],
-      unknownMetadataUrns: [...report.evidence.contextCoverage.unknownMetadataUrns],
-    },
-    contextIndicators: {
-      quality: {
-        assetsWithSignals: report.evidence.entityContext.filter(
-          ({ qualitySignals }) => qualitySignals.length > 0,
-        ).length,
-        signalCount: report.evidence.entityContext.reduce(
-          (total, { qualitySignals }) => total + qualitySignals.length,
-          0,
-        ),
-      },
-      usage: {
-        status: "NOT_COLLECTED",
-        assetsWithSignals: 0,
-        signalCount: 0,
-        reason: "OUTSIDE_FOUR_TOOL_SLICE",
-      },
-    },
-    entityContext: [...report.evidence.entityContext]
-      .sort((left, right) => left.urn.localeCompare(right.urn, "en"))
-      .map((entity) => ({
-        ...entity,
-        owners: [...entity.owners],
-        tags: [...entity.tags],
-        glossaryTerms: [...entity.glossaryTerms],
-        siblingUrns: [...entity.siblingUrns],
-        qualitySignals: [...entity.qualitySignals],
-      })),
-    analysisStatus: report.status,
-  };
   try {
+    const report = sanitizeImpactReportDraft(unsafeReport, secrets);
+    const narratives = summarizeNarratives(report, secrets);
+    const columnUrns = new Set(report.evidence.columnAffectedAssets.map(({ urn }) => urn));
+    const allSchemaFields = [...report.evidence.schemaFields]
+      .map(({ fieldPath, nativeDataType }) => ({
+        fieldPath,
+        ...(nativeDataType === undefined ? {} : { nativeDataType }),
+      }))
+      .sort((left, right) => left.fieldPath.localeCompare(right.fieldPath, "en"));
+    const sourceIndex = allSchemaFields.findIndex(
+      ({ fieldPath }) => fieldPath === report.evidence.sourceColumn.fieldPath,
+    );
+    const sourceFirst =
+      sourceIndex < 0
+        ? allSchemaFields
+        : [
+            allSchemaFields[sourceIndex]!,
+            ...allSchemaFields.filter((_, index) => index !== sourceIndex),
+          ];
+    const knownFields = sourceFirst.slice(0, 100);
+    const evidence = [
+      {
+        id: "datahub:target-dataset",
+        kind: "target_dataset" as const,
+        level: "dataset" as const,
+        urn: report.evidence.targetDataset.urn,
+      },
+      {
+        id: `datahub:source-column:${report.evidence.sourceColumn.fieldPath}`,
+        kind: "source_column" as const,
+        level: "schema" as const,
+        urn: report.evidence.targetDataset.urn,
+        fieldPath: report.evidence.sourceColumn.fieldPath,
+      },
+      ...report.evidence.downstreamAssets.map((asset, index) => ({
+        id: `datahub:downstream:${String(index + 1).padStart(3, "0")}`,
+        kind: "downstream" as const,
+        level: columnUrns.has(asset.urn) ? ("column" as const) : ("table" as const),
+        urn: asset.urn,
+        hop: asset.hop,
+      })),
+    ];
+    const payload: Omit<ChangeContext, "contextHash"> = {
+      schemaVersion: "1",
+      request: report.request,
+      intent: report.intent,
+      target: report.evidence.targetDataset,
+      sourceField: {
+        fieldPath: report.evidence.sourceColumn.fieldPath,
+        ...(report.evidence.sourceColumn.nativeDataType === undefined
+          ? {}
+          : { nativeDataType: report.evidence.sourceColumn.nativeDataType }),
+      },
+      knownFields,
+      schemaSummary: {
+        totalFields: allSchemaFields.length,
+        includedFields: knownFields.length,
+        truncated: knownFields.length < allSchemaFields.length,
+        fingerprint: hashPayload(allSchemaFields),
+      },
+      assessment: {
+        score: report.assessment.score,
+        level: report.assessment.level,
+        confidence: report.assessment.confidence,
+        factors: report.assessment.factors.map((factor) => ({ ...factor })),
+      },
+      advisoryDecision: decideRisk(report.assessment.score),
+      facts: narratives.facts,
+      assumptions: narratives.assumptions,
+      unknowns: narratives.unknowns,
+      narrativeSummary: narratives.summary,
+      evidence,
+      provenance: report.evidence.trace.map((entry) => ({
+        callId: entry.callId,
+        tool: entry.tool,
+        ...(typeof entry.arguments.urn === "string" ? { urn: entry.arguments.urn } : {}),
+        ...(Array.isArray(entry.arguments.urns)
+          ? {
+              urns: entry.arguments.urns.filter(
+                (value): value is string => typeof value === "string",
+              ),
+            }
+          : {}),
+        ...(entry.tool === "get_lineage" ? { direction: "downstream" as const } : {}),
+        ...(typeof entry.arguments.max_hops === "number"
+          ? { depth: entry.arguments.max_hops }
+          : {}),
+        page: entry.page,
+        ...(typeof entry.arguments.offset === "number" ? { offset: entry.arguments.offset } : {}),
+        at: entry.at,
+      })),
+      evidenceCompleteness: {
+        complete: report.evidence.completeness.complete,
+        search: {
+          ...report.evidence.completeness.search,
+          offsets: [...report.evidence.completeness.search.offsets],
+          reasonCodes: [...report.evidence.completeness.search.reasonCodes],
+        },
+        schema: {
+          ...report.evidence.completeness.schema,
+          offsets: [...report.evidence.completeness.schema.offsets],
+          reasonCodes: [...report.evidence.completeness.schema.reasonCodes],
+        },
+        tableLineage: {
+          ...report.evidence.completeness.tableLineage,
+          offsets: [...report.evidence.completeness.tableLineage.offsets],
+          reasonCodes: [...report.evidence.completeness.tableLineage.reasonCodes],
+        },
+        columnLineage: {
+          ...report.evidence.completeness.columnLineage,
+          offsets: [...report.evidence.completeness.columnLineage.offsets],
+          reasonCodes: [...report.evidence.completeness.columnLineage.reasonCodes],
+        },
+      },
+      entityContextRetrieval: {
+        ...report.evidence.entityContextRetrieval,
+        offsets: [...report.evidence.entityContextRetrieval.offsets],
+        reasonCodes: [...report.evidence.entityContextRetrieval.reasonCodes],
+      },
+      contextCoverage: {
+        ...report.evidence.contextCoverage,
+        missingMetadataUrns: [...report.evidence.contextCoverage.missingMetadataUrns],
+        unknownMetadataUrns: [...report.evidence.contextCoverage.unknownMetadataUrns],
+      },
+      contextIndicators: {
+        quality: {
+          assetsWithSignals: report.evidence.entityContext.filter(
+            ({ qualitySignals }) => qualitySignals.length > 0,
+          ).length,
+          signalCount: report.evidence.entityContext.reduce(
+            (total, { qualitySignals }) => total + qualitySignals.length,
+            0,
+          ),
+        },
+        usage: {
+          status: "NOT_COLLECTED",
+          assetsWithSignals: 0,
+          signalCount: 0,
+          reason: "OUTSIDE_FOUR_TOOL_SLICE",
+        },
+      },
+      entityContext: [...report.evidence.entityContext]
+        .sort((left, right) => left.urn.localeCompare(right.urn, "en"))
+        .map((entity) => ({
+          ...entity,
+          owners: [...entity.owners],
+          tags: [...entity.tags],
+          glossaryTerms: [...entity.glossaryTerms],
+          siblingUrns: [...entity.siblingUrns],
+          qualitySignals: [...entity.qualitySignals],
+        })),
+      analysisStatus: report.status,
+    };
     return ChangeContextSchema.parse({ ...payload, contextHash: hashChangeContext(payload) });
   } catch {
     return boundaryError();

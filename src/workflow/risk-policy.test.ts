@@ -12,4 +12,13 @@ describe("decideRisk", () => {
   ] as const)("maps score %i to %s", (score, expected) => {
     expect(decideRisk(score)).toBe(expected);
   });
+
+  it.each([[-1], [101], [39.5], [Number.NaN], [Number.POSITIVE_INFINITY]])(
+    "rejects invalid score %s",
+    (score) => {
+      expect(() => decideRisk(score)).toThrow(
+        new RangeError("Impact score must be an integer from 0 through 100."),
+      );
+    },
+  );
 });
