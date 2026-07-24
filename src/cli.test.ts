@@ -1,5 +1,8 @@
 import { EventEmitter } from "node:events";
-import { describe, expect, it } from "vitest";
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   runImpactAnalysis as runImpactAnalysisReal,
   type RunImpactAnalysisDependencies,
@@ -21,7 +24,18 @@ const ENVIRONMENT = {
   DATAHUB_GMS_URL: "http://localhost:8080",
   DATAHUB_GMS_TOKEN: "secret-test-token",
 };
-const RECOGNIZABLE_RUNS_ROOT = "C:\\recognizable-private-runs-root";
+const SYNTHETIC_REDACTION_PATH = "C:\\synthetic-redaction-fixture";
+let cliSandbox: string;
+let defaultRunsRoot: string;
+
+beforeAll(async () => {
+  cliSandbox = await mkdtemp(join(tmpdir(), "lineageguard-cli-root-"));
+  defaultRunsRoot = await mkdtemp(join(cliSandbox, "runs-"));
+});
+
+afterAll(async () => {
+  await rm(cliSandbox, { recursive: true, force: true });
+});
 
 class TestCatalog implements DataHubCatalog {
   closeCount = 0;
@@ -71,6 +85,8 @@ function emptyCollection<T, R extends string = never>(): CollectionResult<T, R> 
 interface CliHarness {
   readonly catalog: TestCatalog;
   readonly dependencies: CliDependencies;
+  readonly createCatalogCalls: number;
+  readonly analysisCalls: number;
   readonly signal: EventEmitter;
   readonly stdout: string[];
   readonly stderr: string[];
@@ -93,6 +109,27 @@ function harness(
   const stdout: string[] = [];
   const stderr: string[] = [];
   const received: CliHarness["received"] = {};
+  let createCatalogCalls = 0;
+  let analysisCalls = 0;
+  const dependencies: CliDependencies = {
+    clock: () => new Date("2026-07-22T12:34:56.789Z"),
+    environment: { ...ENVIRONMENT, LINEAGEGUARD_RUNS_DIR: defaultRunsRoot },
+    signal,
+    stdout: { write: (text) => stdout.push(text) },
+    stderr: { write: (text) => stderr.push(text) },
+    shutdownTimeoutMs: 25,
+    createCatalog: async (config, signal_) => {
+      createCatalogCalls += 1;
+      received.config = config;
+      received.catalogSignal = signal_;
+      return catalog;
+    },
+    runImpactAnalysis: async (input) => {
+      analysisCalls += 1;
+      received.analysis = input;
+      return analyze(input);
+    },
+  };
 
   return {
     catalog,
@@ -100,22 +137,12 @@ function harness(
     stdout,
     stderr,
     received,
-    dependencies: {
-      clock: () => new Date("2026-07-22T12:34:56.789Z"),
-      environment: ENVIRONMENT,
-      signal,
-      stdout: { write: (text) => stdout.push(text) },
-      stderr: { write: (text) => stderr.push(text) },
-      shutdownTimeoutMs: 25,
-      createCatalog: async (config, signal_) => {
-        received.config = config;
-        received.catalogSignal = signal_;
-        return catalog;
-      },
-      runImpactAnalysis: async (input) => {
-        received.analysis = input;
-        return analyze(input);
-      },
+    dependencies,
+    get createCatalogCalls() {
+      return createCatalogCalls;
+    },
+    get analysisCalls() {
+      return analysisCalls;
     },
   };
 }
@@ -179,10 +206,7 @@ describe("runCli", () => {
       artifactFilename: "impact-report.md",
     }));
 
-    const exitCode = await runCli(
-      ["--request", REQUEST, "--runs-dir", RECOGNIZABLE_RUNS_ROOT],
-      test.dependencies,
-    );
+    const exitCode = await runCli(["--request", REQUEST], test.dependencies);
 
     expect(exitCode).toBe(0);
     expect(test.stdout.join("")).toMatch(
@@ -191,23 +215,131 @@ describe("runCli", () => {
       ),
     );
     expect(test.stderr).toEqual([]);
-    expect(test.stdout.join("")).not.toContain(RECOGNIZABLE_RUNS_ROOT);
-    expect(test.stderr.join("")).not.toContain(RECOGNIZABLE_RUNS_ROOT);
+    expect(test.stdout.join("")).not.toContain(defaultRunsRoot);
+    expect(test.stderr.join("")).not.toContain(defaultRunsRoot);
     expect(test.received.analysis).toMatchObject({
       request: REQUEST,
-      runsRoot: RECOGNIZABLE_RUNS_ROOT,
+      runsRoot: defaultRunsRoot,
     });
     expect(test.received.analysis?.secrets).toEqual([ENVIRONMENT.DATAHUB_GMS_TOKEN]);
     expect(test.received.analysis?.signal).toBe(test.received.catalogSignal);
-    expect(test.received.config).toMatchObject({ runsRoot: "runs" });
+    expect(test.received.config).toMatchObject({ runsRoot: defaultRunsRoot });
   });
 
-  it("uses the validated runs-directory default when no override is supplied", async () => {
+  it("uses the validated environment runs root when no override is supplied", async () => {
     const test = harness();
 
     await runCli(["--request", REQUEST], test.dependencies);
 
-    expect(test.received.analysis?.runsRoot).toBe("runs");
+    expect(test.received.analysis?.runsRoot).toBe(defaultRunsRoot);
+  });
+
+  it("rejects a missing runs root before catalog creation", async () => {
+    const test = harness();
+    const dependencies = { ...test.dependencies, environment: ENVIRONMENT };
+
+    const exitCode = await runCli(["--request", REQUEST], dependencies);
+
+    expect(exitCode).toBe(4);
+    expect(test.createCatalogCalls).toBe(0);
+    expect(test.analysisCalls).toBe(0);
+    expect(test.stderr.join("")).toContain("Status: ARTIFACT_WRITE_FAILED");
+  });
+
+  it.each([
+    ["relative environment root", "relative-environment-root", false],
+    ["relative flag overriding a valid environment", "relative-flag-root", true],
+  ] as const)("rejects a %s before catalog creation", async (_name, candidate, useFlag) => {
+    const test = harness();
+    const dependencies = {
+      ...test.dependencies,
+      environment: {
+        ...ENVIRONMENT,
+        LINEAGEGUARD_RUNS_DIR: useFlag ? defaultRunsRoot : candidate,
+      },
+    };
+
+    const exitCode = await runCli(
+      useFlag ? ["--request", REQUEST, "--runs-dir", candidate] : ["--request", REQUEST],
+      dependencies,
+    );
+
+    expect(exitCode).toBe(4);
+    expect(test.createCatalogCalls).toBe(0);
+    expect(test.analysisCalls).toBe(0);
+    expect(test.stderr.join("")).toContain("Status: ARTIFACT_WRITE_FAILED");
+    expect(test.stderr.join("")).not.toContain(candidate);
+  });
+
+  it("rejects an absolute missing root before catalog creation", async () => {
+    const candidate = join(cliSandbox, "missing-runs-root");
+    const test = harness();
+    const dependencies = {
+      ...test.dependencies,
+      environment: { ...ENVIRONMENT, LINEAGEGUARD_RUNS_DIR: candidate },
+    };
+
+    const exitCode = await runCli(["--request", REQUEST], dependencies);
+
+    expect(exitCode).toBe(4);
+    expect(test.createCatalogCalls).toBe(0);
+    expect(test.analysisCalls).toBe(0);
+    expect(test.stderr.join("")).toContain("Status: ARTIFACT_WRITE_FAILED");
+    expect(test.stderr.join("")).not.toContain(candidate);
+  });
+
+  it("rejects an absolute regular file before catalog creation", async () => {
+    const candidate = join(cliSandbox, "runs-file");
+    await writeFile(candidate, "not a directory", "utf8");
+    const test = harness();
+    const dependencies = {
+      ...test.dependencies,
+      environment: { ...ENVIRONMENT, LINEAGEGUARD_RUNS_DIR: candidate },
+    };
+
+    const exitCode = await runCli(["--request", REQUEST], dependencies);
+
+    expect(exitCode).toBe(4);
+    expect(test.createCatalogCalls).toBe(0);
+    expect(test.analysisCalls).toBe(0);
+    expect(test.stderr.join("")).toContain("Status: ARTIFACT_WRITE_FAILED");
+    expect(test.stderr.join("")).not.toContain(candidate);
+  });
+
+  it("rejects an absolute symlink or junction before catalog creation", async () => {
+    const target = join(cliSandbox, "runs-link-target");
+    const candidate = join(cliSandbox, "runs-link");
+    await mkdir(target);
+    await symlink(target, candidate, process.platform === "win32" ? "junction" : "dir");
+    const test = harness();
+    const dependencies = {
+      ...test.dependencies,
+      environment: { ...ENVIRONMENT, LINEAGEGUARD_RUNS_DIR: candidate },
+    };
+
+    const exitCode = await runCli(["--request", REQUEST], dependencies);
+
+    expect(exitCode).toBe(4);
+    expect(test.createCatalogCalls).toBe(0);
+    expect(test.analysisCalls).toBe(0);
+    expect(test.stderr.join("")).toContain("Status: ARTIFACT_WRITE_FAILED");
+    expect(test.stderr.join("")).not.toContain(candidate);
+  });
+
+  it("uses a valid absolute flag instead of the environment root", async () => {
+    const override = await mkdtemp(join(cliSandbox, "override-runs-"));
+    const canonicalOverride = await realpath(override);
+    const test = harness();
+
+    const exitCode = await runCli(
+      ["--request", REQUEST, "--runs-dir", override],
+      test.dependencies,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(test.createCatalogCalls).toBe(1);
+    expect(test.analysisCalls).toBe(1);
+    expect(test.received.analysis?.runsRoot).toBe(canonicalOverride);
   });
 
   it("delegates context and server identity while retaining exactly-once close", async () => {
@@ -366,7 +498,7 @@ describe("runCli", () => {
     const test = harness(async () => {
       throw new AppError(
         "ARTIFACT_WRITE_FAILED",
-        `Could not write ${RECOGNIZABLE_RUNS_ROOT}\\${token}.`,
+        `Could not write ${SYNTHETIC_REDACTION_PATH}\\${token}.`,
       );
     });
 
@@ -379,12 +511,18 @@ describe("runCli", () => {
         "Recovery: Verify that the configured runs root is a pre-created writable real directory with no symbolic-link or junction path components.\n",
     );
     expect(test.stderr.join("")).not.toContain(token);
-    expect(test.stderr.join("")).not.toContain(RECOGNIZABLE_RUNS_ROOT);
+    expect(test.stderr.join("")).not.toContain(SYNTHETIC_REDACTION_PATH);
   });
 
   it("returns stable configuration guidance without exposing validation details", async () => {
     const test = harness();
-    const dependencies = { ...test.dependencies, environment: { DATAHUB_GMS_TOKEN: "secret" } };
+    const dependencies = {
+      ...test.dependencies,
+      environment: {
+        DATAHUB_GMS_TOKEN: "secret",
+        LINEAGEGUARD_RUNS_DIR: defaultRunsRoot,
+      },
+    };
 
     const exitCode = await runCli(["--request", REQUEST], dependencies);
 

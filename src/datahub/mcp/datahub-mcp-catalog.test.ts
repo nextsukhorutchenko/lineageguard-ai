@@ -1,5 +1,6 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { calculateContextCoverage } from "../../domain/context-coverage.js";
 import { loadRuntimeConfig } from "../../config/runtime-config.js";
@@ -2280,6 +2281,7 @@ describe("dataHubMcpServerParameters", () => {
       DATAHUB_GMS_URL: "http://localhost:8080",
       DATAHUB_GMS_TOKEN: "local-test-token",
       DATAHUB_MCP_UVX_PATH: "custom-uvx",
+      LINEAGEGUARD_RUNS_DIR: resolve("runs"),
     });
 
     expect(dataHubMcpServerParameters(config)).toEqual({

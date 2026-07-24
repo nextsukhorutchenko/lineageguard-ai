@@ -5,6 +5,7 @@ import {
   runImpactAnalysis,
   type RunImpactAnalysisDependencies,
 } from "./app/run-impact-analysis.js";
+import { assertTrustedRunsRoot } from "./artifacts/run-envelope-files.js";
 import {
   loadRuntimeConfig,
   type EnvironmentMap,
@@ -241,14 +242,25 @@ export async function runCli(
 
   let config: RuntimeConfig;
   try {
-    config = loadRuntimeConfig(dependencies.environment);
-  } catch {
+    config = loadRuntimeConfig(dependencies.environment, arguments_.runsRoot);
+  } catch (error) {
+    if (error instanceof AppError) return writeAppError(error, dependencies.stderr);
     dependencies.stderr.write(
       "Status: MCP_UNAVAILABLE\nConfiguration is invalid. Verify DATAHUB_GMS_URL and DATAHUB_GMS_TOKEN.\n",
     );
     return 3;
   }
   const outputSecrets = [config.datahubGmsToken];
+  let trustedRunsRoot: string;
+  try {
+    trustedRunsRoot = await assertTrustedRunsRoot(config.runsRoot);
+  } catch (error) {
+    const storageError =
+      error instanceof AppError
+        ? error
+        : new AppError("ARTIFACT_WRITE_FAILED", "Unable to persist the run.");
+    return writeAppError(storageError, dependencies.stderr, outputSecrets);
+  }
 
   try {
     const abortController = new AbortController();
@@ -299,7 +311,7 @@ export async function runCli(
           catalog,
           clock: dependencies.clock,
           runId: createRunId(dependencies.clock()),
-          runsRoot: arguments_.runsRoot ?? config.runsRoot,
+          runsRoot: trustedRunsRoot,
           signal: abortController.signal,
           secrets: outputSecrets,
         })

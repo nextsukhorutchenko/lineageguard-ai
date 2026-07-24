@@ -1,12 +1,19 @@
+import { isAbsolute } from "node:path";
 import { z } from "zod";
+import { AppError } from "../errors/app-error.js";
 
 export type EnvironmentMap = Readonly<Record<string, string | undefined>>;
+
+export const RunsRootPathSchema = z
+  .string()
+  .min(1)
+  .refine((value) => isAbsolute(value), "The runs root must be absolute.");
 
 const environmentSchema = z.object({
   DATAHUB_GMS_URL: z.url(),
   DATAHUB_GMS_TOKEN: z.string().min(1),
   DATAHUB_MCP_UVX_PATH: z.string().min(1).default("uvx"),
-  LINEAGEGUARD_RUNS_DIR: z.string().min(1).default("runs"),
+  LINEAGEGUARD_RUNS_DIR: RunsRootPathSchema,
 });
 
 export interface RuntimeConfig {
@@ -17,8 +24,22 @@ export interface RuntimeConfig {
   readonly maxHops: 2;
 }
 
-export function loadRuntimeConfig(environment: EnvironmentMap): RuntimeConfig {
-  const parsed = environmentSchema.parse(environment);
+function invalidRunsRoot(): AppError {
+  return new AppError("ARTIFACT_WRITE_FAILED", "The configured runs root is invalid.");
+}
+
+export function loadRuntimeConfig(
+  environment: EnvironmentMap,
+  runsRootOverride?: string,
+): RuntimeConfig {
+  const selectedRunsRoot = runsRootOverride ?? environment.LINEAGEGUARD_RUNS_DIR;
+  const runsRoot = RunsRootPathSchema.safeParse(selectedRunsRoot);
+  if (!runsRoot.success) throw invalidRunsRoot();
+
+  const parsed = environmentSchema.parse({
+    ...environment,
+    LINEAGEGUARD_RUNS_DIR: runsRoot.data,
+  });
   const config = {
     datahubGmsUrl: parsed.DATAHUB_GMS_URL,
     uvxPath: parsed.DATAHUB_MCP_UVX_PATH,

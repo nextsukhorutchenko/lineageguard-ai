@@ -23,6 +23,9 @@ New-Item -ItemType Directory -Path C:\lineageguard-runs
 $env:LINEAGEGUARD_RUNS_DIR = "C:\lineageguard-runs"
 ```
 
+The CLI has no runs-directory default. Supply an absolute pre-created root through `--runs-dir` or
+`LINEAGEGUARD_RUNS_DIR`; the command-line flag takes precedence.
+
 The flat envelope format has not shipped as a supported storage format, so no migration from the previous development-only layout is required.
 
 DataHub access is read-only. The adapter launches the official pinned command:

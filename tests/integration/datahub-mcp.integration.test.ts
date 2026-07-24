@@ -25,6 +25,7 @@ describe("DataHub MCP live integration", () => {
         DATAHUB_GMS_URL: process.env.DATAHUB_GMS_URL ?? "http://localhost:8080",
         DATAHUB_GMS_TOKEN: process.env.DATAHUB_GMS_TOKEN,
         DATAHUB_MCP_UVX_PATH: process.env.DATAHUB_MCP_UVX_PATH,
+        LINEAGEGUARD_RUNS_DIR: process.env.LINEAGEGUARD_RUNS_DIR ?? tmpdir(),
       });
       const catalog = new DataHubMcpCatalog(await connectDataHubMcp(config), [
         config.datahubGmsToken,
@@ -93,6 +94,7 @@ describe("DataHub MCP live integration", () => {
         DATAHUB_GMS_URL: process.env.DATAHUB_GMS_URL ?? "http://localhost:8080",
         DATAHUB_GMS_TOKEN: process.env.DATAHUB_GMS_TOKEN,
         DATAHUB_MCP_UVX_PATH: process.env.DATAHUB_MCP_UVX_PATH,
+        LINEAGEGUARD_RUNS_DIR: process.env.LINEAGEGUARD_RUNS_DIR ?? tmpdir(),
       });
       const destination = await mkdtemp(join(tmpdir(), "lineageguard-datahub-fixtures-"));
 
@@ -120,6 +122,7 @@ describe("DataHub MCP live integration", () => {
         DATAHUB_GMS_URL: process.env.DATAHUB_GMS_URL ?? "http://localhost:8080",
         DATAHUB_GMS_TOKEN: process.env.DATAHUB_GMS_TOKEN,
         DATAHUB_MCP_UVX_PATH: process.env.DATAHUB_MCP_UVX_PATH,
+        LINEAGEGUARD_RUNS_DIR: process.env.LINEAGEGUARD_RUNS_DIR ?? tmpdir(),
       });
       await expect(connectDataHubMcp(config, AbortSignal.timeout(1))).rejects.toMatchObject({
         name: "TimeoutError",
@@ -141,6 +144,7 @@ describe("DataHub MCP live integration", () => {
         DATAHUB_GMS_URL: process.env.DATAHUB_GMS_URL ?? "http://localhost:8080",
         DATAHUB_GMS_TOKEN: process.env.DATAHUB_GMS_TOKEN,
         DATAHUB_MCP_UVX_PATH: process.env.DATAHUB_MCP_UVX_PATH,
+        LINEAGEGUARD_RUNS_DIR: process.env.LINEAGEGUARD_RUNS_DIR ?? tmpdir(),
       });
       const catalog = new DataHubMcpCatalog(await connectDataHubMcp(config));
       try {
