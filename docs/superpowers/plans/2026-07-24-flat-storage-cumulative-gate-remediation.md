@@ -217,6 +217,9 @@ git commit -m "fix: reject deep change context extensions"
 - Modify: `src/cli.ts`
 - Modify: `src/cli.test.ts`
 - Modify: `README.md`
+- Modify: `scripts/capture-datahub-fixtures.test.ts`
+- Modify: `src/datahub/mcp/datahub-mcp-catalog.test.ts`
+- Modify: `tests/integration/datahub-mcp.integration.test.ts`
 
 **Interfaces:**
 
@@ -437,7 +440,21 @@ LINEAGEGUARD_RUNS_DIR; the command-line flag takes precedence.
 
 Keep the existing ownership, ACL, symlink/junction, no-root-creation, and threat-model text.
 
-- [ ] **Step 7: Run focused and full verification**
+- [ ] **Step 7: Align dependent configuration fixtures**
+
+These three test-only callers use `loadRuntimeConfig` for DataHub configuration and must satisfy its
+new explicit-root contract without reintroducing a default:
+
+- `scripts/capture-datahub-fixtures.test.ts` uses `resolve("runs")` in `fixtureEnvironment()`;
+- `src/datahub/mcp/datahub-mcp-catalog.test.ts` supplies `LINEAGEGUARD_RUNS_DIR: resolve("runs")`
+  in the MCP parameter test; and
+- every `loadRuntimeConfig` call in `tests/integration/datahub-mcp.integration.test.ts` supplies
+  `LINEAGEGUARD_RUNS_DIR: process.env.LINEAGEGUARD_RUNS_DIR ?? tmpdir()`.
+
+Import `resolve` only where needed. Do not change production capture or MCP behavior, and do not
+create a storage root in these tests because none of these call sites persists a run.
+
+- [ ] **Step 8: Run focused and full verification**
 
 Run:
 
@@ -466,10 +483,10 @@ Expected: no real credential, custom abort reason, or actual workspace root is i
 Synthetic negative-test sentinels must be documented in the task report and absent from production
 and documentation.
 
-- [ ] **Step 8: Commit CLI root preflight**
+- [ ] **Step 9: Commit CLI root preflight**
 
 ```powershell
-git add src/config/runtime-config.ts src/config/runtime-config.test.ts src/cli.ts src/cli.test.ts README.md
+git add src/config/runtime-config.ts src/config/runtime-config.test.ts src/cli.ts src/cli.test.ts README.md scripts/capture-datahub-fixtures.test.ts src/datahub/mcp/datahub-mcp-catalog.test.ts tests/integration/datahub-mcp.integration.test.ts
 git commit -m "fix: preflight the trusted runs root"
 ```
 
