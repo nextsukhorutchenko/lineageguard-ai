@@ -3726,6 +3726,13 @@ git commit -m "feat: render validated Snowflake migration packages"
 
 ### Task 6: Generalize Safe Run Storage and Artifact Downloads
 
+> **Approved authority amendment (2026-07-24):** The nested run-directory, package-directory,
+> manifest-file, and directory-rename steps below are superseded by
+> `docs/superpowers/specs/2026-07-24-flat-run-envelope-storage-design.md` and the executable
+> amendment plan at `docs/superpowers/plans/2026-07-24-flat-run-envelope-storage.md`. Do not
+> implement the superseded snippets below. Task 7 may start only after every task in the amendment
+> plan has passed its review gate.
+
 **Files:**
 
 - Modify: `src/artifacts/write-run-artifacts.ts`

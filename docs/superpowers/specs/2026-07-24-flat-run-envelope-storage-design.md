@@ -1,6 +1,6 @@
 # Flat Run Envelope Storage Design
 
-**Status:** Proposed — design approved by the owner; written-spec review pending
+**Status:** Approved
 
 **Date:** 2026-07-24
 
@@ -63,9 +63,9 @@ All durable application files are direct children of the trusted root.
 - Retry reservation: `retry-<validated-parent-run-id>.json`
 - Temporary reservation: `.tmp-retry-<random-nonce>.json`
 
-Run IDs remain bounded by the existing safe run-ID grammar. Application responses, logs, events,
-downloads, and CLI output expose run IDs and virtual artifact filenames only, never these native
-paths.
+Run IDs use a portable, bounded single-segment grammar compatible with the application's generated
+IDs. Application responses, logs, events, downloads, and CLI output expose run IDs and virtual
+artifact filenames only, never these native paths.
 
 No nested run, package, blob, staging, or lock directories are created.
 
@@ -96,6 +96,11 @@ public completed package. Cancelled, timed-out, or incomplete work is not persis
 
 Artifact bodies are stored directly in the envelope. Their SHA-256 values provide corruption and
 contract checks; they are not an authorization mechanism.
+
+The top-level generation attempt is the workflow-lineage ordinal: `1` for a root run and `2` for
+its one permitted generation-only child. It is distinct from
+`snapshot.agent.generationAttempts`, which records how many bounded model generation calls occurred
+inside that run.
 
 ## Atomic Create-Only Publication
 
@@ -154,6 +159,9 @@ Exactly one concurrent reservation for a parent can win. Every child workflow an
 writer must receive the branded reservation returned after successful publication. Rollback removes
 only the caller's unique temporary file; it never removes a final reservation or child run.
 
+The reservation inherits the parent's `LIVE` or `REPLAY` mode and reserves lineage generation
+attempt `2`. `REGENERATE` is an operation, not a persisted demo mode.
+
 ## Error and Cancellation Semantics
 
 Filesystem, parsing, hashing, abort, and integrity failures cross the storage boundary only as fixed
@@ -170,6 +178,12 @@ The current nested-directory implementation may be replaced directly.
 
 Downstream application, API, UI, and tests continue to use run IDs and virtual artifact filenames.
 They must not depend on native directory structure.
+
+The pre-agent CLI impact analysis remains supported through a strict `impact-report` envelope
+variant. That compatibility variant contains its run ID, legacy terminal analysis status, bounded
+sanitized `impact-report.md` body, and matching SHA-256 only. It has no workflow snapshot and cannot
+be interpreted as a completed migration package. This exception preserves the existing CLI
+capability without persisting or returning a native path.
 
 ## Verification
 
