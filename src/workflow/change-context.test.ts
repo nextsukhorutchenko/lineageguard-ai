@@ -1,7 +1,60 @@
 import { expect, it } from "vitest";
 import { makeImpactReportDraft } from "../../tests/helpers/factories.js";
 import { WorkflowSnapshotSchema } from "./contracts.js";
-import { buildChangeContext, ChangeContextSchema } from "./change-context.js";
+import { buildChangeContext, ChangeContextSchema, type ChangeContext } from "./change-context.js";
+
+const validContext = buildChangeContext(makeImpactReportDraft(), []);
+const deepUnknownCases = [
+  [
+    "intent",
+    (value: ChangeContext) => ({
+      ...value,
+      intent: { ...value.intent, extra: "forbidden" },
+    }),
+  ],
+  [
+    "target",
+    (value: ChangeContext) => ({
+      ...value,
+      target: { ...value.target, extra: "forbidden" },
+    }),
+  ],
+  [
+    "sourceField",
+    (value: ChangeContext) => ({
+      ...value,
+      sourceField: { ...value.sourceField, extra: "forbidden" },
+    }),
+  ],
+  [
+    "assessment",
+    (value: ChangeContext) => ({
+      ...value,
+      assessment: { ...value.assessment, extra: "forbidden" },
+    }),
+  ],
+  [
+    "assessment factor",
+    (value: ChangeContext) => ({
+      ...value,
+      assessment: {
+        ...value.assessment,
+        factors: [
+          { ...value.assessment.factors[0]!, extra: "forbidden" },
+          ...value.assessment.factors.slice(1),
+        ],
+      },
+    }),
+  ],
+] as const;
+
+it.each(deepUnknownCases)("rejects an unknown nested %s key", (_name, mutate) => {
+  expect(() => ChangeContextSchema.parse(mutate(validContext))).toThrow();
+});
+
+it("preserves a valid change context exactly", () => {
+  expect(ChangeContextSchema.parse(validContext)).toEqual(validContext);
+});
 
 it("builds stable grounded evidence IDs and a deterministic hash", () => {
   const first = buildChangeContext(makeImpactReportDraft(), []);

@@ -151,6 +151,65 @@ function makeImpactEnvelope(report = "# Sanitized impact report\n") {
   };
 }
 
+const deepContextUnknownCases = [
+  [
+    "intent",
+    (value: ReturnType<typeof makeCompletedEnvelope>) => ({
+      ...value,
+      context: {
+        ...value.context,
+        intent: { ...value.context.intent, extra: "forbidden" },
+      },
+    }),
+  ],
+  [
+    "target",
+    (value: ReturnType<typeof makeCompletedEnvelope>) => ({
+      ...value,
+      context: {
+        ...value.context,
+        target: { ...value.context.target, extra: "forbidden" },
+      },
+    }),
+  ],
+  [
+    "sourceField",
+    (value: ReturnType<typeof makeCompletedEnvelope>) => ({
+      ...value,
+      context: {
+        ...value.context,
+        sourceField: { ...value.context.sourceField, extra: "forbidden" },
+      },
+    }),
+  ],
+  [
+    "assessment",
+    (value: ReturnType<typeof makeCompletedEnvelope>) => ({
+      ...value,
+      context: {
+        ...value.context,
+        assessment: { ...value.context.assessment, extra: "forbidden" },
+      },
+    }),
+  ],
+  [
+    "assessment factor",
+    (value: ReturnType<typeof makeCompletedEnvelope>) => ({
+      ...value,
+      context: {
+        ...value.context,
+        assessment: {
+          ...value.context.assessment,
+          factors: [
+            { ...value.context.assessment.factors[0]!, extra: "forbidden" },
+            ...value.context.assessment.factors.slice(1),
+          ],
+        },
+      },
+    }),
+  ],
+] as const;
+
 describe("run envelopes", () => {
   it("uses the exact public artifact allowlist", () => {
     expect(virtualArtifactFilenames).toEqual([
@@ -170,6 +229,24 @@ describe("run envelopes", () => {
       RunEnvelopeSchema.parse({ ...valid, package: { ...valid.package, files: incomplete } }),
     ).toThrow();
   });
+
+  it.each(deepContextUnknownCases)(
+    "rejects an unknown nested context %s key before hash verification",
+    (_name, mutate) => {
+      const mutatedEnvelope = mutate(makeCompletedEnvelope());
+
+      expect(() => RunEnvelopeSchema.parse(mutatedEnvelope)).toThrow();
+      expect(() =>
+        parseRunEnvelope(`${JSON.stringify(mutatedEnvelope, null, 2)}\n`, mutatedEnvelope.runId),
+      ).toThrowError(
+        expect.objectContaining({
+          code: "ARTIFACT_WRITE_FAILED",
+          message: "The stored run is unavailable.",
+          details: {},
+        }),
+      );
+    },
+  );
 
   it("rejects a failed envelope with a public package", () => {
     const completed = makeCompletedEnvelope();

@@ -47,22 +47,28 @@ export const ChangeContextSchema = z
     schemaVersion: z.literal("1"),
     contextHash: z.string().regex(/^[a-f0-9]{64}$/),
     request: z.string().min(1),
-    intent: z.object({
-      kind: z.literal("rename_column"),
-      datasetHint: z.string().min(1),
-      sourceColumn: z.string().min(1),
-      targetColumn: z.string().min(1),
-    }),
-    target: z.object({
-      urn: z.string().startsWith("urn:li:").max(500),
-      name: z.string().min(1).max(500),
-      platform: z.string().max(100).optional(),
-      environment: z.string().max(100).optional(),
-    }),
-    sourceField: z.object({
-      fieldPath: z.string().min(1).max(500),
-      nativeDataType: z.string().max(100).optional(),
-    }),
+    intent: z
+      .object({
+        kind: z.literal("rename_column"),
+        datasetHint: z.string().min(1),
+        sourceColumn: z.string().min(1),
+        targetColumn: z.string().min(1),
+      })
+      .strict(),
+    target: z
+      .object({
+        urn: z.string().startsWith("urn:li:").max(500),
+        name: z.string().min(1).max(500),
+        platform: z.string().max(100).optional(),
+        environment: z.string().max(100).optional(),
+      })
+      .strict(),
+    sourceField: z
+      .object({
+        fieldPath: z.string().min(1).max(500),
+        nativeDataType: z.string().max(100).optional(),
+      })
+      .strict(),
     knownFields: z
       .array(
         z
@@ -81,14 +87,22 @@ export const ChangeContextSchema = z
         fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
       })
       .strict(),
-    assessment: z.object({
-      score: z.number().int().min(0).max(100),
-      level: z.enum(["low", "medium", "high", "critical"]),
-      confidence: z.enum(["low", "medium", "high"]),
-      factors: z.array(
-        z.object({ name: z.string(), points: z.number().int(), explanation: z.string() }),
-      ),
-    }),
+    assessment: z
+      .object({
+        score: z.number().int().min(0).max(100),
+        level: z.enum(["low", "medium", "high", "critical"]),
+        confidence: z.enum(["low", "medium", "high"]),
+        factors: z.array(
+          z
+            .object({
+              name: z.string(),
+              points: z.number().int(),
+              explanation: z.string(),
+            })
+            .strict(),
+        ),
+      })
+      .strict(),
     advisoryDecision: z.enum([
       "PROCEED_WITH_REVIEW",
       "MANUAL_APPROVAL_REQUIRED",
