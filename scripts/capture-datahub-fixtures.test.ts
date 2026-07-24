@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import type { EnvironmentMap } from "../src/config/runtime-config.js";
 import {
   canonicalizeFixturePayloads,
   fixtureCaptureRepositoryRoot,
@@ -156,7 +157,7 @@ function createRecordingWriter(): {
   };
 }
 
-function fixtureEnvironment(): NodeJS.ProcessEnv {
+function fixtureEnvironment(): EnvironmentMap {
   return {
     DATAHUB_GMS_URL: "http://localhost:8080",
     DATAHUB_GMS_TOKEN: token,

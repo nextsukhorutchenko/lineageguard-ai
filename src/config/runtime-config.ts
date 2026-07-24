@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export type EnvironmentMap = Readonly<Record<string, string | undefined>>;
+
 const environmentSchema = z.object({
   DATAHUB_GMS_URL: z.url(),
   DATAHUB_GMS_TOKEN: z.string().min(1),
@@ -15,7 +17,7 @@ export interface RuntimeConfig {
   readonly maxHops: 2;
 }
 
-export function loadRuntimeConfig(environment: NodeJS.ProcessEnv): RuntimeConfig {
+export function loadRuntimeConfig(environment: EnvironmentMap): RuntimeConfig {
   const parsed = environmentSchema.parse(environment);
   const config = {
     datahubGmsUrl: parsed.DATAHUB_GMS_URL,

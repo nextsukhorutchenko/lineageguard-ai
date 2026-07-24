@@ -1,13 +1,15 @@
 {
-  "extends": "./tsconfig.json",
+  "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "rootDir": "./src",
-    "outDir": "./dist",
     "declaration": true,
     "declarationMap": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "./dist",
+    "rootDir": "./src",
     "sourceMap": true
   },
   "files": [],
   "include": ["src/**/*.ts"],
-  "exclude": ["**/*.test.ts", "tests/**"]
+  "exclude": ["**/*.test.ts", "src/ui/**", "tests/**"]
 }

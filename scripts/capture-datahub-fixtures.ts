@@ -14,7 +14,11 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { format } from "prettier";
 import { z } from "zod";
-import { loadRuntimeConfig, type RuntimeConfig } from "../src/config/runtime-config.js";
+import {
+  loadRuntimeConfig,
+  type EnvironmentMap,
+  type RuntimeConfig,
+} from "../src/config/runtime-config.js";
 import type { CollectionResult } from "../src/datahub/catalog.js";
 import { DataHubMcpCatalog } from "../src/datahub/mcp/datahub-mcp-catalog.js";
 import { connectDataHubMcp } from "../src/datahub/mcp/mcp-client.js";
@@ -49,7 +53,7 @@ export interface FixtureCaptureTextWriter {
 
 export interface FixtureCaptureCliDependencies {
   readonly repositoryRoot: string;
-  readonly environment: NodeJS.ProcessEnv;
+  readonly environment: EnvironmentMap;
   readonly stdout: FixtureCaptureTextWriter;
   readonly createDirectory: (path: string) => Promise<void>;
   readonly createCandidateDirectory: (prefix: string) => Promise<string>;

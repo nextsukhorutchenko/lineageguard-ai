@@ -5,7 +5,11 @@ import {
   runImpactAnalysis,
   type RunImpactAnalysisDependencies,
 } from "./app/run-impact-analysis.js";
-import { loadRuntimeConfig, type RuntimeConfig } from "./config/runtime-config.js";
+import {
+  loadRuntimeConfig,
+  type EnvironmentMap,
+  type RuntimeConfig,
+} from "./config/runtime-config.js";
 import type { DataHubCatalog } from "./datahub/catalog.js";
 import { DataHubMcpCatalog } from "./datahub/mcp/datahub-mcp-catalog.js";
 import { connectDataHubMcp } from "./datahub/mcp/mcp-client.js";
@@ -68,7 +72,7 @@ interface InterruptSignal {
 
 export interface CliDependencies {
   readonly clock: () => Date;
-  readonly environment: NodeJS.ProcessEnv;
+  readonly environment: EnvironmentMap;
   readonly stdout: TextWriter;
   readonly stderr: TextWriter;
   readonly signal: InterruptSignal;

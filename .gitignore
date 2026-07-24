@@ -44,3 +44,6 @@ tmp/
 .DS_Store
 Thumbs.db
 Desktop.ini
+.tmp/
+playwright-report/
+test-results/
