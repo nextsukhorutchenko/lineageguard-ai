@@ -1034,6 +1034,16 @@ git commit -m "feat: add the read-only DataHub MCP adapter"
 
 ### Task 7: Orchestrate Analysis and Render the Markdown Artifact
 
+> **Corrective authority (2026-07-23):** The approved
+> `docs/superpowers/specs/2026-07-23-datahub-runtime-blocker-remediation-design.md`
+> supersedes only the write-before-close sequence in this task. Treat the rendered report as an
+> in-memory `readyToPublish` candidate; close the owned catalog through the shared bounded,
+> idempotent five-second cleanup boundary; recheck caller cancellation; then invoke the existing
+> create-only writer. Close rejection or expiry returns `MCP_UNAVAILABLE` and leaves no
+> `impact-report.md`. A primary analysis error remains authoritative if cleanup also fails; a
+> writer failure after successful close remains `ARTIFACT_WRITE_FAILED`; cleanup is never retried.
+> The Step 3 code below is historical wherever it conflicts with this correction.
+
 **Files:**
 
 - Create: `src/app/run-impact-analysis.ts`

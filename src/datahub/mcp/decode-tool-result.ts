@@ -1,6 +1,9 @@
 import type { CallToolResult, TextContent } from "@modelcontextprotocol/sdk/types.js";
+import { assertMcpToolResultWithinBudget } from "./mcp-tool-result-budget.js";
 
 export function decodeJsonToolResult(result: CallToolResult): unknown {
+  assertMcpToolResultWithinBudget(result);
+
   if (result.isError) {
     throw new Error("DataHub MCP tool returned an error result.");
   }

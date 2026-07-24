@@ -1,5 +1,49 @@
 import { AppError } from "../errors/app-error.js";
 import type { DatasetCandidate } from "./resolve-dataset.js";
+import type { ContextCoverage } from "./context-coverage.js";
+
+export type RequiredIncompleteReasonCode =
+  | "HAS_MORE"
+  | "TOKEN_BUDGET_TRUNCATION"
+  | "PAGE_LIMIT_REACHED"
+  | "ITEM_LIMIT_REACHED"
+  | "REPEATED_PAGE"
+  | "NO_PROGRESS"
+  | "INCONSISTENT_PAGINATION";
+
+export type EntityContextIncompleteReasonCode =
+  "ENTITY_CONTEXT_UNAVAILABLE" | "ENTITY_CONTEXT_TRUNCATED";
+
+export type IncompleteReasonCode = RequiredIncompleteReasonCode | EntityContextIncompleteReasonCode;
+
+export interface CollectionCompleteness<R extends string = IncompleteReasonCode> {
+  readonly complete: boolean;
+  readonly pages: number;
+  readonly itemCount: number;
+  readonly offsets: readonly number[];
+  readonly reasonCodes: readonly R[];
+}
+
+export interface EntityContext {
+  readonly urn: string;
+  readonly entityType: string;
+  readonly name?: string;
+  readonly platform?: string;
+  readonly description?: string;
+  readonly owners: readonly string[];
+  readonly tags: readonly string[];
+  readonly glossaryTerms: readonly string[];
+  readonly siblingUrns: readonly string[];
+  readonly qualitySignals: readonly string[];
+}
+
+export interface EvidenceCompleteness {
+  readonly complete: boolean;
+  readonly search: CollectionCompleteness<RequiredIncompleteReasonCode>;
+  readonly schema: CollectionCompleteness<RequiredIncompleteReasonCode>;
+  readonly tableLineage: CollectionCompleteness<RequiredIncompleteReasonCode>;
+  readonly columnLineage: CollectionCompleteness<RequiredIncompleteReasonCode>;
+}
 
 export interface SchemaField {
   readonly fieldPath: string;
@@ -18,9 +62,11 @@ export interface LineageAsset {
 
 export interface ToolTraceEntry {
   readonly callId: string;
-  readonly tool: "search" | "list_schema_fields" | "get_lineage";
+  readonly tool: "search" | "list_schema_fields" | "get_lineage" | "get_entities";
   readonly arguments: Readonly<Record<string, unknown>>;
   readonly status: "ok" | "error";
+  readonly at: string;
+  readonly page: number;
 }
 
 export type EvidenceLevel = "column" | "table" | "none";
@@ -36,6 +82,10 @@ export interface NormalizedEvidence {
   readonly evidenceLevel: EvidenceLevel;
   readonly metadataGaps: readonly string[];
   readonly trace: readonly ToolTraceEntry[];
+  readonly completeness: EvidenceCompleteness;
+  readonly entityContextRetrieval: CollectionCompleteness<EntityContextIncompleteReasonCode>;
+  readonly entityContext: readonly EntityContext[];
+  readonly contextCoverage: ContextCoverage;
 }
 
 export interface NormalizeEvidenceInput {
@@ -46,6 +96,10 @@ export interface NormalizeEvidenceInput {
   readonly tableLineage: readonly LineageAsset[];
   readonly columnLineage: readonly LineageAsset[];
   readonly trace: readonly ToolTraceEntry[];
+  readonly completeness: EvidenceCompleteness;
+  readonly entityContextRetrieval: CollectionCompleteness<EntityContextIncompleteReasonCode>;
+  readonly entityContext: readonly EntityContext[];
+  readonly contextCoverage: ContextCoverage;
 }
 
 const compareEnglish = (left: string, right: string): number => left.localeCompare(right, "en-US");
@@ -161,5 +215,11 @@ export function normalizeEvidence(input: NormalizeEvidenceInput): NormalizedEvid
     evidenceLevel,
     metadataGaps,
     trace: input.trace,
+    completeness: input.completeness,
+    entityContextRetrieval: input.entityContextRetrieval,
+    entityContext: [...input.entityContext].sort((left, right) =>
+      compareEnglish(left.urn, right.urn),
+    ),
+    contextCoverage: input.contextCoverage,
   };
 }

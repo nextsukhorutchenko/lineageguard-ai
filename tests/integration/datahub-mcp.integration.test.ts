@@ -38,25 +38,46 @@ describe("DataHub MCP live integration", () => {
           column: "customer_id",
           maxHops: 2,
         });
+        const entityContext = await catalog.getEntityContext([
+          DATASET_URN,
+          ...tableLineage.items.map(({ urn }) => urn),
+        ]);
 
-        expect(candidates).toContainEqual(expect.objectContaining({ urn: DATASET_URN }));
-        expect(fields).toContainEqual(
+        expect(candidates.completeness.complete).toBe(true);
+        expect(fields.completeness.complete).toBe(true);
+        expect(tableLineage.completeness.complete).toBe(true);
+        expect(columnLineage.completeness.complete).toBe(true);
+        expect(candidates.items).toContainEqual(expect.objectContaining({ urn: DATASET_URN }));
+        expect(fields.items).toContainEqual(
           expect.objectContaining({
             fieldPath: "customer_id",
             nativeDataType: "NUMBER(38,0)",
           }),
         );
-        expect(tableLineage.length).toBeGreaterThan(0);
-        expect(columnLineage).toContainEqual(
+        expect(tableLineage.items).toHaveLength(24);
+        expect(columnLineage.items).toContainEqual(
           expect.objectContaining({
             lineageColumns: expect.arrayContaining(["customer_id"]),
           }),
         );
+        expect(entityContext.items.length).toBeGreaterThan(0);
+        const serverInfo = catalog.getServerInfo();
+        if (serverInfo.reportedServerName !== undefined) {
+          expect(serverInfo.reportedServerName.length).toBeLessThanOrEqual(100);
+          expect(serverInfo.reportedServerName).not.toContain(config.datahubGmsToken);
+        }
+        if (serverInfo.reportedServerVersion !== undefined) {
+          expect(serverInfo.reportedServerVersion.length).toBeLessThanOrEqual(100);
+          expect(serverInfo.reportedServerVersion).not.toContain(config.datahubGmsToken);
+        }
         expect(catalog.getTrace().map(({ tool }) => tool)).toEqual([
           "search",
           "list_schema_fields",
           "get_lineage",
           "get_lineage",
+          "get_entities",
+          "get_entities",
+          "get_entities",
         ]);
       } finally {
         await catalog.close();
@@ -66,7 +87,7 @@ describe("DataHub MCP live integration", () => {
   );
 
   integrationTest(
-    "captures only the four sanitized normalized fixture payloads",
+    "captures only the five sanitized normalized fixture payloads",
     async () => {
       const config = loadRuntimeConfig({
         DATAHUB_GMS_URL: process.env.DATAHUB_GMS_URL ?? "http://localhost:8080",
@@ -87,6 +108,52 @@ describe("DataHub MCP live integration", () => {
         }
       } finally {
         await rm(destination, { recursive: true, force: true });
+      }
+    },
+    120_000,
+  );
+
+  integrationTest(
+    "honors a real one-millisecond cancellation deadline on a fresh connection",
+    async () => {
+      const config = loadRuntimeConfig({
+        DATAHUB_GMS_URL: process.env.DATAHUB_GMS_URL ?? "http://localhost:8080",
+        DATAHUB_GMS_TOKEN: process.env.DATAHUB_GMS_TOKEN,
+        DATAHUB_MCP_UVX_PATH: process.env.DATAHUB_MCP_UVX_PATH,
+      });
+      await expect(connectDataHubMcp(config, AbortSignal.timeout(1))).rejects.toMatchObject({
+        name: "TimeoutError",
+      });
+    },
+    120_000,
+  );
+
+  test.runIf(
+    Boolean(
+      process.env.DATAHUB_GMS_TOKEN &&
+      process.env.RUN_LARGE_LINEAGE_CONTRACT === "1" &&
+      process.env.DATAHUB_LARGE_LINEAGE_URN,
+    ),
+  )(
+    "marks the optional large-lineage probe incomplete at the pinned ceiling",
+    async () => {
+      const config = loadRuntimeConfig({
+        DATAHUB_GMS_URL: process.env.DATAHUB_GMS_URL ?? "http://localhost:8080",
+        DATAHUB_GMS_TOKEN: process.env.DATAHUB_GMS_TOKEN,
+        DATAHUB_MCP_UVX_PATH: process.env.DATAHUB_MCP_UVX_PATH,
+      });
+      const catalog = new DataHubMcpCatalog(await connectDataHubMcp(config));
+      try {
+        const result = await catalog.getDownstreamLineage(process.env.DATAHUB_LARGE_LINEAGE_URN!, {
+          maxHops: 2,
+        });
+        expect(result.items).toHaveLength(100);
+        expect(result.completeness).toMatchObject({
+          complete: false,
+          reasonCodes: expect.arrayContaining(["ITEM_LIMIT_REACHED"]),
+        });
+      } finally {
+        await catalog.close();
       }
     },
     120_000,

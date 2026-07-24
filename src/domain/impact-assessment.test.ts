@@ -33,6 +33,41 @@ const evidence = ({
   evidenceLevel: columnAffected > 0 ? "column" : downstream > 0 ? "table" : "none",
   metadataGaps: [],
   trace: [],
+  completeness: {
+    complete: true,
+    search: { complete: true, pages: 1, itemCount: 1, offsets: [0], reasonCodes: [] },
+    schema: { complete: true, pages: 1, itemCount: 1, offsets: [0], reasonCodes: [] },
+    tableLineage: {
+      complete: true,
+      pages: 1,
+      itemCount: downstream,
+      offsets: [0],
+      reasonCodes: [],
+    },
+    columnLineage: {
+      complete: true,
+      pages: 1,
+      itemCount: columnAffected,
+      offsets: [0],
+      reasonCodes: [],
+    },
+  },
+  entityContextRetrieval: { complete: true, pages: 0, itemCount: 0, offsets: [], reasonCodes: [] },
+  entityContext: [],
+  contextCoverage: {
+    retrievalComplete: true,
+    relevantAssets: 0,
+    inspectedAssets: 0,
+    retrievalPercentage: 0,
+    possibleSignals: 0,
+    coveredSignals: 0,
+    percentage: null,
+    withDescriptions: 0,
+    withOwners: 0,
+    withGovernance: 0,
+    missingMetadataUrns: [],
+    unknownMetadataUrns: [],
+  },
 });
 
 describe("assessImpact", () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  sanitizeBoundaryText,
   sanitizeMarkdownTableCell,
   sanitizeMarkdownText,
   sanitizeTerminalText,
@@ -26,5 +27,25 @@ describe("output sanitization", () => {
       "before \\[REDACTED\\] and \\[REDACTED\\] after",
     );
     expect(sanitizeTerminalText(external, secrets)).toBe("before [REDACTED] and [REDACTED] after");
+  });
+});
+
+describe("structured boundary sanitization", () => {
+  it("redacts known and realistic credential shapes longest-first", () => {
+    const value =
+      "long-secret secret sk-proj-1234567890abcdefghijkl github_pat_1234567890abcdefghijklmnop Bearer abc.def-123";
+    expect(sanitizeBoundaryText(value, ["secret", "long-secret"], 500)).not.toMatch(
+      /long-secret|\bsecret\b|sk-proj-|github_pat_|Bearer\s/,
+    );
+  });
+
+  it("makes controls visible, normalizes NFC, and applies a positive character cap", () => {
+    expect(sanitizeBoundaryText("e\u0301\n\u001b[2Jabcdef", [], 8)).toBe("é\\n\\u001");
+    expect(sanitizeBoundaryText("abc", [], 0)).toBe("");
+  });
+
+  it("redacts private-key blocks without retaining their body", () => {
+    const privateKey = "-----BEGIN PRIVATE KEY-----\nsecret-body\n-----END PRIVATE KEY-----";
+    expect(sanitizeBoundaryText(privateKey, [], 500)).toBe("[REDACTED]");
   });
 });

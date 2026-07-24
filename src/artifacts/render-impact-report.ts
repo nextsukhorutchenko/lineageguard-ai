@@ -16,6 +16,7 @@ const traceArgumentKeys = {
   search: ["filter", "num_results", "offset", "query"],
   list_schema_fields: ["limit", "offset", "urn"],
   get_lineage: ["column", "max_hops", "max_results", "offset", "upstream", "urn"],
+  get_entities: ["urns"],
 } as const;
 
 function escapeTableCell(value: unknown, secrets: readonly string[]): string {

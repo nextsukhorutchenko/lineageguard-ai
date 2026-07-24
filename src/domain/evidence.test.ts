@@ -22,6 +22,40 @@ const lineage = (
   lineageColumns: readonly string[] = [],
 ): LineageAsset => ({ urn, hop, lineageColumns });
 
+const completeCollection = {
+  complete: true,
+  pages: 1,
+  itemCount: 1,
+  offsets: [0],
+  reasonCodes: [],
+} as const;
+
+const enrichment = {
+  completeness: {
+    complete: true,
+    search: completeCollection,
+    schema: completeCollection,
+    tableLineage: completeCollection,
+    columnLineage: completeCollection,
+  },
+  entityContextRetrieval: completeCollection,
+  entityContext: [],
+  contextCoverage: {
+    retrievalComplete: true,
+    relevantAssets: 0,
+    inspectedAssets: 0,
+    retrievalPercentage: 0,
+    possibleSignals: 0,
+    coveredSignals: 0,
+    percentage: null,
+    withDescriptions: 0,
+    withOwners: 0,
+    withGovernance: 0,
+    missingMetadataUrns: [],
+    unknownMetadataUrns: [],
+  },
+} as const;
+
 describe("evidence normalization", () => {
   it("preserves sorted search candidates and deterministically merges unmatched column lineage", () => {
     const searchCandidates = [
@@ -52,6 +86,7 @@ describe("evidence normalization", () => {
       tableLineage: [lineage("urn:table:a", 1)],
       columnLineage,
       trace: [],
+      ...enrichment,
     };
 
     const result = normalizeEvidence(input);
@@ -89,6 +124,7 @@ describe("evidence normalization", () => {
       tableLineage: [lineage("urn:z", 2), lineage("urn:a", 1)],
       columnLineage: [lineage("urn:z", 2, ["customer_id"])],
       trace: [],
+      ...enrichment,
     });
 
     expect(result.schemaFields.map((item) => item.fieldPath)).toEqual([
@@ -112,6 +148,7 @@ describe("evidence normalization", () => {
       ],
       columnLineage: [lineage("urn:dashboard", 2), lineage("urn:dashboard", 1)],
       trace: [],
+      ...enrichment,
     });
 
     expect(result.downstreamAssets).toEqual([
@@ -137,6 +174,7 @@ describe("evidence normalization", () => {
         lineage("urn:column:b", 2, ["customer_id"]),
       ],
       trace: [],
+      ...enrichment,
     });
 
     expect(result.columnAffectedAssets).toEqual([]);
@@ -156,6 +194,7 @@ describe("evidence normalization", () => {
       tableLineage: [],
       columnLineage: [],
       trace: [],
+      ...enrichment,
     });
 
     expect(result.metadataGaps).toEqual([

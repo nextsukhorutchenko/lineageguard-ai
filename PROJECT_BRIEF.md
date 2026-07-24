@@ -1,5 +1,12 @@
 # LineageGuard AI — Codex Project Brief
 
+> **Supersession note — 2026-07-23:** This brief preserves the original exploratory product
+> discussion. Approved specification `002-nextjs-openai-agent-demo` and its implementation plan
+> are the implementation authority. Their four-operation read-only DataHub boundary supersedes
+> every exploratory write-back, mutation, automatic owner assignment, usage-query, and
+> saved-document suggestion below. Do not enable those capabilities unless a later approved
+> specification explicitly replaces `002`.
+
 ## 1. How to work with me
 
 - Communicate with me in Ukrainian.

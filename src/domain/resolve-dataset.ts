@@ -67,6 +67,17 @@ export function isCanonicalDatasetUrn(urn: string): boolean {
   return canonicalDatasetUrnIdentity(urn) !== undefined;
 }
 
+export function findUniqueCanonicalDatasetUrnMatch(
+  datasetHint: string,
+  candidates: readonly DatasetCandidate[],
+): DatasetCandidate | undefined {
+  if (!isCanonicalDatasetUrn(datasetHint)) return undefined;
+
+  const normalizedHint = normalize(datasetHint);
+  const matches = candidates.filter(({ urn }) => normalize(urn) === normalizedHint);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 export function resolveDataset(
   intent: ChangeIntent,
   candidates: readonly DatasetCandidate[],

@@ -58,7 +58,7 @@ Then load the datapack using the immutable base-image reference:
 docker run --rm --network $network --mount "type=bind,source=$env:USERPROFILE\.datahubenv,target=/tmp/source-datahubenv,readonly" --env PYTHONUTF8=1 --env "DATAHUB_GMS_INTERNAL_URL=$gmsInternalUrl" python:3.11-slim@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93 /bin/sh -c 'set -eu; pip install --no-cache-dir --quiet "acryl-datahub==1.6.0.15"; datahub version; cp /tmp/source-datahubenv /root/.datahubenv; sed -i "s#http://localhost:8080#$DATAHUB_GMS_INTERNAL_URL#g" /root/.datahubenv; datahub check server-config >/dev/null; datahub datapack load showcase-ecommerce'
 ```
 
-## Run the Live MCP Proof and Capture Fixtures
+## Run the Live MCP Proof and Capture a Fixture Candidate
 
 Set the local token only in the current shell. The following command extracts it in memory from the local configuration without printing or writing it into the repository:
 
@@ -69,6 +69,18 @@ $env:DATAHUB_MCP_UVX_PATH = "uvx"
 pnpm test:integration
 pnpm tsx scripts/capture-datahub-fixtures.ts
 ```
+
+The capture command prints a repository-relative path beneath `tmp/datahub-fixture-captures/capture-*`. It never overwrites the committed replay fixtures. A complete candidate contains these five canonical strict `{ items, completeness }` fixtures plus an empty `.complete` marker created last:
+
+| Fixture                                    | Purpose                                           |
+| ------------------------------------------ | ------------------------------------------------- |
+| `search-order-details.json`                | Exact dataset-search candidates.                  |
+| `schema-order-details.json`                | Target schema fields.                             |
+| `lineage-order-details-table.json`         | Two-hop downstream table lineage.                 |
+| `lineage-order-details-customer-id.json`   | Two-hop downstream lineage for `customer_id`.     |
+| `entity-context-order-details-impact.json` | Allowlisted target and downstream entity context. |
+
+The candidate is replay-compatible review evidence rather than a current live-service claim. The entity-context schema rejects fields named `email`, `profile`, `relatedDocuments`, `rawSql`, `token`, and `diagnostics`, and rejects descriptions longer than 2,000 characters; serialization redacts the configured DataHub token literal. This does not claim a general content scan for every SQL or credential-shaped string. An unmarked candidate is untrusted even if its files look complete: do not manually create, copy, or add `.complete`; delete it and rerun capture. Promotion into `tests/fixtures/datahub/` is a separate owner-approved deterministic migration; the `.complete` marker is never promoted.
 
 ## Selected Change
 
@@ -95,5 +107,7 @@ The sanitized fixtures record 24 table-level downstream assets within the two-ho
 | `ORDER_DETAILS_REPLICA`        | snowflake |   1 | `customer_id`                 |
 
 These counts and mappings are verified fixture facts for the pinned datapack version. They can change if the official datapack changes.
+
+The certified golden replay has complete search, schema, table-lineage, and column-lineage collections for the stated 24/11 facts. If any required collection is incomplete, LineageGuard uses `INCOMPLETE_EVIDENCE`: collected counts are lower bounds, incomplete search/schema cannot prove absence, and incomplete lineage cannot justify direct-rename guidance. Entity-context gaps are reported separately as Context Coverage and do not alone select that status.
 
 Official datapack index: <https://github.com/datahub-project/static-assets/blob/main/datapacks/showcase-ecommerce/index.json>

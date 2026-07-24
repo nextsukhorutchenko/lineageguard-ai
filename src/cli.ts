@@ -48,7 +48,7 @@ const exitCodes = {
 
 type SuccessfulStatus = Extract<
   RunStatus,
-  "COMPLETED" | "COMPLETED_WITH_LIMITATIONS" | "INSUFFICIENT_METADATA"
+  "COMPLETED" | "COMPLETED_WITH_LIMITATIONS" | "INSUFFICIENT_METADATA" | "INCOMPLETE_EVIDENCE"
 >;
 
 interface CliAnalysisResult {
@@ -113,6 +113,8 @@ function closeOnce(catalog: DataHubCatalog): DataHubCatalog {
     listSchemaFields: (datasetUrn, options) => catalog.listSchemaFields(datasetUrn, options),
     getDownstreamLineage: (datasetUrn, options) =>
       catalog.getDownstreamLineage(datasetUrn, options),
+    getEntityContext: (urns, options) => catalog.getEntityContext(urns, options),
+    getServerInfo: () => catalog.getServerInfo(),
     getTrace: () => catalog.getTrace(),
     close: () => (closing ??= catalog.close()),
   };

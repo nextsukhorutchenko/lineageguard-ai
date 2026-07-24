@@ -6,6 +6,13 @@ import { renderImpactReport } from "./render-impact-report.js";
 
 const TARGET_URN = "urn:li:dataset:(urn:li:dataPlatform:snowflake,orders,PROD)";
 const DOWNSTREAM_URN = "urn:li:dataset:(urn:li:dataPlatform:snowflake,customer_orders,PROD)";
+const completeCollection = {
+  complete: true,
+  pages: 1,
+  itemCount: 1,
+  offsets: [0],
+  reasonCodes: [],
+} as const;
 
 const columnEvidence: NormalizedEvidence = {
   targetDataset: { urn: TARGET_URN, name: "orders|daily", platform: "snow`flake" },
@@ -43,8 +50,33 @@ const columnEvidence: NormalizedEvidence = {
       tool: "search",
       arguments: { offset: 0, query: "/q orders|daily" },
       status: "ok",
+      at: "2026-07-22T12:00:00.000Z",
+      page: 1,
     },
   ],
+  completeness: {
+    complete: true,
+    search: completeCollection,
+    schema: completeCollection,
+    tableLineage: completeCollection,
+    columnLineage: completeCollection,
+  },
+  entityContextRetrieval: completeCollection,
+  entityContext: [],
+  contextCoverage: {
+    retrievalComplete: true,
+    relevantAssets: 0,
+    inspectedAssets: 0,
+    retrievalPercentage: 0,
+    possibleSignals: 0,
+    coveredSignals: 0,
+    percentage: null,
+    withDescriptions: 0,
+    withOwners: 0,
+    withGovernance: 0,
+    missingMetadataUrns: [],
+    unknownMetadataUrns: [],
+  },
 };
 
 const assessment: ImpactAssessment = {
@@ -338,6 +370,8 @@ describe("renderImpactReport", () => {
           tool: "search",
           arguments: { query: "<script>trace()</script>\n## Trace Heading" },
           status: "ok",
+          at: "2026-07-22T12:00:00.000Z",
+          page: 1,
         },
       ],
     };
@@ -408,6 +442,8 @@ describe("renderImpactReport", () => {
           tool: "search",
           arguments: { query: `/q ${secret}` },
           status: "ok",
+          at: "2026-07-22T12:00:00.000Z",
+          page: 1,
         },
       ],
     };

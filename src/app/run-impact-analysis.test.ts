@@ -1,9 +1,16 @@
 import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
-import type { DataHubCatalog } from "../datahub/catalog.js";
-import type { LineageAsset, SchemaField, ToolTraceEntry } from "../domain/evidence.js";
+import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import type { CollectionResult, DataHubCatalog } from "../datahub/catalog.js";
+import type {
+  EntityContext,
+  EntityContextIncompleteReasonCode,
+  LineageAsset,
+  RequiredIncompleteReasonCode,
+  SchemaField,
+  ToolTraceEntry,
+} from "../domain/evidence.js";
 import type { DatasetCandidate } from "../domain/resolve-dataset.js";
 import { AppError } from "../errors/app-error.js";
 import * as impactAnalysisModule from "./run-impact-analysis.js";
@@ -47,6 +54,32 @@ interface FakeCatalogOptions {
   readonly failSearch?: boolean;
   readonly searchError?: Error;
   readonly closeError?: Error;
+  readonly searchReasons?: readonly RequiredIncompleteReasonCode[];
+  readonly searchPages?: number;
+  readonly searchOffsets?: readonly number[];
+  readonly schemaReasons?: readonly RequiredIncompleteReasonCode[];
+  readonly tableReasons?: readonly RequiredIncompleteReasonCode[];
+  readonly columnReasons?: readonly RequiredIncompleteReasonCode[];
+  readonly entityContextReasons?: readonly EntityContextIncompleteReasonCode[];
+  readonly entityContextError?: Error;
+  readonly onEntityContext?: (signal: AbortSignal | undefined) => void;
+  readonly onClose?: () => void | Promise<void>;
+}
+
+function collection<T, R extends string>(
+  items: readonly T[],
+  reasonCodes: readonly R[] = [],
+): CollectionResult<T, R> {
+  return {
+    items,
+    completeness: {
+      complete: reasonCodes.length === 0,
+      pages: 1,
+      itemCount: items.length,
+      offsets: [0],
+      reasonCodes,
+    },
+  };
 }
 
 class FakeCatalog implements DataHubCatalog {
@@ -59,34 +92,49 @@ class FakeCatalog implements DataHubCatalog {
     this.#options = options;
   }
 
-  async searchDatasets(): Promise<readonly DatasetCandidate[]> {
+  async searchDatasets(): Promise<CollectionResult<DatasetCandidate>> {
     this.operations.push("searchDatasets");
     if (this.#options.searchError) throw this.#options.searchError;
     if (this.#options.failSearch) throw new AppError("DATAHUB_UNAVAILABLE", "Unavailable.");
-    this.#trace.push({
-      callId: "mcp-001",
-      tool: "search",
-      arguments: { query: "/q orders", num_results: 50, offset: 0 },
-      status: "ok",
-    });
-    return this.#options.candidates ?? [TARGET];
+    const offsets = this.#options.searchOffsets ?? [0];
+    for (const [index, offset] of offsets.entries()) {
+      this.#trace.push({
+        callId: `mcp-${String(this.#trace.length + 1).padStart(3, "0")}`,
+        tool: "search",
+        arguments: { query: "/q orders", num_results: 50, offset },
+        status: "ok",
+        at: "2026-07-22T12:00:00.000Z",
+        page: index + 1,
+      });
+    }
+    const result = collection(this.#options.candidates ?? [TARGET], this.#options.searchReasons);
+    return {
+      ...result,
+      completeness: {
+        ...result.completeness,
+        pages: this.#options.searchPages ?? result.completeness.pages,
+        offsets: this.#options.searchOffsets ?? result.completeness.offsets,
+      },
+    };
   }
 
-  async listSchemaFields(): Promise<readonly SchemaField[]> {
+  async listSchemaFields(): Promise<CollectionResult<SchemaField>> {
     this.operations.push("listSchemaFields");
     this.#trace.push({
       callId: "mcp-002",
       tool: "list_schema_fields",
       arguments: { urn: TARGET.urn, limit: 100, offset: 0 },
       status: "ok",
+      at: "2026-07-22T12:00:00.000Z",
+      page: 1,
     });
-    return this.#options.fields ?? FIELDS;
+    return collection(this.#options.fields ?? FIELDS, this.#options.schemaReasons);
   }
 
   async getDownstreamLineage(
     _datasetUrn: string,
     options: { readonly column?: string; readonly maxHops: 2 },
-  ): Promise<readonly LineageAsset[]> {
+  ): Promise<CollectionResult<LineageAsset>> {
     const mode = options.column ?? "table";
     this.operations.push(`getDownstreamLineage:${mode}`);
     this.#trace.push({
@@ -100,10 +148,36 @@ class FakeCatalog implements DataHubCatalog {
         offset: 0,
       },
       status: "ok",
+      at: "2026-07-22T12:00:00.000Z",
+      page: 1,
     });
     return options.column
-      ? (this.#options.columnLineage ?? [COLUMN_DOWNSTREAM])
-      : (this.#options.tableLineage ?? [DOWNSTREAM]);
+      ? collection(this.#options.columnLineage ?? [COLUMN_DOWNSTREAM], this.#options.columnReasons)
+      : collection(this.#options.tableLineage ?? [DOWNSTREAM], this.#options.tableReasons);
+  }
+
+  async getEntityContext(
+    urns: readonly string[],
+    options: { readonly signal?: AbortSignal } = {},
+  ): Promise<CollectionResult<EntityContext, EntityContextIncompleteReasonCode>> {
+    this.operations.push("getEntityContext");
+    this.#options.onEntityContext?.(options.signal);
+    options.signal?.throwIfAborted();
+    if (this.#options.entityContextError) throw this.#options.entityContextError;
+    const entities = urns.map((urn) => ({
+      urn,
+      entityType: "DATASET",
+      owners: [],
+      tags: [],
+      glossaryTerms: [],
+      siblingUrns: [],
+      qualitySignals: [],
+    }));
+    return collection(entities, this.#options.entityContextReasons);
+  }
+
+  getServerInfo() {
+    return {};
   }
 
   getTrace(): readonly ToolTraceEntry[] {
@@ -113,6 +187,7 @@ class FakeCatalog implements DataHubCatalog {
   async close(): Promise<void> {
     this.operations.push("close");
     this.closeCount += 1;
+    await this.#options.onClose?.();
     if (this.#options.closeError) throw this.#options.closeError;
   }
 }
@@ -130,9 +205,10 @@ async function runWith(
   runsRoot: string,
   signal: AbortSignal = new AbortController().signal,
   secrets: readonly string[] = [],
+  request: string = REQUEST,
 ) {
   return runImpactAnalysis({
-    request: REQUEST,
+    request,
     catalog,
     clock: () => new Date("2026-07-22T12:00:00.000Z"),
     runId: RUN_ID,
@@ -143,6 +219,8 @@ async function runWith(
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true })));
 });
 
@@ -172,6 +250,7 @@ describe("runImpactAnalysis", () => {
       "listSchemaFields",
       "getDownstreamLineage:table",
       "getDownstreamLineage:customer_id",
+      "getEntityContext",
       "close",
     ]);
     expect(catalog.closeCount).toBe(1);
@@ -193,6 +272,28 @@ describe("runImpactAnalysis", () => {
     const factUrns = run.facts.flatMap((fact) => fact.match(/urn:li:dataset:\([^\s]+\)/g) ?? []);
     expect(factUrns.length).toBeGreaterThan(0);
     expect(factUrns.every((urn) => evidenceUrns.has(urn))).toBe(true);
+  });
+
+  it("closes successfully before the final report becomes visible", async () => {
+    const runsRoot = await createRunsRoot();
+    const finalPath = join(runsRoot, RUN_ID, "impact-report.md");
+    let reportExistedWhenCloseStarted = true;
+    const catalog = new FakeCatalog({
+      onClose: async () => {
+        reportExistedWhenCloseStarted = await access(finalPath).then(
+          () => true,
+          () => false,
+        );
+      },
+    });
+
+    const run = await runWith(catalog, runsRoot);
+
+    expect(reportExistedWhenCloseStarted).toBe(false);
+    expect(catalog.closeCount).toBe(1);
+    await expect(readFile(run.artifactPath, "utf8")).resolves.toContain(
+      "# LineageGuard AI Impact Report",
+    );
   });
 
   it("reports table-only lineage with explicit limitations", async () => {
@@ -366,6 +467,27 @@ describe("runImpactAnalysis", () => {
     expect(catalog.closeCount).toBe(1);
   });
 
+  it("rejects two exact candidates found across a complete two-page search", async () => {
+    const candidates = [TARGET, { ...TARGET, urn: `${TARGET.urn}-second-page` }];
+    const catalog = new FakeCatalog({
+      candidates,
+      searchPages: 2,
+      searchOffsets: [0, 50],
+    });
+
+    await expect(runWith(catalog, await createRunsRoot())).rejects.toMatchObject({
+      code: "NEEDS_USER_CLARIFICATION",
+      details: {
+        candidates: candidates
+          .map(({ urn }) => urn)
+          .sort((left, right) => left.localeCompare(right, "en-US")),
+      },
+    });
+    expect(catalog.getTrace().map(({ arguments: args }) => args.offset)).toEqual([0, 50]);
+    expect(catalog.operations).toEqual(["searchDatasets", "close"]);
+    expect(catalog.closeCount).toBe(1);
+  });
+
   it("stops before lineage calls when the source column is missing", async () => {
     const catalog = new FakeCatalog({ fields: [{ fieldPath: "order_id" }] });
 
@@ -409,8 +531,9 @@ describe("runImpactAnalysis", () => {
       searchError: primary,
       closeError: new Error("raw close failure with secret-token"),
     });
+    const runsRoot = await createRunsRoot();
 
-    const caught = await runWith(catalog, await createRunsRoot()).catch((error: unknown) => error);
+    const caught = await runWith(catalog, runsRoot).catch((error: unknown) => error);
 
     expect(caught).toBe(primary);
     expect(caught).toMatchObject({
@@ -424,6 +547,7 @@ describe("runImpactAnalysis", () => {
     expect(JSON.stringify(caught)).not.toContain("raw close failure");
     expect(JSON.stringify(caught)).not.toContain("secret-token");
     expect(catalog.closeCount).toBe(1);
+    await expect(access(join(runsRoot, RUN_ID, "impact-report.md"))).rejects.toThrow();
   });
 
   it("never replaces a primary error when suppressed metadata cannot be attached", async () => {
@@ -441,19 +565,55 @@ describe("runImpactAnalysis", () => {
     expect(catalog.closeCount).toBe(1);
   });
 
-  it("surfaces a close failure when analysis otherwise succeeds", async () => {
-    const closeFailure = new AppError("MCP_UNAVAILABLE", "Safe close failure.");
+  it("rejects close failure without publishing a final report", async () => {
+    const runsRoot = await createRunsRoot();
+    const finalPath = join(runsRoot, RUN_ID, "impact-report.md");
+    const closeFailure = new AppError(
+      "MCP_UNAVAILABLE",
+      "The DataHub MCP client could not be closed.",
+    );
     const catalog = new FakeCatalog({ closeError: closeFailure });
 
-    await expect(runWith(catalog, await createRunsRoot())).rejects.toBe(closeFailure);
+    await expect(runWith(catalog, runsRoot)).rejects.toBe(closeFailure);
+    await expect(access(finalPath)).rejects.toThrow();
+    expect(catalog.closeCount).toBe(1);
+  });
+
+  it("rejects an owned close deadline without publishing a final report", async () => {
+    vi.useFakeTimers();
+    const runsRoot = await createRunsRoot();
+    const finalPath = join(runsRoot, RUN_ID, "impact-report.md");
+    const closeStarted = Promise.withResolvers<void>();
+    const timeoutFailure = new AppError(
+      "MCP_UNAVAILABLE",
+      "The DataHub MCP client could not be closed.",
+    );
+    const catalog = new FakeCatalog({
+      onClose: async () => {
+        closeStarted.resolve();
+        return new Promise<never>((_, reject) => {
+          setTimeout(() => reject(timeoutFailure), 5_000);
+        });
+      },
+    });
+    const operation = runWith(catalog, runsRoot);
+    const rejected = expect(operation).rejects.toBe(timeoutFailure);
+
+    await closeStarted.promise;
+    await vi.advanceTimersByTimeAsync(5_000);
+    await rejected;
+    await expect(access(finalPath)).rejects.toThrow();
     expect(catalog.closeCount).toBe(1);
   });
 
   it("preserves the safe in-memory report and attempted path after a real writer failure", async () => {
-    const catalog = new FakeCatalog();
     const sandbox = await createRunsRoot();
     const blockedRoot = join(sandbox, "runs-file");
-    await writeFile(blockedRoot, "not a directory", "utf8");
+    const catalog = new FakeCatalog({
+      onClose: async () => {
+        await writeFile(blockedRoot, "not a directory", "utf8");
+      },
+    });
 
     const caught = await runWith(catalog, blockedRoot).catch((error: unknown) => error);
 
@@ -476,6 +636,23 @@ describe("runImpactAnalysis", () => {
       },
     });
     expect(JSON.stringify(caught)).not.toContain("secret");
+    expect(catalog.closeCount).toBe(1);
+    expect(catalog.operations.at(-1)).toBe("close");
+    await expect(access(join(blockedRoot, RUN_ID, "impact-report.md"))).rejects.toThrow();
+  });
+
+  it("rechecks caller cancellation after successful close and before publication", async () => {
+    const controller = new AbortController();
+    const runsRoot = await createRunsRoot();
+    const finalPath = join(runsRoot, RUN_ID, "impact-report.md");
+    const catalog = new FakeCatalog({
+      onClose: () => controller.abort(),
+    });
+
+    await expect(runWith(catalog, runsRoot, controller.signal)).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    await expect(access(finalPath)).rejects.toThrow();
     expect(catalog.closeCount).toBe(1);
   });
 
@@ -503,6 +680,7 @@ describe("runImpactAnalysis", () => {
       "listSchemaFields",
       "getDownstreamLineage:table",
       "getDownstreamLineage:customer_id",
+      "getEntityContext",
       "close",
     ]);
     await expect(access(join(runsRoot, RUN_ID, "impact-report.md"))).rejects.toThrow();
@@ -510,5 +688,215 @@ describe("runImpactAnalysis", () => {
 
   it("does not expose the pre-write report builder as public application API", () => {
     expect(impactAnalysisModule).not.toHaveProperty("buildAnalysisRun");
+  });
+
+  it("marks required lineage truncation incomplete without changing the collected score", async () => {
+    const complete = await runWith(new FakeCatalog(), await createRunsRoot());
+    const incomplete = await runWith(
+      new FakeCatalog({ tableReasons: ["ITEM_LIMIT_REACHED"] }),
+      await createRunsRoot(),
+    );
+
+    expect(incomplete).toMatchObject({
+      status: "INCOMPLETE_EVIDENCE",
+      evidence: { completeness: { complete: false } },
+    });
+    expect(incomplete.assessment.score).toBe(complete.assessment.score);
+    expect(incomplete.unknowns).toContain(
+      "Table-lineage counts are collected lower bounds because required evidence is incomplete.",
+    );
+  });
+
+  it("continues through explicit optional entity-context gaps", async () => {
+    const run = await runWith(
+      new FakeCatalog({ entityContextReasons: ["ENTITY_CONTEXT_UNAVAILABLE"] }),
+      await createRunsRoot(),
+    );
+
+    expect(run.status).not.toBe("DATAHUB_UNAVAILABLE");
+    expect(run.evidence.contextCoverage).toMatchObject({ retrievalComplete: false });
+    expect(run.evidence.entityContextRetrieval.reasonCodes).toEqual(["ENTITY_CONTEXT_UNAVAILABLE"]);
+  });
+
+  it("treats an aborted get_entities transport call as terminal and closes once", async () => {
+    const controller = new AbortController();
+    let clockCalls = 0;
+    const catalog = new FakeCatalog({
+      onEntityContext(signal) {
+        expect(signal).toBe(controller.signal);
+        controller.abort();
+      },
+    });
+    const runsRoot = await createRunsRoot();
+
+    const operation = runImpactAnalysis({
+      request: REQUEST,
+      catalog,
+      clock: () => {
+        clockCalls += 1;
+        return new Date("2026-07-22T12:00:00.000Z");
+      },
+      runId: RUN_ID,
+      runsRoot,
+      signal: controller.signal,
+      secrets: [],
+    });
+
+    await expect(operation).rejects.toMatchObject({ name: "AbortError" });
+    expect(catalog.operations).toEqual([
+      "searchDatasets",
+      "listSchemaFields",
+      "getDownstreamLineage:table",
+      "getDownstreamLineage:customer_id",
+      "getEntityContext",
+      "close",
+    ]);
+    expect(catalog.closeCount).toBe(1);
+    expect(clockCalls).toBe(0);
+    await expect(access(join(runsRoot, RUN_ID, "impact-report.md"))).rejects.toThrow();
+  });
+
+  it("treats a non-aborted get_entities transport failure as DATAHUB_UNAVAILABLE", async () => {
+    const catalog = new FakeCatalog({
+      entityContextError: new AppError("DATAHUB_UNAVAILABLE", "Entity context transport failed."),
+    });
+
+    await expect(runWith(catalog, await createRunsRoot())).rejects.toMatchObject({
+      code: "DATAHUB_UNAVAILABLE",
+    });
+    expect(catalog.closeCount).toBe(1);
+  });
+
+  const incompleteSearchFailure = {
+    code: "DATAHUB_UNAVAILABLE",
+    message: "Dataset search was incomplete.",
+  };
+
+  async function expectIncompleteSearchFailure(
+    catalog: FakeCatalog,
+    runsRoot: string,
+    request: string,
+  ): Promise<void> {
+    await expect(
+      runWith(catalog, runsRoot, new AbortController().signal, [], request),
+    ).rejects.toMatchObject(incompleteSearchFailure);
+    expect(catalog.operations).toEqual(["searchDatasets", "close"]);
+    expect(catalog.closeCount).toBe(1);
+    await expect(access(join(runsRoot, RUN_ID, "impact-report.md"))).rejects.toThrow();
+  }
+
+  it("rejects incomplete search with a first-page platform alias before downstream work", async () => {
+    const catalog = new FakeCatalog({ searchReasons: ["PAGE_LIMIT_REACHED"] });
+    await expectIncompleteSearchFailure(catalog, await createRunsRoot(), REQUEST);
+  });
+
+  it("rejects incomplete search with a first-page plain-name alias before downstream work", async () => {
+    const catalog = new FakeCatalog({ searchReasons: ["HAS_MORE"] });
+    await expectIncompleteSearchFailure(
+      catalog,
+      await createRunsRoot(),
+      "Rename column customer_id to customer_key in dataset orders",
+    );
+  });
+
+  it("rejects incomplete search when the canonical candidate URN is absent", async () => {
+    const catalog = new FakeCatalog({
+      candidates: [],
+      searchReasons: ["PAGE_LIMIT_REACHED"],
+    });
+    await expectIncompleteSearchFailure(
+      catalog,
+      await createRunsRoot(),
+      `Rename column customer_id to customer_key in dataset ${TARGET.urn}`,
+    );
+  });
+
+  it("rejects incomplete search when the canonical candidate URN is duplicated", async () => {
+    const catalog = new FakeCatalog({
+      candidates: [TARGET, { ...TARGET }],
+      searchReasons: ["REPEATED_PAGE"],
+    });
+    await expectIncompleteSearchFailure(
+      catalog,
+      await createRunsRoot(),
+      `Rename column customer_id to customer_key in dataset ${TARGET.urn}`,
+    );
+  });
+
+  it("rejects incomplete search when the canonical hint matches only candidate name", async () => {
+    const catalog = new FakeCatalog({
+      candidates: [
+        {
+          urn: "urn:li:dataset:(urn:li:dataPlatform:snowflake,other,PROD)",
+          name: TARGET.urn,
+        },
+      ],
+      searchReasons: ["HAS_MORE"],
+    });
+    await expectIncompleteSearchFailure(
+      catalog,
+      await createRunsRoot(),
+      `Rename column customer_id to customer_key in dataset ${TARGET.urn}`,
+    );
+  });
+
+  it("continues incomplete search for one explicit canonical candidate URN", async () => {
+    const catalog = new FakeCatalog({
+      candidates: [TARGET],
+      searchReasons: ["PAGE_LIMIT_REACHED"],
+    });
+    const runsRoot = await createRunsRoot();
+    const run = await runWith(
+      catalog,
+      runsRoot,
+      new AbortController().signal,
+      [],
+      `Rename column customer_id to customer_key in dataset ${TARGET.urn}`,
+    );
+
+    expect(run).toMatchObject({
+      status: "INCOMPLETE_EVIDENCE",
+      evidence: {
+        targetDataset: {
+          urn: TARGET.urn,
+          platform: "snowflake",
+          environment: "PROD",
+        },
+        completeness: {
+          complete: false,
+          search: { complete: false },
+        },
+      },
+    });
+    expect(catalog.operations).toEqual([
+      "searchDatasets",
+      "listSchemaFields",
+      "getDownstreamLineage:table",
+      "getDownstreamLineage:customer_id",
+      "getEntityContext",
+      "close",
+    ]);
+    await expect(access(run.artifactPath)).resolves.toBeUndefined();
+  });
+
+  it("allows a verified source field from incomplete schema but never infers absence", async () => {
+    const continued = await runWith(
+      new FakeCatalog({ schemaReasons: ["ITEM_LIMIT_REACHED"] }),
+      await createRunsRoot(),
+    );
+    expect(continued.status).toBe("INCOMPLETE_EVIDENCE");
+
+    await expect(
+      runWith(
+        new FakeCatalog({ fields: [{ fieldPath: "order_id" }], schemaReasons: ["HAS_MORE"] }),
+        await createRunsRoot(),
+      ),
+    ).rejects.toMatchObject({
+      code: "DATAHUB_UNAVAILABLE",
+      message: "Dataset schema was incomplete.",
+    });
+    await expect(
+      runWith(new FakeCatalog({ fields: [{ fieldPath: "order_id" }] }), await createRunsRoot()),
+    ).rejects.toMatchObject({ code: "COLUMN_NOT_FOUND" });
   });
 });

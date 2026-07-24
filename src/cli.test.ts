@@ -5,8 +5,13 @@ import {
   type RunImpactAnalysisDependencies,
 } from "./app/run-impact-analysis.js";
 import type { RuntimeConfig } from "./config/runtime-config.js";
-import type { DataHubCatalog } from "./datahub/catalog.js";
-import type { LineageAsset, SchemaField, ToolTraceEntry } from "./domain/evidence.js";
+import type { CollectionResult, DataHubCatalog } from "./datahub/catalog.js";
+import type {
+  EntityContext,
+  LineageAsset,
+  SchemaField,
+  ToolTraceEntry,
+} from "./domain/evidence.js";
 import type { DatasetCandidate } from "./domain/resolve-dataset.js";
 import { AppError, type AppErrorCode } from "./errors/app-error.js";
 import { createRunId, runCli, type CliDependencies } from "./cli.js";
@@ -19,19 +24,30 @@ const ENVIRONMENT = {
 
 class TestCatalog implements DataHubCatalog {
   closeCount = 0;
+  readonly delegated: string[] = [];
 
   constructor(private readonly closeImplementation: () => Promise<void> = async () => undefined) {}
 
-  async searchDatasets(): Promise<readonly DatasetCandidate[]> {
-    return [];
+  async searchDatasets(): Promise<CollectionResult<DatasetCandidate>> {
+    return emptyCollection();
   }
 
-  async listSchemaFields(): Promise<readonly SchemaField[]> {
-    return [];
+  async listSchemaFields(): Promise<CollectionResult<SchemaField>> {
+    return emptyCollection();
   }
 
-  async getDownstreamLineage(): Promise<readonly LineageAsset[]> {
-    return [];
+  async getDownstreamLineage(): Promise<CollectionResult<LineageAsset>> {
+    return emptyCollection();
+  }
+
+  async getEntityContext(): Promise<CollectionResult<EntityContext, "ENTITY_CONTEXT_UNAVAILABLE">> {
+    this.delegated.push("getEntityContext");
+    return emptyCollection();
+  }
+
+  getServerInfo() {
+    this.delegated.push("getServerInfo");
+    return { reportedServerName: "test-datahub" };
   }
 
   getTrace(): readonly ToolTraceEntry[] {
@@ -42,6 +58,13 @@ class TestCatalog implements DataHubCatalog {
     this.closeCount += 1;
     await this.closeImplementation();
   }
+}
+
+function emptyCollection<T, R extends string = never>(): CollectionResult<T, R> {
+  return {
+    items: [],
+    completeness: { complete: true, pages: 0, itemCount: 0, offsets: [], reasonCodes: [] },
+  };
 }
 
 interface CliHarness {
@@ -143,33 +166,35 @@ describe("runCli", () => {
     expect(test.stderr.join("")).not.toContain("ERR_PARSE_ARGS");
   });
 
-  it.each(["COMPLETED", "COMPLETED_WITH_LIMITATIONS", "INSUFFICIENT_METADATA"] as const)(
-    "prints the report and exits zero for %s",
-    async (status) => {
-      const test = harness(async (input) => ({
-        status,
-        runId: input.runId,
-        artifactPath: `reports/${input.runId}/impact-report.md`,
-      }));
+  it.each([
+    "COMPLETED",
+    "COMPLETED_WITH_LIMITATIONS",
+    "INSUFFICIENT_METADATA",
+    "INCOMPLETE_EVIDENCE",
+  ] as const)("prints the report and exits zero for %s", async (status) => {
+    const test = harness(async (input) => ({
+      status,
+      runId: input.runId,
+      artifactPath: `reports/${input.runId}/impact-report.md`,
+    }));
 
-      const exitCode = await runCli(
-        ["--request", REQUEST, "--runs-dir", "reports"],
-        test.dependencies,
-      );
+    const exitCode = await runCli(
+      ["--request", REQUEST, "--runs-dir", "reports"],
+      test.dependencies,
+    );
 
-      expect(exitCode).toBe(0);
-      expect(test.stdout.join("")).toMatch(
-        new RegExp(
-          `^Status: ${status}\\nRun ID: 20260722T123456Z-[0-9a-f]{8}\\nReport: reports/20260722T123456Z-[0-9a-f]{8}/impact-report\\.md\\n$`,
-        ),
-      );
-      expect(test.stderr).toEqual([]);
-      expect(test.received.analysis).toMatchObject({ request: REQUEST, runsRoot: "reports" });
-      expect(test.received.analysis?.secrets).toEqual([ENVIRONMENT.DATAHUB_GMS_TOKEN]);
-      expect(test.received.analysis?.signal).toBe(test.received.catalogSignal);
-      expect(test.received.config).toMatchObject({ runsRoot: "runs" });
-    },
-  );
+    expect(exitCode).toBe(0);
+    expect(test.stdout.join("")).toMatch(
+      new RegExp(
+        `^Status: ${status}\\nRun ID: 20260722T123456Z-[0-9a-f]{8}\\nReport: reports/20260722T123456Z-[0-9a-f]{8}/impact-report\\.md\\n$`,
+      ),
+    );
+    expect(test.stderr).toEqual([]);
+    expect(test.received.analysis).toMatchObject({ request: REQUEST, runsRoot: "reports" });
+    expect(test.received.analysis?.secrets).toEqual([ENVIRONMENT.DATAHUB_GMS_TOKEN]);
+    expect(test.received.analysis?.signal).toBe(test.received.catalogSignal);
+    expect(test.received.config).toMatchObject({ runsRoot: "runs" });
+  });
 
   it("uses the validated runs-directory default when no override is supplied", async () => {
     const test = harness();
@@ -177,6 +202,21 @@ describe("runCli", () => {
     await runCli(["--request", REQUEST], test.dependencies);
 
     expect(test.received.analysis?.runsRoot).toBe("runs");
+  });
+
+  it("delegates context and server identity while retaining exactly-once close", async () => {
+    const catalog = new TestCatalog();
+    const test = harness(async (input) => {
+      await input.catalog.getEntityContext(["urn:li:dataset:test"]);
+      expect(input.catalog.getServerInfo()).toEqual({ reportedServerName: "test-datahub" });
+      await input.catalog.close();
+      await input.catalog.close();
+      return { status: "COMPLETED", runId: input.runId, artifactPath: "report.md" };
+    }, catalog);
+
+    await expect(runCli(["--request", REQUEST], test.dependencies)).resolves.toBe(0);
+    expect(catalog.delegated).toEqual(["getEntityContext", "getServerInfo"]);
+    expect(catalog.closeCount).toBe(1);
   });
 
   const failureCases: readonly {

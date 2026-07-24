@@ -10,7 +10,8 @@ import {
   type ToolTraceEntry,
 } from "../domain/evidence.js";
 import { assessImpact, type ImpactAssessment } from "../domain/impact-assessment.js";
-import { resolveDataset } from "../domain/resolve-dataset.js";
+import { calculateContextCoverage } from "../domain/context-coverage.js";
+import { findUniqueCanonicalDatasetUrnMatch, resolveDataset } from "../domain/resolve-dataset.js";
 import type { RunStatus } from "../domain/run-result.js";
 import { AppError, type SuppressedFailure } from "../errors/app-error.js";
 
@@ -36,7 +37,7 @@ export interface ImpactReportDraft {
   readonly unknowns: readonly string[];
   readonly status: Extract<
     RunStatus,
-    "COMPLETED" | "COMPLETED_WITH_LIMITATIONS" | "INSUFFICIENT_METADATA"
+    "COMPLETED" | "COMPLETED_WITH_LIMITATIONS" | "INSUFFICIENT_METADATA" | "INCOMPLETE_EVIDENCE"
   >;
 }
 
@@ -64,6 +65,18 @@ interface BuildImpactReportDraftInput {
   readonly evidence: NormalizedEvidence;
   readonly assessment: ImpactAssessment;
 }
+
+type AnalysisOutcome =
+  | {
+      readonly kind: "readyToPublish";
+      readonly report: ImpactReportDraft;
+      readonly markdown: string;
+      readonly attemptedPath: string;
+    }
+  | {
+      readonly kind: "failed";
+      readonly error: unknown;
+    };
 
 const assumptions = [
   "Dataset resolution required one exact URN, name, or platform-qualified name match.",
@@ -127,6 +140,27 @@ function lineageResultLimit(trace: readonly ToolTraceEntry[]): number | undefine
 function buildUnknowns(evidence: NormalizedEvidence): readonly string[] {
   const unknowns: string[] = [];
 
+  if (!evidence.completeness.search.complete) {
+    unknowns.push(
+      "Dataset-search candidates are a collected lower bound because required evidence is incomplete.",
+    );
+  }
+  if (!evidence.completeness.schema.complete) {
+    unknowns.push(
+      "Schema-field counts are collected lower bounds because required evidence is incomplete.",
+    );
+  }
+  if (!evidence.completeness.tableLineage.complete) {
+    unknowns.push(
+      "Table-lineage counts are collected lower bounds because required evidence is incomplete.",
+    );
+  }
+  if (!evidence.completeness.columnLineage.complete) {
+    unknowns.push(
+      "Column-lineage counts are collected lower bounds because required evidence is incomplete.",
+    );
+  }
+
   if (evidence.downstreamAssets.length === 0) {
     unknowns.push("No downstream impact is proven because DataHub returned no downstream lineage.");
   } else if (evidence.columnAffectedAssets.length === 0) {
@@ -163,11 +197,13 @@ function buildUnknowns(evidence: NormalizedEvidence): readonly string[] {
 }
 
 function deriveStatus(evidence: NormalizedEvidence): ImpactReportDraft["status"] {
-  return evidence.downstreamAssets.length === 0
-    ? "INSUFFICIENT_METADATA"
-    : evidence.evidenceLevel === "column"
-      ? "COMPLETED"
-      : "COMPLETED_WITH_LIMITATIONS";
+  return !evidence.completeness.complete
+    ? "INCOMPLETE_EVIDENCE"
+    : evidence.downstreamAssets.length === 0
+      ? "INSUFFICIENT_METADATA"
+      : evidence.evidenceLevel === "column"
+        ? "COMPLETED"
+        : "COMPLETED_WITH_LIMITATIONS";
 }
 
 function buildImpactReportDraft(input: BuildImpactReportDraftInput): ImpactReportDraft {
@@ -186,21 +222,37 @@ function buildImpactReportDraft(input: BuildImpactReportDraftInput): ImpactRepor
 }
 
 export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Promise<AnalysisRun> {
-  let outcome:
-    | { readonly kind: "completed"; readonly run: AnalysisRun }
-    | { readonly kind: "failed"; readonly error: unknown };
+  let outcome: AnalysisOutcome;
 
   try {
     deps.signal.throwIfAborted();
     const intent = parseChangeIntent(deps.request);
-    const candidates = await deps.catalog.searchDatasets(intent.datasetHint, {
+    const search = await deps.catalog.searchDatasets(intent.datasetHint, {
       signal: deps.signal,
     });
     deps.signal.throwIfAborted();
-    const target = resolveDataset(intent, candidates);
-    const fields = await deps.catalog.listSchemaFields(target.urn, { signal: deps.signal });
+    let target;
+    if (search.completeness.complete) {
+      target = resolveDataset(intent, search.items);
+    } else {
+      const canonicalMatch = findUniqueCanonicalDatasetUrnMatch(intent.datasetHint, search.items);
+      if (canonicalMatch === undefined) {
+        throw new AppError("DATAHUB_UNAVAILABLE", "Dataset search was incomplete.");
+      }
+
+      target = resolveDataset(intent, [canonicalMatch]);
+    }
+    const schema = await deps.catalog.listSchemaFields(target.urn, { signal: deps.signal });
     deps.signal.throwIfAborted();
-    const sourceColumn = requireSourceColumn(fields, intent.sourceColumn);
+    let sourceColumn;
+    try {
+      sourceColumn = requireSourceColumn(schema.items, intent.sourceColumn);
+    } catch (error) {
+      if (!schema.completeness.complete) {
+        throw new AppError("DATAHUB_UNAVAILABLE", "Dataset schema was incomplete.");
+      }
+      throw error;
+    }
     const tableLineage = await deps.catalog.getDownstreamLineage(target.urn, {
       maxHops: 2,
       signal: deps.signal,
@@ -212,14 +264,39 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
       signal: deps.signal,
     });
     deps.signal.throwIfAborted();
+    const relevantUrns = [target.urn, ...tableLineage.items.map(({ urn }) => urn)];
+    const entityContext = await deps.catalog.getEntityContext(relevantUrns, {
+      signal: deps.signal,
+    });
+    deps.signal.throwIfAborted();
+    const evidenceCompleteness = {
+      complete:
+        search.completeness.complete &&
+        schema.completeness.complete &&
+        tableLineage.completeness.complete &&
+        columnLineage.completeness.complete,
+      search: search.completeness,
+      schema: schema.completeness,
+      tableLineage: tableLineage.completeness,
+      columnLineage: columnLineage.completeness,
+    };
+    const contextCoverage = calculateContextCoverage({
+      relevantUrns,
+      retrievalComplete: entityContext.completeness.complete,
+      entities: entityContext.items,
+    });
     const evidence = normalizeEvidence({
       target,
-      searchCandidates: candidates,
-      fields,
+      searchCandidates: search.items,
+      fields: schema.items,
       sourceColumn,
-      tableLineage,
-      columnLineage,
+      tableLineage: tableLineage.items,
+      columnLineage: columnLineage.items,
       trace: deps.catalog.getTrace(),
+      completeness: evidenceCompleteness,
+      entityContextRetrieval: entityContext.completeness,
+      entityContext: entityContext.items,
+      contextCoverage,
     });
     const assessment = assessImpact(evidence);
     const report = buildImpactReportDraft({
@@ -233,23 +310,12 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
     deps.signal.throwIfAborted();
     const markdown = renderImpactReport(report, deps.secrets);
     deps.signal.throwIfAborted();
-    const attemptedPath = resolve(deps.runsRoot, report.runId, "impact-report.md");
-    let artifactPath: string;
-    try {
-      artifactPath = await writeRunArtifact({
-        runsRoot: deps.runsRoot,
-        runId: report.runId,
-        filename: "impact-report.md",
-        content: markdown,
-        signal: deps.signal,
-      });
-    } catch (error) {
-      if (error instanceof AppError && error.code === "ARTIFACT_WRITE_FAILED") {
-        throw new ImpactReportPersistenceError(report, attemptedPath);
-      }
-      throw error;
-    }
-    outcome = { kind: "completed", run: { ...report, artifactPath } };
+    outcome = {
+      kind: "readyToPublish",
+      report,
+      markdown,
+      attemptedPath: resolve(deps.runsRoot, report.runId, "impact-report.md"),
+    };
   } catch (error) {
     outcome = { kind: "failed", error };
   }
@@ -257,7 +323,7 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
   try {
     await deps.catalog.close();
   } catch (closeError) {
-    if (outcome.kind === "completed") throw closeError;
+    if (outcome.kind === "readyToPublish") throw closeError;
 
     const failure: SuppressedFailure = {
       code: "MCP_UNAVAILABLE",
@@ -267,5 +333,24 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
   }
 
   if (outcome.kind === "failed") throw outcome.error;
-  return outcome.run;
+
+  deps.signal.throwIfAborted();
+
+  let artifactPath: string;
+  try {
+    artifactPath = await writeRunArtifact({
+      runsRoot: deps.runsRoot,
+      runId: outcome.report.runId,
+      filename: "impact-report.md",
+      content: outcome.markdown,
+      signal: deps.signal,
+    });
+  } catch (error) {
+    if (error instanceof AppError && error.code === "ARTIFACT_WRITE_FAILED") {
+      throw new ImpactReportPersistenceError(outcome.report, outcome.attemptedPath);
+    }
+    throw error;
+  }
+
+  return { ...outcome.report, artifactPath };
 }
