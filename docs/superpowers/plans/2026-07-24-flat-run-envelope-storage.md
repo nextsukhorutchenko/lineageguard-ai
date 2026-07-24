@@ -847,6 +847,7 @@ git commit -m "feat: persist terminal runs as flat envelopes"
 - Modify: `src/artifacts/write-run-artifacts.test.ts`
 - Modify: `src/app/run-impact-analysis.ts`
 - Modify: `src/app/run-impact-analysis.test.ts`
+- Modify: `tests/fixture-impact-analysis.test.ts`
 - Modify: `src/cli.ts`
 - Modify: `src/cli.test.ts`
 - Modify: `.env.example`
