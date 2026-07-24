@@ -1,6 +1,7 @@
 import type { ImpactReportDraft } from "../../src/app/run-impact-analysis.js";
 import type { ToolTraceEntry } from "../../src/domain/evidence.js";
 import { buildChangeContext, type ChangeContext } from "../../src/workflow/change-context.js";
+import type { MigrationPackageDraft } from "../../src/workflow/migration-draft.js";
 
 const trace = (
   callId: string,
@@ -150,4 +151,30 @@ export function makeChangeContext(
   options: Parameters<typeof makeImpactReportDraft>[0] = {},
 ): ChangeContext {
   return buildChangeContext(makeImpactReportDraft(options), []);
+}
+
+export function makeMigrationDraft(
+  context: ChangeContext = makeChangeContext(),
+): MigrationPackageDraft {
+  return {
+    schemaVersion: "1",
+    strategy: "STAGED_COMPATIBILITY",
+    executionClassification:
+      context.advisoryDecision === "PROCEED_WITH_REVIEW"
+        ? "EXECUTABLE_WITH_REVIEW"
+        : "ADVISORY_ONLY",
+    rationale: "CRITICAL_DOWNSTREAM_IMPACT",
+    evidenceIds: context.evidence.map(({ id }) => id),
+    stages: [
+      "PREPARE",
+      "ADD_COMPATIBLE_COLUMN",
+      "BACKFILL",
+      "MIGRATE_DOWNSTREAM",
+      "VALIDATE",
+      "RETIRE_SOURCE_COLUMN",
+    ],
+    validationChecks: ["SOURCE_COLUMN_EXISTS", "TARGET_COLUMN_EXISTS", "BACKFILL_COMPLETE"],
+    rollback: "KEEP_SOURCE_AND_REMOVE_TARGET_AFTER_REVIEW",
+    warnings: ["DIRECT_RENAME_BLOCKED", "HUMAN_APPROVAL_REQUIRED"],
+  };
 }
