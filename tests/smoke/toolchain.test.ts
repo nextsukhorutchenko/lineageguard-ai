@@ -24,6 +24,7 @@ describe("toolchain", () => {
       "react-dom": "19.2.8",
     });
     expect(packageJson.devDependencies).toMatchObject({
+      "@eslint/js": "9.39.5",
       "@playwright/test": "1.61.1",
       "@types/react": "19.2.17",
       "@types/react-dom": "19.2.3",

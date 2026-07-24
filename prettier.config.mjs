@@ -1,6 +1,4 @@
-const config = {
+export default {
   printWidth: 100,
   trailingComma: "all",
 };
-
-export default config;
