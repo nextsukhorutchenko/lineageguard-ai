@@ -4190,6 +4190,12 @@ git commit -m "feat: add the offline replay agent boundary"
 - Consumes: `AgentProvider`, `AgentToolset`, `MigrationPackageDraftSchema`, `@openai/agents`, server environment, and request cancellation.
 - Produces: `MIGRATION_AGENT_PROMPT_VERSION`, `migrationAgentInstructions`, and `OpenAIAgentProvider` configured with exactly two strict function tools.
 
+> **Owner-approved pinned-SDK compatibility amendment — 2026-07-24:** `@openai/agents@0.13.5`
+> accepts tracing and workflow metadata in the reusable `Runner` constructor, while per-run options
+> accept `maxTurns`, `signal`, and `toolExecution`. Its Zod structured-output type accepts one
+> `ZodObject`, so the same closed completion union is enforced by a strict object plus
+> `superRefine`. This changes no product contract.
+
 - [ ] **Step 1: Write failing prompt and SDK-configuration tests**
 
 Create `src/agent/prompt.test.ts`:
@@ -4222,13 +4228,19 @@ expect(agentConfig.modelSettings).toMatchObject({
   reasoning: { effort: "medium" },
   store: false,
 });
-expect(runOptions).toMatchObject({
-  maxTurns: 8,
+expect(runnerConfig).toMatchObject({
   tracingDisabled: true,
   traceIncludeSensitiveData: false,
+  workflowName: "LineageGuard migration package",
+});
+expect(runOptions).toMatchObject({
+  maxTurns: 8,
   toolExecution: { maxFunctionToolConcurrency: 1 },
 });
 expect(runOptions.signal).toBeInstanceOf(AbortSignal);
+expect(runOptions).not.toHaveProperty("tracingDisabled");
+expect(runOptions).not.toHaveProperty("traceIncludeSensitiveData");
+expect(runOptions).not.toHaveProperty("workflowName");
 ```
 
 Also assert that construction throws a sanitized configuration error when `OPENAI_API_KEY` is absent and that neither the key nor raw context appears in the returned provider metadata.
@@ -4288,35 +4300,46 @@ import type {
   AnalyzeRenameResult,
 } from "./provider.js";
 
-const CompletionSchema = z.discriminatedUnion("status", [
-  z.object({ status: z.literal("completed") }).strict(),
-  z
-    .object({
-      status: z.literal("needs_clarification"),
-      candidates: z.array(z.string().startsWith("urn:li:").max(500)).min(1).max(20),
-    })
-    .strict(),
-  z
-    .object({
-      status: z.literal("failed"),
-      failure: z
-        .object({
-          code: z.enum([
-            "DATAHUB_UNAVAILABLE",
-            "MCP_UNAVAILABLE",
-            "TARGET_NOT_FOUND",
-            "COLUMN_NOT_FOUND",
-            "ANALYSIS_FAILED",
-            "ARTIFACT_WRITE_FAILED",
-            "GENERATION_FAILED",
-          ]),
-          message: z.string().min(1).max(500),
-          knownFields: z.array(z.string().min(1).max(500)).max(100).optional(),
-        })
-        .strict(),
-    })
-    .strict(),
-]);
+const CompletionSchema = z
+  .object({
+    status: z.enum(["completed", "needs_clarification", "failed"]),
+    candidates: z.array(z.string().startsWith("urn:li:").max(500)).min(1).max(20).optional(),
+    failure: z
+      .object({
+        code: z.enum([
+          "DATAHUB_UNAVAILABLE",
+          "MCP_UNAVAILABLE",
+          "TARGET_NOT_FOUND",
+          "COLUMN_NOT_FOUND",
+          "ANALYSIS_FAILED",
+          "ARTIFACT_WRITE_FAILED",
+          "GENERATION_FAILED",
+        ]),
+        message: z.string().min(1).max(500),
+        knownFields: z.array(z.string().min(1).max(500)).max(100).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .superRefine((completion, ctx) => {
+    const valid =
+      (completion.status === "completed" &&
+        completion.candidates === undefined &&
+        completion.failure === undefined) ||
+      (completion.status === "needs_clarification" &&
+        completion.candidates !== undefined &&
+        completion.failure === undefined) ||
+      (completion.status === "failed" &&
+        completion.candidates === undefined &&
+        completion.failure !== undefined);
+    if (!valid) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Completion fields do not match the closed status contract.",
+      });
+    }
+  });
 
 export interface OpenAIAgentProviderOptions {
   readonly apiKey: string;
@@ -4339,6 +4362,7 @@ export class OpenAIAgentProvider implements AgentProvider {
         modelProvider: new OpenAIProvider({ apiKey: options.apiKey }),
         tracingDisabled: true,
         traceIncludeSensitiveData: false,
+        workflowName: "LineageGuard migration package",
       });
   }
 
@@ -4370,9 +4394,6 @@ export class OpenAIAgentProvider implements AgentProvider {
         const result = await this.#runner.run(agent, input.request, {
           maxTurns: 8,
           signal,
-          tracingDisabled: true,
-          traceIncludeSensitiveData: false,
-          workflowName: "LineageGuard migration package",
           toolExecution: { maxFunctionToolConcurrency: 1 },
         });
         return {
