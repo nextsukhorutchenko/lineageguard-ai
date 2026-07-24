@@ -149,10 +149,6 @@ function diagnosticDetails(error: AppError, secrets: readonly string[]): string 
       .join("")}`;
   }
 
-  if (error.code === "ARTIFACT_WRITE_FAILED" && typeof error.details.attemptedPath === "string") {
-    return `Attempted report path: ${sanitizeTerminalText(error.details.attemptedPath, secrets)}\n`;
-  }
-
   return "";
 }
 
@@ -162,8 +158,10 @@ function writeAppError(
   secrets: readonly string[] = [],
 ): number {
   const recovery = error.code === "INVALID_REQUEST" ? undefined : guidance[error.code];
+  const message =
+    error.code === "ARTIFACT_WRITE_FAILED" ? "The artifact operation failed." : error.message;
   stderr.write(
-    `Status: ${error.code}\n${sanitizeTerminalText(error.message, secrets)}\n${diagnosticDetails(error, secrets)}${
+    `Status: ${error.code}\n${sanitizeTerminalText(message, secrets)}\n${diagnosticDetails(error, secrets)}${
       recovery === undefined ? "" : `Recovery: ${recovery}\n`
     }`,
   );

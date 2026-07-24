@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { writeRunArtifact } from "./write-run-artifacts.js";
+import { readRunArtifact, writeRunArtifact } from "./write-run-artifacts.js";
 
 async function createFreshRunsRoot(): Promise<{
   readonly sandbox: string;
@@ -14,6 +14,58 @@ async function createFreshRunsRoot(): Promise<{
 }
 
 describe("writeRunArtifact", () => {
+  it("writes every allowlisted run-level diagnostic artifact", async () => {
+    const { sandbox, runsRoot } = await createFreshRunsRoot();
+    try {
+      for (const filename of [
+        "impact-report.md",
+        "change-context.json",
+        "migration-package-draft.json",
+        "validation-findings.json",
+        "run-metadata.json",
+      ] as const) {
+        await expect(
+          writeRunArtifact({ runsRoot, runId: `run-${filename}`, filename, content: "safe" }),
+        ).resolves.toContain(filename);
+      }
+    } finally {
+      await rm(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects filenames outside the fixed allowlist", async () => {
+    const { sandbox, runsRoot } = await createFreshRunsRoot();
+    try {
+      await expect(
+        writeRunArtifact({
+          runsRoot,
+          runId: "run-1",
+          filename: "../../secret.txt" as never,
+          content: "unsafe",
+        }),
+      ).rejects.toMatchObject({ code: "ARTIFACT_WRITE_FAILED" });
+    } finally {
+      await rm(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  it("reads only a real allowlisted file beneath the run root", async () => {
+    const { sandbox, runsRoot } = await createFreshRunsRoot();
+    try {
+      await writeRunArtifact({
+        runsRoot,
+        runId: "run-1",
+        filename: "impact-report.md",
+        content: "# Sanitized impact report\n",
+      });
+      await expect(
+        readRunArtifact({ runsRoot, runId: "run-1", filename: "impact-report.md" }),
+      ).resolves.toBe("# Sanitized impact report\n");
+    } finally {
+      await rm(sandbox, { recursive: true, force: true });
+    }
+  });
+
   it("does not create an artifact when its signal is already aborted", async () => {
     const { sandbox, runsRoot } = await createFreshRunsRoot();
     const controller = new AbortController();

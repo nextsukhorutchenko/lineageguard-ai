@@ -266,8 +266,6 @@ describe("runCli", () => {
         attemptedPath: `C:\\runs\\${ENVIRONMENT.DATAHUB_GMS_TOKEN}\u001b[2J\nforged\\impact-report.md`,
       },
       exitCode: 4,
-      diagnostic:
-        "Attempted report path: C:\\runs\\[REDACTED]\\u001B[2J\\nforged\\impact-report.md\n",
       recovery:
         "Verify that the configured runs directory is writable and has no symbolic-link or junction ancestors.",
     },
@@ -287,10 +285,14 @@ describe("runCli", () => {
       const actualExitCode = await runCli(["--request", REQUEST], test.dependencies);
 
       const expectedRecovery = recovery === undefined ? "" : `Recovery: ${recovery}\n`;
+      const expectedMessage =
+        code === "ARTIFACT_WRITE_FAILED"
+          ? "The artifact operation failed."
+          : `Safe ${code} message.`;
       expect(actualExitCode).toBe(exitCode);
       expect(test.stdout).toEqual([]);
       expect(test.stderr.join("")).toBe(
-        `Status: ${code}\nSafe ${code} message.\n${diagnostic}${expectedRecovery}`,
+        `Status: ${code}\n${expectedMessage}\n${diagnostic}${expectedRecovery}`,
       );
       expect(test.stderr.join("")).not.toContain(rawSecret);
       expect(test.stderr.join("")).not.toContain("raw dependency stderr");
@@ -338,10 +340,15 @@ describe("runCli", () => {
 
   it("redacts the configured token from error messages and typed diagnostics", async () => {
     const token = ENVIRONMENT.DATAHUB_GMS_TOKEN;
+    const recognizableRunsRoot = "C:\\recognizable-private-runs-root";
     const test = harness(async () => {
-      throw new AppError("ARTIFACT_WRITE_FAILED", `Could not write ${token}.`, {
-        attemptedPath: `C:\\runs\\${token}\\impact-report.md`,
-      });
+      throw new AppError(
+        "ARTIFACT_WRITE_FAILED",
+        `Could not write ${recognizableRunsRoot}\\${token}.`,
+        {
+          attemptedPath: `${recognizableRunsRoot}\\${token}\\impact-report.md`,
+        },
+      );
     });
 
     const exitCode = await runCli(["--request", REQUEST], test.dependencies);
@@ -349,11 +356,11 @@ describe("runCli", () => {
     expect(exitCode).toBe(4);
     expect(test.stderr.join("")).toBe(
       "Status: ARTIFACT_WRITE_FAILED\n" +
-        "Could not write [REDACTED].\n" +
-        "Attempted report path: C:\\runs\\[REDACTED]\\impact-report.md\n" +
+        "The artifact operation failed.\n" +
         "Recovery: Verify that the configured runs directory is writable and has no symbolic-link or junction ancestors.\n",
     );
     expect(test.stderr.join("")).not.toContain(token);
+    expect(test.stderr.join("")).not.toContain(recognizableRunsRoot);
   });
 
   it("returns stable configuration guidance without exposing validation details", async () => {
