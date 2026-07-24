@@ -1,8 +1,10 @@
 # Flat Run Envelope Storage Design
 
-**Status:** Proposed — design approved by the owner; written-spec review pending  
-**Date:** 2026-07-24  
-**Applies to:** `docs/specs/002-nextjs-openai-agent-demo/spec.md`, Task 6 and its downstream storage consumers  
+**Status:** Proposed — design approved by the owner; written-spec review pending
+
+**Date:** 2026-07-24
+
+**Applies to:** `docs/specs/002-nextjs-openai-agent-demo/spec.md`, Task 6 and its downstream storage consumers
 **Supersedes:** The nested `<runsRoot>/<runId>/package/manifest.json` persistence layout and directory-rename completion point
 
 ## Decision
