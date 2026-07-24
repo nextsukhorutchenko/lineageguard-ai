@@ -48,4 +48,8 @@ describe("structured boundary sanitization", () => {
     const privateKey = "-----BEGIN PRIVATE KEY-----\nsecret-body\n-----END PRIVATE KEY-----";
     expect(sanitizeBoundaryText(privateKey, [], 500)).toBe("[REDACTED]");
   });
+
+  it("uses the fixed redaction token for a credential at a structured destination", () => {
+    expect(sanitizeBoundaryText("sk-proj-1234567890abcdefghijkl", [], 500)).toBe("[REDACTED]");
+  });
 });
