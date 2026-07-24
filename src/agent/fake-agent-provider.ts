@@ -64,6 +64,7 @@ export class FakeAgentProvider implements AgentProvider {
       { request: input.request },
       input.signal,
     );
+    input.signal.throwIfAborted();
     if (analysis.kind === "clarification") {
       return {
         status: "needs_clarification",
@@ -94,10 +95,9 @@ export class FakeAgentProvider implements AgentProvider {
         },
       };
     }
-    const generated = await input.tools.generateMigrationPackage(
-      createGoldenDraft(analysis.context),
-      input.signal,
-    );
+    const draft = createGoldenDraft(analysis.context);
+    input.signal.throwIfAborted();
+    const generated = await input.tools.generateMigrationPackage(draft, input.signal);
     return {
       status: generated.kind === "accepted" ? "completed" : "failed",
       provider: "fixture",

@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { MAX_ENTITY_CONTEXT_BYTES } from "../datahub/mcp/datahub-mcp-catalog.js";
 import { fixtureSchemas, type FixtureName } from "./fixture-schemas.js";
 
 const FIXTURE_NAMES = [
@@ -160,6 +161,26 @@ describe("fixtureSchemas", () => {
         ...context,
         items: [context.items[1]!, context.items[0]!, ...context.items.slice(2)],
       }).success,
+    ).toBe(false);
+  });
+
+  it("rejects entity context above the live aggregate UTF-8 byte cap", async () => {
+    const context = fixtureSchemas["entity-context-order-details-impact.json"].parse(
+      await readUnsafeFixture("entity-context-order-details-impact.json"),
+    );
+    const oversized = {
+      ...context,
+      items: context.items.map((item) => ({
+        ...item,
+        description: "界".repeat(2_000),
+      })),
+    };
+
+    expect(Buffer.byteLength(JSON.stringify(oversized.items), "utf8")).toBeGreaterThan(
+      MAX_ENTITY_CONTEXT_BYTES,
+    );
+    expect(
+      fixtureSchemas["entity-context-order-details-impact.json"].safeParse(oversized).success,
     ).toBe(false);
   });
 });

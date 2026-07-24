@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MAX_ENTITY_CONTEXT_BYTES } from "../datahub/mcp/datahub-mcp-catalog.js";
 import {
   EntityContextRetrievalSchema,
   RequiredCollectionCompletenessSchema,
@@ -152,7 +153,8 @@ const entityContextFixtureSchema = z
       !hasUnique(urns) ||
       urns.some((urn, index) => urn !== sortedUrns[index]) ||
       !urns.includes(TARGET_DATASET_URN) ||
-      !hasExactCompleteness(value.completeness, 25, [0, 10, 20])
+      !hasExactCompleteness(value.completeness, 25, [0, 10, 20]) ||
+      Buffer.byteLength(JSON.stringify(value.items), "utf8") > MAX_ENTITY_CONTEXT_BYTES
     ) {
       addInvariantIssue(ctx);
     }
