@@ -5350,7 +5350,7 @@ function terminalSnapshot(
 }
 ```
 
-Import `DataHubRunMetadata`, `DataHubRunMetadataSchema`, `DataHubServerInfo`, `WorkflowFailureSchema`, `WorkflowSnapshotSchema`, and `MIGRATION_AGENT_PROMPT_VERSION` explicitly. Implement `sanitizeDataHubServerInfo` as a closed helper that accepts only optional strings, passes each through `sanitizeBoundaryText(..., secrets, 100)`, omits empty/redacted-only values, and never retains the raw handshake. This function is the only provider/adapter-to-persistence mapper; its closed schema excludes prompts, raw traces, secrets, absolute paths, tool descriptions, and other handshake fields. Set `verifiedDataHubMetadata` only after `createCatalog` returns: in live mode that return occurs after the required four-tool capability gate, while replay records `REPLAY_FIXTURE`. A connection or capability-gate failure must leave `datahub` absent rather than serialize an unverified MCP claim. Add workflow tests for a present name/version, a legitimately absent pair, an overlong value, a value containing each active secret, a live gate failure with no `datahub`, a verified live mapping, a replay mapping, and schema rejection of every contradictory `mode`/`source`/`verification`/`provider` combination. Snapshots and diagnostic files may contain only the sanitized optional pair. Task 9A replaces the deadline defaults with the workflow-owned instantiated event records.
+Import `DataHubRunMetadata`, `DataHubRunMetadataSchema`, `DataHubServerInfo`, `WorkflowFailureSchema`, `WorkflowSnapshotSchema`, and `MIGRATION_AGENT_PROMPT_VERSION` explicitly. Implement `sanitizeDataHubServerInfo` as a closed helper that accepts only optional strings, passes each through `sanitizeBoundaryText(..., secrets, 100)`, omits empty/redacted-only values, and never retains the raw handshake. This function is the only provider/adapter-to-persistence mapper; its closed schema excludes prompts, raw traces, secrets, absolute paths, tool descriptions, and other handshake fields. Set `verifiedDataHubMetadata` only after `createCatalog` returns: in live mode that return occurs after the required four-tool capability gate, while replay records `REPLAY_FIXTURE`. A connection or capability-gate failure must leave `datahub` absent rather than serialize an unverified MCP claim. Add workflow tests for a present name/version, a legitimately absent pair, an overlong value, a value containing each active secret, a live gate failure with no `datahub`, a verified live mapping, a replay mapping, and schema rejection of every contradictory `mode`/`source`/`verification`/`provider` combination. The public snapshot and bounded private sections of the single immutable envelope may contain only the sanitized optional pair; no separate diagnostic file is authorized. Task 9A replaces the deadline defaults with the workflow-owned instantiated event records.
 
 Add one metadata-surface regression whose lower-level connection fixture advertises the required
 four tools plus `save_document`, `add_owners`, and `future_tool`. The resulting snapshot must have
@@ -6364,7 +6364,7 @@ export default function Page() {
 }
 ```
 
-The runtime directive is a correctness boundary: the mode badge must reflect the environment of the running server, not the environment that built `.next`. Add `tests/integration/runtime-mode-page.integration.test.ts`; after one production build, start the built server on an isolated port first with `REPLAY`, then with placeholder-shaped but non-secret LIVE configuration, fetch `/`, and assert the rendered mode changes accordingly. Use explicit readiness/termination hooks and never call either external provider. Add exact package script `"test:runtime-mode": "vitest run tests/integration/runtime-mode-page.integration.test.ts"`, assert that exact value in `tests/smoke/toolchain.test.ts`, and run it after `build:web` in the focused and final gates.
+The runtime directive is a correctness boundary: the mode badge must reflect the environment of the running server, not the environment that built `.next`. Add `tests/integration/runtime-mode-page.integration.test.ts`; after one production build, have the test harness create an isolated absolute temporary runs root with `mkdtemp` beneath the operating-system temporary directory, pass that existing root as `LINEAGEGUARD_RUNS_DIR` to each built-server process, then start the server on an isolated port first with `REPLAY` and then with placeholder-shaped but non-secret LIVE configuration, fetch `/`, and assert the rendered mode changes accordingly. Use explicit readiness/termination hooks, never call either external provider, and remove only that harness-owned temporary root in `finally` after canonical-path and owned-prefix checks. Add exact package script `"test:runtime-mode": "vitest run tests/integration/runtime-mode-page.integration.test.ts"`, assert that exact value in `tests/smoke/toolchain.test.ts`, and run it after `build:web` in the focused and final gates.
 
 - [ ] **Step 4: Create request, activity, impact, and error components**
 
@@ -8461,11 +8461,17 @@ Add these exact sections to `README.md`:
 ```powershell
 pnpm install --frozen-lockfile
 pnpm exec playwright install chromium
+$runsRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "LineageGuard\replay-runs"
+New-Item -ItemType Directory -Path $runsRoot -Force | Out-Null
+$env:LINEAGEGUARD_RUNS_DIR = (Resolve-Path -LiteralPath $runsRoot).Path
 $env:LINEAGEGUARD_DEMO_MODE = "REPLAY"
 pnpm dev
 ```
 
-Open <http://localhost:3000>. Replay is deterministic, offline, and explicitly labeled; it does not call DataHub or OpenAI.
+Open <http://localhost:3000>. The operator-created runs root is absolute, pre-created, owned by the
+application account, and retained across restarts; application runtime code never creates or
+removes it. Replay is deterministic, offline, and explicitly labeled; it does not call DataHub or
+OpenAI.
 
 ## Browser Demo — Live DataHub + OpenAI
 
@@ -8509,6 +8515,9 @@ Start the pinned DataHub stack and load the documented showcase datapack first.
 
    ```powershell
    if (-not $env:OPENAI_API_KEY) { throw "OPENAI_API_KEY is not configured in this shell." }
+   $runsRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "LineageGuard\live-runs"
+   New-Item -ItemType Directory -Path $runsRoot -Force | Out-Null
+   $env:LINEAGEGUARD_RUNS_DIR = (Resolve-Path -LiteralPath $runsRoot).Path
    $env:OPENAI_MODEL = "gpt-5.6-sol"
    $env:OPENAI_AGENTS_DISABLE_TRACING = "1"
    $env:LINEAGEGUARD_DEMO_MODE = "LIVE"
@@ -8525,12 +8534,16 @@ Start the pinned DataHub stack and load the documented showcase datapack first.
    } finally {
      Remove-Variable secureDataHubToken -ErrorAction SilentlyContinue
      Remove-Item Env:DATAHUB_GMS_TOKEN -ErrorAction SilentlyContinue
+     Remove-Item Env:LINEAGEGUARD_RUNS_DIR -ErrorAction SilentlyContinue
    }
    ```
 
+   The operator-owned live runs root remains in place after the shell variable is cleared. Do not
+   recursively remove it as part of application shutdown.
+
 The UI endpoint is `http://localhost:9002`; the MCP subprocess connects to the GMS endpoint at `http://localhost:8080`. If personal-access-token controls are unavailable, verify that Metadata Authentication is enabled and that the local user has `Generate Personal Access Tokens` or `Manage All Access Tokens`; do not enable mutations as a workaround.
 
-`Get-Command uvx` is LineageGuard's Windows adaptation of the official guide's absolute-path remedy for `spawn uvx ENOENT`; `DATAHUB_MCP_UVX_PATH` is LineageGuard configuration, not an upstream MCP contract. Never use `@latest`, put a PAT in a URL, or persist either token. Set `OPENAI_API_KEY`, `OPENAI_MODEL=gpt-5.6-sol`, `OPENAI_AGENTS_DISABLE_TRACING=1`, and `LINEAGEGUARD_DEMO_MODE=LIVE` in the same shell before running `pnpm dev`.
+`Get-Command uvx` is LineageGuard's Windows adaptation of the official guide's absolute-path remedy for `spawn uvx ENOENT`; `DATAHUB_MCP_UVX_PATH` is LineageGuard configuration, not an upstream MCP contract. Never use `@latest`, put a PAT in a URL, or persist either token. Set `OPENAI_API_KEY`, `OPENAI_MODEL=gpt-5.6-sol`, `OPENAI_AGENTS_DISABLE_TRACING=1`, `LINEAGEGUARD_DEMO_MODE=LIVE`, and `LINEAGEGUARD_RUNS_DIR` pointing to an absolute, pre-created, application-account-owned directory in the same shell before running `pnpm dev`.
 
 The application reads DataHub through the official read-only MCP server. It does not execute SQL, mutate DataHub, or perform GitHub operations.
 
