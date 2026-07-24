@@ -2,12 +2,14 @@ import { createHash } from "node:crypto";
 import {
   access,
   constants,
+  link,
   lstat,
   mkdir,
   mkdtemp,
   open,
   readFile,
   readdir,
+  rename,
   rm,
   symlink,
   unlink,
@@ -46,6 +48,31 @@ async function freshRoot(): Promise<{ readonly sandbox: string; readonly runsRoo
 
 async function listTemporaryFiles(runsRoot: string): Promise<string[]> {
   return (await readdir(runsRoot)).filter((name) => name.startsWith(".tmp-")).sort();
+}
+
+function twoPartyPreLinkBarrier(): {
+  readonly hook: () => Promise<void>;
+  readonly bothReady: Promise<void>;
+  readonly release: () => void;
+} {
+  let arrivals = 0;
+  let announceReady!: () => void;
+  let release!: () => void;
+  const bothReady = new Promise<void>((resolve) => {
+    announceReady = resolve;
+  });
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return {
+    hook: async () => {
+      arrivals += 1;
+      if (arrivals === 2) announceReady();
+      await released;
+    },
+    bothReady,
+    release,
+  };
 }
 
 function makeSnapshot(options: {
@@ -216,11 +243,26 @@ describe("trusted flat run-envelope files", () => {
     const { sandbox, runsRoot } = await freshRoot();
     const first = serializeRunEnvelope(makeCompletedEnvelope());
     const second = serializeRunEnvelope(makeFailedEnvelope());
+    const barrier = twoPartyPreLinkBarrier();
     try {
-      const results = await Promise.allSettled([
-        publishRunEnvelope({ runsRoot, runId: "run-1", serialized: first }),
-        publishRunEnvelope({ runsRoot, runId: "run-1", serialized: second }),
+      const outcomes = Promise.allSettled([
+        publishRunEnvelope({
+          runsRoot,
+          runId: "run-1",
+          serialized: first,
+          hooks: { beforePublish: barrier.hook },
+        }),
+        publishRunEnvelope({
+          runsRoot,
+          runId: "run-1",
+          serialized: second,
+          hooks: { beforePublish: barrier.hook },
+        }),
       ]);
+      await barrier.bothReady;
+      await expect(access(join(runsRoot, "run-run-1.json"))).rejects.toThrow();
+      barrier.release();
+      const results = await outcomes;
       expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
       expect(results.filter(({ status }) => status === "rejected")).toHaveLength(1);
       expect(results.find(({ status }) => status === "rejected")).toMatchObject({
@@ -232,9 +274,10 @@ describe("trusted flat run-envelope files", () => {
       expect((await readRunEnvelope({ runsRoot, runId: "run-1" })).runId).toBe("run-1");
       expect(await listTemporaryFiles(runsRoot)).toEqual([]);
     } finally {
+      barrier.release();
       await rm(sandbox, { recursive: true, force: true });
     }
-  });
+  }, 5_000);
 
   it("exposes no final run when publication fails before link", async () => {
     const { sandbox, runsRoot } = await freshRoot();
@@ -460,32 +503,35 @@ describe("trusted flat run-envelope files", () => {
 
   it("never unlinks a temporary name whose recorded identity was replaced", async () => {
     const { sandbox, runsRoot } = await freshRoot();
+    const temporaryPath = join(runsRoot, ".tmp-run-replaced.json");
+    const displacedPath = join(runsRoot, ".displaced-original-run-envelope");
     let linked = false;
-    const unlinked: string[] = [];
     const boundary = __testOnly.createRunEnvelopeFileBoundary({
       nonce: () => "replaced",
       operations: {
         link: async (existingPath, newPath) => {
-          const { link } = await import("node:fs/promises");
           await link(existingPath, newPath);
           linked = true;
         },
-        lstat: async (path) => {
-          const stats = await lstat(path);
-          if (linked && path.includes(".tmp-run-")) {
-            return {
-              dev: stats.dev,
-              ino: stats.ino + 1,
-              isDirectory: () => false,
-              isFile: () => true,
-              isSymbolicLink: () => false,
-            };
-          }
-          return stats;
-        },
-        unlink: async (path) => {
-          unlinked.push(path);
-          await unlink(path);
+        open: async (path, flags, mode) => {
+          const handle = await open(path, flags, mode);
+          return {
+            stat: () => handle.stat(),
+            write: (buffer, offset, encoding) => handle.write(buffer, offset, encoding),
+            read: (buffer, offset, length, position) =>
+              handle.read(buffer, offset, length, position),
+            sync: () => handle.sync(),
+            close: async () => {
+              await handle.close();
+              if (flags === "wx" && linked && path === temporaryPath) {
+                await rename(temporaryPath, displacedPath);
+                await writeFile(temporaryPath, "competitor-owned", {
+                  flag: "wx",
+                  mode: 0o600,
+                });
+              }
+            },
+          };
         },
       },
     });
@@ -495,8 +541,9 @@ describe("trusted flat run-envelope files", () => {
         runId: "run-1",
         serialized: serializeRunEnvelope(makeCompletedEnvelope()),
       });
-      expect(unlinked).toEqual([]);
       expect(await listTemporaryFiles(runsRoot)).toEqual([".tmp-run-replaced.json"]);
+      await expect(readFile(temporaryPath, "utf8")).resolves.toBe("competitor-owned");
+      await expect(readFile(displacedPath, "utf8")).resolves.toContain('"runId": "run-1"');
       await expect(readRunEnvelope({ runsRoot, runId: "run-1" })).resolves.toMatchObject({
         runId: "run-1",
       });
@@ -657,12 +704,27 @@ describe("trusted flat run-envelope files", () => {
 
   it("publishes and reads one create-only retry reservation", async () => {
     const { sandbox, runsRoot } = await freshRoot();
+    const barrier = twoPartyPreLinkBarrier();
     try {
       const serialized = reservation();
-      const outcomes = await Promise.allSettled([
-        publishRetryReservation({ runsRoot, parentRunId: "parent", serialized }),
-        publishRetryReservation({ runsRoot, parentRunId: "parent", serialized }),
+      const pendingOutcomes = Promise.allSettled([
+        publishRetryReservation({
+          runsRoot,
+          parentRunId: "parent",
+          serialized,
+          hooks: { beforePublish: barrier.hook },
+        }),
+        publishRetryReservation({
+          runsRoot,
+          parentRunId: "parent",
+          serialized,
+          hooks: { beforePublish: barrier.hook },
+        }),
       ]);
+      await barrier.bothReady;
+      await expect(access(join(runsRoot, "retry-parent.json"))).rejects.toThrow();
+      barrier.release();
+      const outcomes = await pendingOutcomes;
       expect(outcomes.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
       expect(outcomes.find(({ status }) => status === "rejected")).toMatchObject({
         reason: {
@@ -678,9 +740,10 @@ describe("trusted flat run-envelope files", () => {
       });
       expect(await listTemporaryFiles(runsRoot)).toEqual([]);
     } finally {
+      barrier.release();
       await rm(sandbox, { recursive: true, force: true });
     }
-  });
+  }, 5_000);
 
   it("bounds reservation reads and rejects maximum-plus-one before reading", async () => {
     const { sandbox, runsRoot } = await freshRoot();
