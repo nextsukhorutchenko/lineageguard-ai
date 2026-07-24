@@ -21,6 +21,10 @@ export interface RenderedMigrationPackage {
   readonly files: Readonly<Record<MigrationArtifactFilename, string>>;
 }
 
+function renderLines(lines: readonly string[]): string {
+  return `${lines.join("\n")}\n`;
+}
+
 function renderOwnershipReviewerGates(context: ChangeContext): string {
   const downstreamUrns = [
     ...new Set(context.evidence.filter(({ kind }) => kind === "downstream").map(({ urn }) => urn)),
@@ -64,10 +68,54 @@ function templateFiles(context: ChangeContext): RenderedMigrationPackage["files"
   const markdownSource = markdownCodeSpan(source);
   const markdownTarget = markdownCodeSpan(target);
   return {
-    "migration-up.sql": `-- LineageGuard AI — NON-EXECUTABLE TEMPLATE\n-- DataHub dataset: ${identity}\n-- Evidence: ${evidenceIds}\n-- Confirm an exact Snowflake DATABASE.SCHEMA.TABLE before execution.\n-- Staged intent: add ${target}, backfill from ${source}, migrate downstream consumers, validate, then retire ${source}.\n`,
-    "migration-down.sql": `-- LineageGuard AI — NON-EXECUTABLE TEMPLATE\n-- Evidence: ${evidenceIds}\n-- Keep ${source} available during rollback.\n-- Remove ${target} only after a human confirms that no writes would be lost.\n`,
-    "validation.sql": `-- LineageGuard AI — NON-EXECUTABLE TEMPLATE\n-- Evidence: ${evidenceIds}\n-- Confirm the physical table, then check source existence, target existence, row counts, null counts, backfill completion, and sampled value equality.\n`,
-    "rollout-plan.md": `# Rollout Plan\n\n**Classification:** NON_EXECUTABLE_TEMPLATE\n\n**DataHub dataset:** ${markdownIdentity}\n\n**Decision:** ${context.advisoryDecision}\n\n**Evidence:** ${markdownEvidenceIds}\n\n## PR Review Summary\n\n- DataHub decision: ${context.advisoryDecision}.\n- Impact scope: ${context.evidence.filter(({ kind }) => kind === "downstream").length} visible downstream assets.\n- Package state: the physical Snowflake name is unconfirmed, so no SQL is executable.\n\n## Reviewer Gates\n\n${renderOwnershipReviewerGates(context)}\n\n1. Confirm the physical Snowflake \`DATABASE.SCHEMA.TABLE\`.\n2. Preserve ${markdownSource} and add ${markdownTarget}.\n3. Backfill and validate the target column.\n4. Coordinate the ${context.evidence.filter(({ kind }) => kind === "downstream").length} visible downstream assets.\n5. Migrate readers and writers before retiring the source column.\n6. Require human approval before every breaking step.\n7. Trigger rollback on mismatched values, unexpected nulls, or downstream errors.\n8. Complete only after validation passes, all ownership gaps are resolved, and required approvals are recorded.\n`,
+    "migration-up.sql": renderLines([
+      "-- LineageGuard AI — NON-EXECUTABLE TEMPLATE",
+      `-- DataHub dataset: ${identity}`,
+      `-- Evidence: ${evidenceIds}`,
+      "-- Confirm an exact Snowflake DATABASE.SCHEMA.TABLE before execution.",
+      `-- Staged intent: add ${target}, backfill from ${source}, migrate downstream consumers, validate, then retire ${source}.`,
+    ]),
+    "migration-down.sql": renderLines([
+      "-- LineageGuard AI — NON-EXECUTABLE TEMPLATE",
+      `-- Evidence: ${evidenceIds}`,
+      `-- Keep ${source} available during rollback.`,
+      `-- Remove ${target} only after a human confirms that no writes would be lost.`,
+    ]),
+    "validation.sql": renderLines([
+      "-- LineageGuard AI — NON-EXECUTABLE TEMPLATE",
+      `-- Evidence: ${evidenceIds}`,
+      "-- Confirm the physical table, then check source existence, target existence, row counts, null counts, backfill completion, and sampled value equality.",
+    ]),
+    "rollout-plan.md": renderLines([
+      "# Rollout Plan",
+      "",
+      "**Classification:** NON_EXECUTABLE_TEMPLATE",
+      "",
+      `**DataHub dataset:** ${markdownIdentity}`,
+      "",
+      `**Decision:** ${context.advisoryDecision}`,
+      "",
+      `**Evidence:** ${markdownEvidenceIds}`,
+      "",
+      "## PR Review Summary",
+      "",
+      `- DataHub decision: ${context.advisoryDecision}.`,
+      `- Impact scope: ${context.evidence.filter(({ kind }) => kind === "downstream").length} visible downstream assets.`,
+      "- Package state: the physical Snowflake name is unconfirmed, so no SQL is executable.",
+      "",
+      "## Reviewer Gates",
+      "",
+      renderOwnershipReviewerGates(context),
+      "",
+      "1. Confirm the physical Snowflake `DATABASE.SCHEMA.TABLE`.",
+      `2. Preserve ${markdownSource} and add ${markdownTarget}.`,
+      "3. Backfill and validate the target column.",
+      `4. Coordinate the ${context.evidence.filter(({ kind }) => kind === "downstream").length} visible downstream assets.`,
+      "5. Migrate readers and writers before retiring the source column.",
+      "6. Require human approval before every breaking step.",
+      "7. Trigger rollback on mismatched values, unexpected nulls, or downstream errors.",
+      "8. Complete only after validation passes, all ownership gaps are resolved, and required approvals are recorded.",
+    ]),
   };
 }
 
@@ -106,21 +154,102 @@ export function renderMigrationPackage(
     return {
       classification: draft.executionClassification,
       files: {
-        "migration-up.sql": `-- Evidence: ${evidenceIds}\nALTER TABLE ${table} RENAME COLUMN ${source} TO ${target};\n`,
-        "migration-down.sql": `-- Evidence: ${evidenceIds}\nALTER TABLE ${table} RENAME COLUMN ${target} TO ${source};\n`,
-        "validation.sql": `-- Evidence: ${evidenceIds}\n-- PRE-MIGRATION: confirm ${source} exists and ${target} does not.\nSHOW COLUMNS IN TABLE ${table};\n-- POST-MIGRATION: confirm the renamed target and stable row population.\nSELECT COUNT(*) AS row_count, COUNT_IF(${target} IS NULL) AS target_null_count FROM ${table};\n`,
-        "rollout-plan.md": `# Rollout Plan\n\n**Classification:** ${draft.executionClassification}\n\n**Evidence:** ${markdownEvidenceIds}\n\n## PR Review Summary\n\n- DataHub decision: ${context.advisoryDecision}.\n- Impact scope: ${context.evidence.filter(({ kind }) => kind === "downstream").length} visible downstream assets.\n- Package state: direct rename is reviewable only after every deterministic gate passes.\n\n## Reviewer Gates\n\n${renderOwnershipReviewerGates(context)}\n\n1. Obtain human approval.\n2. Pause dependent deployments.\n3. Run the forward rename.\n4. Run validation.\n5. Roll back by renaming the target only if validation fails before downstream cutover.\n6. Complete only after validation passes, all ownership gaps are resolved, and required approvals are recorded.\n`,
+        "migration-up.sql": renderLines([
+          `-- Evidence: ${evidenceIds}`,
+          `ALTER TABLE ${table} RENAME COLUMN ${source} TO ${target};`,
+        ]),
+        "migration-down.sql": renderLines([
+          `-- Evidence: ${evidenceIds}`,
+          `ALTER TABLE ${table} RENAME COLUMN ${target} TO ${source};`,
+        ]),
+        "validation.sql": renderLines([
+          `-- Evidence: ${evidenceIds}`,
+          `-- PRE-MIGRATION: confirm ${source} exists and ${target} does not.`,
+          `SHOW COLUMNS IN TABLE ${table};`,
+          "-- POST-MIGRATION: confirm the renamed target and stable row population.",
+          `SELECT COUNT(*) AS row_count, COUNT_IF(${target} IS NULL) AS target_null_count FROM ${table};`,
+        ]),
+        "rollout-plan.md": renderLines([
+          "# Rollout Plan",
+          "",
+          `**Classification:** ${draft.executionClassification}`,
+          "",
+          `**Evidence:** ${markdownEvidenceIds}`,
+          "",
+          "## PR Review Summary",
+          "",
+          `- DataHub decision: ${context.advisoryDecision}.`,
+          `- Impact scope: ${context.evidence.filter(({ kind }) => kind === "downstream").length} visible downstream assets.`,
+          "- Package state: direct rename is reviewable only after every deterministic gate passes.",
+          "",
+          "## Reviewer Gates",
+          "",
+          renderOwnershipReviewerGates(context),
+          "",
+          "1. Obtain human approval.",
+          "2. Pause dependent deployments.",
+          "3. Run the forward rename.",
+          "4. Run validation.",
+          "5. Roll back by renaming the target only if validation fails before downstream cutover.",
+          "6. Complete only after validation passes, all ownership gaps are resolved, and required approvals are recorded.",
+        ]),
       },
     };
   }
 
+  const sqlPreamble =
+    draft.executionClassification === "ADVISORY_ONLY"
+      ? ["-- ADVISORY ONLY — HUMAN APPROVAL REQUIRED", `-- Evidence: ${evidenceIds}`]
+      : [`-- Evidence: ${evidenceIds}`];
   return {
     classification: draft.executionClassification,
     files: {
-      "migration-up.sql": `-- ${draft.executionClassification === "ADVISORY_ONLY" ? "ADVISORY ONLY — HUMAN APPROVAL REQUIRED\n-- " : ""}Evidence: ${evidenceIds}\n-- Staged migration; human review is required.\nALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${target} ${nativeType};\nUPDATE ${table} SET ${target} = ${source} WHERE ${target} IS NULL;\n`,
-      "migration-down.sql": `-- ${draft.executionClassification === "ADVISORY_ONLY" ? "ADVISORY ONLY — HUMAN APPROVAL REQUIRED\n-- " : ""}Evidence: ${evidenceIds}\n-- Rollback requires review of target-only writes.\n-- ALTER TABLE ${table} DROP COLUMN IF EXISTS ${target};\n`,
-      "validation.sql": `-- ${draft.executionClassification === "ADVISORY_ONLY" ? "ADVISORY ONLY — HUMAN APPROVAL REQUIRED\n-- " : ""}Evidence: ${evidenceIds}\n-- PRE-MIGRATION: confirm ${source} exists and ${target} does not.\nSHOW COLUMNS IN TABLE ${table};\n-- POST-MIGRATION: confirm source preservation, backfill completion, null counts, and sampled equality.\nSELECT COUNT(*) AS row_count, COUNT_IF(${source} IS NULL) AS source_null_count, COUNT_IF(${target} IS NULL) AS target_null_count, COUNT_IF(${source} IS DISTINCT FROM ${target}) AS mismatched_count FROM ${table};\n`,
-      "rollout-plan.md": `# Rollout Plan\n\n**Classification:** ${draft.executionClassification}\n\n**Decision:** ${context.advisoryDecision}\n\n**Evidence:** ${markdownEvidenceIds}\n\n## PR Review Summary\n\n- DataHub decision: ${context.advisoryDecision}.\n- Impact scope: ${context.evidence.filter(({ kind }) => kind === "downstream").length} visible downstream assets.\n- Package state: staged compatibility requires owner coordination and human approval.\n\n## Reviewer Gates\n\n${renderOwnershipReviewerGates(context)}\n\n1. Confirm ownership and obtain human approval.\n2. Add ${markdownCodeSpan(context.intent.targetColumn)} while retaining ${markdownCodeSpan(context.sourceField.fieldPath)}.\n3. Backfill existing rows and dual-write new changes.\n4. Coordinate every evidenced downstream consumer.\n5. Run \`validation.sql\` and require zero mismatches.\n6. Migrate readers before considering source-column retirement.\n7. Trigger rollback on mismatched values, unexpected nulls, or downstream errors; keep the source and remove the target only after data review.\n8. Complete only after validation passes, all ownership gaps are resolved, and required approvals are recorded.\n`,
+      "migration-up.sql": renderLines([
+        ...sqlPreamble,
+        "-- Staged migration; human review is required.",
+        `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${target} ${nativeType};`,
+        `UPDATE ${table} SET ${target} = ${source} WHERE ${target} IS NULL;`,
+      ]),
+      "migration-down.sql": renderLines([
+        ...sqlPreamble,
+        "-- Rollback requires review of target-only writes.",
+        `-- ALTER TABLE ${table} DROP COLUMN IF EXISTS ${target};`,
+      ]),
+      "validation.sql": renderLines([
+        ...sqlPreamble,
+        `-- PRE-MIGRATION: confirm ${source} exists and ${target} does not.`,
+        `SHOW COLUMNS IN TABLE ${table};`,
+        "-- POST-MIGRATION: confirm source preservation, backfill completion, null counts, and sampled equality.",
+        `SELECT COUNT(*) AS row_count, COUNT_IF(${source} IS NULL) AS source_null_count, COUNT_IF(${target} IS NULL) AS target_null_count, COUNT_IF(${source} IS DISTINCT FROM ${target}) AS mismatched_count FROM ${table};`,
+      ]),
+      "rollout-plan.md": renderLines([
+        "# Rollout Plan",
+        "",
+        `**Classification:** ${draft.executionClassification}`,
+        "",
+        `**Decision:** ${context.advisoryDecision}`,
+        "",
+        `**Evidence:** ${markdownEvidenceIds}`,
+        "",
+        "## PR Review Summary",
+        "",
+        `- DataHub decision: ${context.advisoryDecision}.`,
+        `- Impact scope: ${context.evidence.filter(({ kind }) => kind === "downstream").length} visible downstream assets.`,
+        "- Package state: staged compatibility requires owner coordination and human approval.",
+        "",
+        "## Reviewer Gates",
+        "",
+        renderOwnershipReviewerGates(context),
+        "",
+        "1. Confirm ownership and obtain human approval.",
+        `2. Add ${markdownCodeSpan(context.intent.targetColumn)} while retaining ${markdownCodeSpan(context.sourceField.fieldPath)}.`,
+        "3. Backfill existing rows and dual-write new changes.",
+        "4. Coordinate every evidenced downstream consumer.",
+        "5. Run `validation.sql` and require zero mismatches.",
+        "6. Migrate readers before considering source-column retirement.",
+        "7. Trigger rollback on mismatched values, unexpected nulls, or downstream errors; keep the source and remove the target only after data review.",
+        "8. Complete only after validation passes, all ownership gaps are resolved, and required approvals are recorded.",
+      ]),
     },
   };
 }

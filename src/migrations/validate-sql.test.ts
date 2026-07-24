@@ -11,6 +11,15 @@ it("accepts the deterministic Snowflake staged statements", () => {
   ).toEqual([]);
 });
 
+it.each([
+  'ALTER TABLE "DB"."PUBLIC"."T" RENAME COLUMN "A" TO "B";',
+  'SHOW COLUMNS IN TABLE "DB"."PUBLIC"."T";',
+  'SELECT COUNT(*) AS row_count, COUNT_IF("B" IS NULL) AS target_null_count FROM "DB"."PUBLIC"."T";',
+  'SELECT COUNT(*) AS row_count, COUNT_IF("A" IS NULL) AS source_null_count, COUNT_IF("B" IS NULL) AS target_null_count, COUNT_IF("A" IS DISTINCT FROM "B") AS mismatched_count FROM "DB"."PUBLIC"."T";',
+])("accepts supported rendered statement shape %s", (sql) => {
+  expect(validateSqlArtifact("validation.sql", sql, "EXECUTABLE_WITH_REVIEW")).toEqual([]);
+});
+
 it.each(["DROP TABLE x;", "TRUNCATE TABLE x;", "DELETE FROM x;"])(
   "rejects prohibited statement %s",
   (sql) => {
@@ -19,6 +28,22 @@ it.each(["DROP TABLE x;", "TRUNCATE TABLE x;", "DELETE FROM x;"])(
     );
   },
 );
+
+it.each([
+  'ALTER TABLE "DB"."PUBLIC"."T" DROP COLUMN "A";',
+  'ALTER TABLE "DB"."PUBLIC"."T" RENAME TO "OTHER";',
+  'ALTER TABLE "DB"."PUBLIC"."T" ALTER COLUMN "A" SET NOT NULL;',
+  'ALTER TABLE "DB"."PUBLIC"."T" ADD COLUMN "B" NUMBER(38,0);',
+  'UPDATE "DB"."PUBLIC"."T" SET "B" = 1 WHERE "B" IS NULL;',
+  'UPDATE "DB"."PUBLIC"."T" SET "B" = "A";',
+  'UPDATE "DB"."PUBLIC"."T" SET "B" = "A" WHERE "A" IS NULL;',
+  'SELECT * FROM "DB"."PUBLIC"."T";',
+  'SELECT COUNT(*) FROM "DB"."PUBLIC"."T";',
+])("rejects unsupported statement shape %s", (sql) => {
+  expect(validateSqlArtifact("migration-up.sql", sql, "ADVISORY_ONLY")).toContainEqual(
+    expect.objectContaining({ code: "PROHIBITED_SQL" }),
+  );
+});
 
 describe("SQL classification safety", () => {
   it("accepts comments only for a non-executable template", () => {
@@ -51,7 +76,7 @@ describe("SQL classification safety", () => {
     ).toContainEqual(expect.objectContaining({ code: "PROHIBITED_SQL" }));
   });
 
-  it("reports parser failure without changing the supplied classification", () => {
+  it("rejects an unsupported shape before parser success can matter", () => {
     const findings = validateSqlArtifact(
       "migration-up.sql",
       'ALTER TABLE "DB"."PUBLIC"."T" INVALID SNOWFLAKE SYNTAX;',
@@ -60,8 +85,8 @@ describe("SQL classification safety", () => {
 
     expect(findings).toEqual([
       {
-        code: "SNOWFLAKE_PARSE_FAILED",
-        message: "SQL parser rejected the statement.",
+        code: "PROHIBITED_SQL",
+        message: "SQL is outside the exact statement allowlist.",
         filename: "migration-up.sql",
       },
     ]);

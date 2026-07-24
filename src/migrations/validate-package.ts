@@ -1,10 +1,16 @@
 import type { ChangeContext } from "../workflow/change-context.js";
 import type { MigrationPackageDraft } from "../workflow/migration-draft.js";
+import { markdownCodeSpan } from "../security/markdown-output.js";
 import type {
   MigrationArtifactFilename,
   RenderedMigrationPackage,
 } from "./render-snowflake-package.js";
-import { validateSqlArtifact, type PackageFinding } from "./validate-sql.js";
+import {
+  executableSqlStatements,
+  parseSnowflakeRenameStatement,
+  validateSqlArtifact,
+  type PackageFinding,
+} from "./validate-sql.js";
 
 const requiredArtifacts = [
   "migration-up.sql",
@@ -17,18 +23,54 @@ function countExactHeading(markdown: string, heading: string): number {
   return markdown.split("\n").filter((line) => line === heading).length;
 }
 
+function hasExactEvidenceCitation(
+  filename: MigrationArtifactFilename,
+  content: string,
+  contextEvidenceIds: readonly string[],
+  validDraftEvidenceIds: readonly string[],
+): boolean {
+  if (validDraftEvidenceIds.length === 0) return false;
+  const lines = new Set(content.split("\n"));
+  if (filename === "rollout-plan.md") {
+    const contextCodeSpans = contextEvidenceIds.map(markdownCodeSpan);
+    const draftCodeSpans = validDraftEvidenceIds.map(markdownCodeSpan);
+    return (
+      lines.has(`**Evidence:** ${contextCodeSpans.join(", ")}`) ||
+      lines.has(`**Evidence:** ${draftCodeSpans.join(", ")}`) ||
+      draftCodeSpans.some((codeSpan) => lines.has(`**Evidence:** ${codeSpan}`))
+    );
+  }
+  return (
+    lines.has(`-- Evidence: ${contextEvidenceIds.join(", ")}`) ||
+    lines.has(`-- Evidence: ${validDraftEvidenceIds.join(", ")}`) ||
+    validDraftEvidenceIds.some((id) => lines.has(`-- Evidence: ${id}`))
+  );
+}
+
 export function validatePackage(
   context: ChangeContext,
   draft: MigrationPackageDraft,
   rendered: RenderedMigrationPackage,
 ): readonly PackageFinding[] {
   const findings: PackageFinding[] = [];
-  const contextEvidenceIds = new Set(context.evidence.map(({ id }) => id));
+  const orderedContextEvidenceIds = context.evidence.map(({ id }) => id);
+  const contextEvidenceIds = new Set(orderedContextEvidenceIds);
   const validDraftEvidenceIds = draft.evidenceIds.filter((id) => contextEvidenceIds.has(id));
+  const runtimeFiles: Readonly<Record<string, unknown>> =
+    rendered.files !== null && typeof rendered.files === "object" && !Array.isArray(rendered.files)
+      ? (rendered.files as unknown as Readonly<Record<string, unknown>>)
+      : {};
+  const requiredArtifactSet = new Set<string>(requiredArtifacts);
+  if (Object.keys(runtimeFiles).some((filename) => !requiredArtifactSet.has(filename))) {
+    findings.push({
+      code: "UNKNOWN_ARTIFACT",
+      message: "The package contains a filename outside the artifact allowlist.",
+    });
+  }
 
   for (const filename of requiredArtifacts) {
-    const content = rendered.files[filename] as string | undefined;
-    if (content === undefined || content.trim().length === 0) {
+    const unsafeContent = runtimeFiles[filename];
+    if (typeof unsafeContent !== "string" || unsafeContent.trim().length === 0) {
       findings.push({
         code: "MISSING_ARTIFACT",
         message: `${filename} is required.`,
@@ -36,7 +78,14 @@ export function validatePackage(
       });
       continue;
     }
-    if (!validDraftEvidenceIds.some((id) => content.includes(id))) {
+    if (
+      !hasExactEvidenceCitation(
+        filename,
+        unsafeContent,
+        orderedContextEvidenceIds,
+        validDraftEvidenceIds,
+      )
+    ) {
       findings.push({
         code: "EVIDENCE_CITATION_MISSING",
         message: `${filename} must cite grounded evidence.`,
@@ -45,13 +94,20 @@ export function validatePackage(
     }
   }
 
+  if (rendered.classification !== draft.executionClassification) {
+    findings.push({
+      code: "CLASSIFICATION_MISMATCH",
+      message: "Rendered classification must match the validated draft.",
+    });
+  }
+
   if (
-    context.advisoryDecision === "BLOCK_DIRECT_RENAME" &&
+    context.advisoryDecision !== "PROCEED_WITH_REVIEW" &&
     rendered.classification === "EXECUTABLE_WITH_REVIEW"
   ) {
     findings.push({
       code: "RISK_CLASSIFICATION_MISMATCH",
-      message: "Critical risk cannot be executable.",
+      message: "Risk policy does not permit executable output.",
     });
   }
 
@@ -59,8 +115,8 @@ export function validatePackage(
     const hasSqlPlaceholder = (
       ["migration-up.sql", "migration-down.sql", "validation.sql"] as const
     ).some((filename) => {
-      const content = rendered.files[filename] as string | undefined;
-      return content !== undefined && /<[A-Z][A-Z0-9_-]*>/u.test(content);
+      const content = runtimeFiles[filename];
+      return typeof content === "string" && /<[A-Z][A-Z0-9_-]*>/u.test(content);
     });
     if (hasSqlPlaceholder) {
       findings.push({
@@ -70,16 +126,53 @@ export function validatePackage(
     }
   }
 
-  const downSql = rendered.files["migration-down.sql"] as string | undefined;
-  if (draft.strategy === "DIRECT_RENAME" && !downSql?.includes("RENAME COLUMN")) {
-    findings.push({
-      code: "ROLLBACK_MISMATCH",
-      message: "Direct rename requires a reverse rename.",
-    });
+  if (rendered.classification !== "NON_EXECUTABLE_TEMPLATE") {
+    const executableRequired = [
+      "migration-up.sql",
+      "validation.sql",
+      ...(draft.strategy === "DIRECT_RENAME" ? (["migration-down.sql"] as const) : []),
+    ] as const;
+    for (const filename of executableRequired) {
+      const content = runtimeFiles[filename];
+      if (typeof content === "string" && executableSqlStatements(content).length === 0) {
+        findings.push({
+          code: "MISSING_EXECUTABLE_SQL",
+          message: `${filename} requires executable SQL for this strategy.`,
+          filename,
+        });
+      }
+    }
   }
 
-  const rollout = rendered.files["rollout-plan.md"] as string | undefined;
-  if (rollout !== undefined && rollout.trim().length > 0) {
+  if (draft.strategy === "DIRECT_RENAME") {
+    const upSql = runtimeFiles["migration-up.sql"];
+    const downSql = runtimeFiles["migration-down.sql"];
+    const forwardStatements = typeof upSql === "string" ? executableSqlStatements(upSql) : [];
+    const rollbackStatements = typeof downSql === "string" ? executableSqlStatements(downSql) : [];
+    const forward =
+      forwardStatements.length === 1
+        ? parseSnowflakeRenameStatement(forwardStatements[0]!)
+        : undefined;
+    const rollback =
+      rollbackStatements.length === 1
+        ? parseSnowflakeRenameStatement(rollbackStatements[0]!)
+        : undefined;
+    if (
+      forward === undefined ||
+      rollback === undefined ||
+      forward.table !== rollback.table ||
+      forward.source !== rollback.target ||
+      forward.target !== rollback.source
+    ) {
+      findings.push({
+        code: "ROLLBACK_MISMATCH",
+        message: "Direct rename requires one exact inverse rename.",
+      });
+    }
+  }
+
+  const rollout = runtimeFiles["rollout-plan.md"];
+  if (typeof rollout === "string" && rollout.trim().length > 0) {
     for (const heading of ["## PR Review Summary", "## Reviewer Gates"] as const) {
       const count = countExactHeading(rollout, heading);
       if (count === 0) {
@@ -99,8 +192,8 @@ export function validatePackage(
   }
 
   for (const filename of ["migration-up.sql", "migration-down.sql", "validation.sql"] as const) {
-    const content = rendered.files[filename] as string | undefined;
-    if (content !== undefined) {
+    const content = runtimeFiles[filename];
+    if (typeof content === "string") {
       findings.push(...validateSqlArtifact(filename, content, rendered.classification));
     }
   }

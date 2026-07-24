@@ -21,6 +21,18 @@ function directDraft(context: ChangeContext): MigrationPackageDraft {
   };
 }
 
+function templateDraft(context: ChangeContext): MigrationPackageDraft {
+  return {
+    ...makeMigrationDraft(context),
+    strategy: "NON_EXECUTABLE_TEMPLATE",
+    executionClassification: "NON_EXECUTABLE_TEMPLATE",
+    rationale: "PLATFORM_OR_OBJECT_NAME_UNCONFIRMED",
+    stages: ["PREPARE"],
+    rollback: "MANUAL_ROLLBACK_REQUIRED",
+    warnings: ["PHYSICAL_OBJECT_NAME_UNCONFIRMED", "HUMAN_APPROVAL_REQUIRED"],
+  };
+}
+
 function replaceFile(
   rendered: RenderedMigrationPackage,
   filename: MigrationArtifactFilename,
@@ -47,12 +59,23 @@ function packageFor(mode: "template" | "direct" | "staged"): {
         : "ORDER_ENTRY_DB.ANALYTICS.ORDER_DETAILS",
     score: mode === "direct" ? 20 : 90,
   });
-  const draft = mode === "direct" ? directDraft(context) : makeMigrationDraft(context);
+  const draft =
+    mode === "direct"
+      ? directDraft(context)
+      : mode === "template"
+        ? templateDraft(context)
+        : makeMigrationDraft(context);
   return { context, draft, rendered: renderMigrationPackage(context, draft) };
 }
 
 it("accepts the golden non-executable four-file template", () => {
   const { context, draft, rendered } = packageFor("template");
+
+  expect(validatePackage(context, draft, rendered)).toEqual([]);
+});
+
+it.each(["direct", "staged"] as const)("accepts a complete rendered %s package", (mode) => {
+  const { context, draft, rendered } = packageFor(mode);
 
   expect(validatePackage(context, draft, rendered)).toEqual([]);
 });
@@ -94,6 +117,111 @@ it.each(["migration-up.sql", "migration-down.sql", "validation.sql", "rollout-pl
     ).toContainEqual(expect.objectContaining({ code: "EVIDENCE_CITATION_MISSING", filename }));
   },
 );
+
+it("accepts exact context citations when the validated draft references a subset", () => {
+  const { context, draft, rendered } = packageFor("staged");
+  const subsetDraft = {
+    ...draft,
+    evidenceIds: draft.evidenceIds.slice(0, 2),
+  };
+
+  expect(
+    validatePackage(context, subsetDraft, rendered).filter(
+      ({ code }) => code === "EVIDENCE_CITATION_MISSING",
+    ),
+  ).toEqual([]);
+});
+
+it.each([
+  {
+    filename: "migration-up.sql",
+    content: "-- Evidence: datahub:target-dataset-suffix\n",
+  },
+  {
+    filename: "migration-down.sql",
+    content: "-- Evidence: prefixdatahub:target-dataset\n",
+  },
+  {
+    filename: "rollout-plan.md",
+    content:
+      "# Rollout Plan\n\n**Evidence:** ` datahub:target-dataset-suffix `\n\n## PR Review Summary\n\nNone.\n\n## Reviewer Gates\n\nNone.\n",
+  },
+] as const)("rejects non-exact evidence token in $filename", ({ filename, content }) => {
+  const { context, draft, rendered } = packageFor("template");
+
+  expect(validatePackage(context, draft, replaceFile(rendered, filename, content))).toContainEqual(
+    expect.objectContaining({ code: "EVIDENCE_CITATION_MISSING", filename }),
+  );
+});
+
+it("rejects an unknown runtime artifact key", () => {
+  const { context, draft, rendered } = packageFor("template");
+  const invalid = {
+    ...rendered,
+    files: {
+      ...rendered.files,
+      "unexpected.sql": "-- Evidence: datahub:target-dataset\n",
+    },
+  } as unknown as RenderedMigrationPackage;
+
+  expect(validatePackage(context, draft, invalid)).toContainEqual(
+    expect.objectContaining({ code: "UNKNOWN_ARTIFACT" }),
+  );
+});
+
+it("fails closed when the runtime artifact collection is not an object", () => {
+  const { context, draft, rendered } = packageFor("template");
+  const invalid = {
+    ...rendered,
+    files: null,
+  } as unknown as RenderedMigrationPackage;
+
+  expect(() => validatePackage(context, draft, invalid)).not.toThrow();
+  expect(validatePackage(context, draft, invalid)).toContainEqual(
+    expect.objectContaining({ code: "MISSING_ARTIFACT" }),
+  );
+});
+
+it("rejects a missing runtime artifact key", () => {
+  const { context, draft, rendered } = packageFor("template");
+  const files: Partial<Record<MigrationArtifactFilename, string>> = {
+    ...rendered.files,
+  };
+  delete files["validation.sql"];
+  const invalid = { ...rendered, files } as unknown as RenderedMigrationPackage;
+
+  expect(validatePackage(context, draft, invalid)).toContainEqual(
+    expect.objectContaining({ code: "MISSING_ARTIFACT", filename: "validation.sql" }),
+  );
+});
+
+it("requires the rendered and validated draft classifications to match", () => {
+  const { context, draft, rendered } = packageFor("direct");
+  const invalid = { ...rendered, classification: "ADVISORY_ONLY" as const };
+
+  expect(validatePackage(context, draft, invalid)).toContainEqual(
+    expect.objectContaining({ code: "CLASSIFICATION_MISMATCH" }),
+  );
+});
+
+it("never upgrades manual-approval risk to executable", () => {
+  const context = makeChangeContext({
+    datasetName: "ORDER_ENTRY_DB.ANALYTICS.ORDER_DETAILS",
+    score: 50,
+  });
+  const draft = makeMigrationDraft(context);
+  const rendered = {
+    ...renderMigrationPackage(context, draft),
+    classification: "EXECUTABLE_WITH_REVIEW" as const,
+  };
+
+  expect(validatePackage(context, draft, rendered)).toContainEqual(
+    expect.objectContaining({
+      code: "RISK_CLASSIFICATION_MISMATCH",
+      message: "Risk policy does not permit executable output.",
+    }),
+  );
+});
 
 it("rejects an executable classification for critical risk", () => {
   const { context, draft, rendered } = packageFor("staged");
@@ -138,11 +266,67 @@ it("requires a reverse rename for a direct-rename rollback", () => {
   const invalid = replaceFile(
     rendered,
     "migration-down.sql",
-    "-- Evidence: datahub:target-dataset\n-- Manual rollback only.\n",
+    "-- Evidence: datahub:target-dataset\n-- RENAME COLUMN is a manual rollback note only.\n",
   );
 
   expect(validatePackage(context, draft, invalid)).toContainEqual(
     expect.objectContaining({ code: "ROLLBACK_MISMATCH" }),
+  );
+});
+
+it("requires the direct rollback rename to be the exact inverse", () => {
+  const { context, draft, rendered } = packageFor("direct");
+  const invalid = replaceFile(
+    rendered,
+    "migration-down.sql",
+    '-- Evidence: datahub:target-dataset\nALTER TABLE "ORDER_ENTRY_DB"."ANALYTICS"."ORDER_DETAILS" RENAME COLUMN "customer_key" TO "different_source";\n',
+  );
+
+  expect(validatePackage(context, draft, invalid)).toContainEqual(
+    expect.objectContaining({ code: "ROLLBACK_MISMATCH" }),
+  );
+});
+
+it.each(["migration-up.sql", "validation.sql"] as const)(
+  "requires executable statements in direct artifact %s",
+  (filename) => {
+    const { context, draft, rendered } = packageFor("direct");
+    const invalid = replaceFile(
+      rendered,
+      filename,
+      "-- Evidence: datahub:target-dataset\n-- Review only.\n",
+    );
+
+    expect(validatePackage(context, draft, invalid)).toContainEqual(
+      expect.objectContaining({ code: "MISSING_EXECUTABLE_SQL", filename }),
+    );
+  },
+);
+
+it("requires an executable statement in a direct rollback artifact", () => {
+  const { context, draft, rendered } = packageFor("direct");
+  const invalid = replaceFile(
+    rendered,
+    "migration-down.sql",
+    "-- Evidence: datahub:target-dataset\n-- RENAME COLUMN is not executable.\n",
+  );
+
+  expect(validatePackage(context, draft, invalid)).toContainEqual(
+    expect.objectContaining({
+      code: "MISSING_EXECUTABLE_SQL",
+      filename: "migration-down.sql",
+    }),
+  );
+});
+
+it("allows a staged rollback to remain an explicit advisory comment", () => {
+  const { context, draft, rendered } = packageFor("staged");
+
+  expect(validatePackage(context, draft, rendered)).not.toContainEqual(
+    expect.objectContaining({
+      code: "MISSING_EXECUTABLE_SQL",
+      filename: "migration-down.sql",
+    }),
   );
 });
 

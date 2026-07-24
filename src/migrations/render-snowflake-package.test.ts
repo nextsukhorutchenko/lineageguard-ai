@@ -318,7 +318,12 @@ it.each([
     for (const { id } of context.evidence) expect(rollout).toContain(id);
     expect(countHeading(rollout, "## PR Review Summary")).toBe(1);
     expect(countHeading(rollout, "## Reviewer Gates")).toBe(1);
-    expect(result.files["migration-up.sql"]).not.toContain("\r");
-    expect(result.files["migration-up.sql"].split("\n")).toHaveLength(6);
+    const evidenceLine = `-- Evidence: ${context.evidence.map(({ id }) => id).join(", ")}`;
+    for (const filename of ["migration-up.sql", "migration-down.sql", "validation.sql"] as const) {
+      const sql = result.files[filename];
+      expect(sql).not.toContain("\r");
+      expect(sql).not.toContain("\u001b");
+      expect(sql.split("\n")).toContain(evidenceLine);
+    }
   },
 );
