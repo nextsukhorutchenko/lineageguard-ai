@@ -11,6 +11,7 @@ import { AppError } from "../errors/app-error.js";
 import type { RenderedMigrationPackage } from "../migrations/render-snowflake-package.js";
 import type { PackageFinding } from "../migrations/validate-sql.js";
 import { sanitizeValidationFindings } from "../security/sanitize-validation-findings.js";
+import { sanitizeBoundaryText } from "../security/sanitize-output.js";
 import {
   ChangeContextSchema,
   hashChangeContext,
@@ -71,6 +72,21 @@ export interface ReservedChildRun {
   readonly [reservedChildBrand]: true;
 }
 
+interface ReservationFieldCandidate {
+  readonly canonicalRunsRoot: unknown;
+  readonly parentRunId: unknown;
+  readonly childRunId: unknown;
+  readonly childMode: unknown;
+  readonly generationAttempt: unknown;
+}
+
+interface ExpectedReservationFields {
+  readonly canonicalRunsRoot: string;
+  readonly parentRunId: string;
+  readonly childRunId: string;
+  readonly childMode: DemoMode;
+}
+
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
@@ -114,6 +130,42 @@ function assertContextIntegrity(context: ChangeContext): void {
   if (hashChangeContext(payload) !== contextHash) throw new Error("Context hash mismatch.");
 }
 
+function assertSnapshotStringsAreBoundarySafe(
+  snapshot: WorkflowSnapshot,
+  secrets: readonly string[],
+): void {
+  const pending: unknown[] = [snapshot];
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (typeof value === "string") {
+      if (sanitizeBoundaryText(value, secrets, Number.MAX_SAFE_INTEGER) !== value) {
+        throw new Error("Snapshot string is not boundary-safe.");
+      }
+      continue;
+    }
+    if (Array.isArray(value)) {
+      pending.push(...value);
+      continue;
+    }
+    if (value !== null && typeof value === "object") {
+      pending.push(...Object.values(value));
+    }
+  }
+}
+
+function reservationFieldsMatch(
+  candidate: ReservationFieldCandidate,
+  expected: ExpectedReservationFields,
+): boolean {
+  return (
+    candidate.canonicalRunsRoot === expected.canonicalRunsRoot &&
+    candidate.parentRunId === expected.parentRunId &&
+    candidate.childRunId === expected.childRunId &&
+    candidate.childMode === expected.childMode &&
+    candidate.generationAttempt === 2
+  );
+}
+
 async function generationAttemptForSnapshot(
   runsRoot: string,
   runId: string,
@@ -136,11 +188,12 @@ async function generationAttemptForSnapshot(
   }
   if (
     reservedChild[reservedChildBrand] !== true ||
-    reservedChild.canonicalRunsRoot !== canonicalRunsRoot ||
-    reservedChild.parentRunId !== snapshot.parentRunId ||
-    reservedChild.childRunId !== runId ||
-    reservedChild.childMode !== snapshot.mode ||
-    reservedChild.generationAttempt !== 2
+    !reservationFieldsMatch(reservedChild, {
+      canonicalRunsRoot,
+      parentRunId: snapshot.parentRunId,
+      childRunId: runId,
+      childMode: snapshot.mode,
+    })
   ) {
     throw invalidReservation();
   }
@@ -180,6 +233,7 @@ async function buildCompletedEnvelope(input: {
   const draft = MigrationPackageDraftSchema.parse(input.draft);
   const rendered = RenderedMigrationPackageSchema.parse(input.rendered);
   const uncommittedSnapshot = WorkflowSnapshotSchema.parse(input.snapshot);
+  assertSnapshotStringsAreBoundarySafe(uncommittedSnapshot, []);
   if (
     uncommittedSnapshot.status !== "COMPLETED" ||
     uncommittedSnapshot.runId !== input.runId ||
@@ -239,6 +293,7 @@ async function buildFailedEnvelope(input: {
   const findings = [...sanitizeValidationFindings(input.findings ?? [], input.secrets)];
   PersistedFindingsSchema.parse(findings);
   const snapshot = WorkflowSnapshotSchema.parse(input.snapshot);
+  assertSnapshotStringsAreBoundarySafe(snapshot, input.secrets);
   const summary = validationSummary(findings);
   if (
     snapshot.status === "COMPLETED" ||
@@ -473,3 +528,7 @@ export async function reserveGenerationRetry(input: {
     throw invalidRegenerationParent();
   }
 }
+
+export const __testOnly = Object.freeze({
+  reservationFieldsMatch,
+});

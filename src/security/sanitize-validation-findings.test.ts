@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { PersistedFindingSchema } from "../runs/run-envelope.js";
-import { sanitizeValidationFindings } from "./sanitize-validation-findings.js";
+import {
+  MAX_RAW_VALIDATION_FINDINGS,
+  sanitizeValidationFindings,
+} from "./sanitize-validation-findings.js";
 
 describe("sanitizeValidationFindings", () => {
   it("rebuilds a closed, secret-free finding that satisfies the persisted schema", () => {
@@ -129,5 +132,37 @@ describe("sanitizeValidationFindings", () => {
     expect(result[0]?.message).toBe("Finding 000");
     expect(result.at(-1)?.message).toBe("Finding 199");
     expect(() => result.forEach((finding) => PersistedFindingSchema.parse(finding))).not.toThrow();
+  });
+
+  it("accepts the exact raw input boundary and still inspects its last item", () => {
+    const findings = Array.from({ length: MAX_RAW_VALIDATION_FINDINGS }, (_, index) => ({
+      code: index === MAX_RAW_VALIDATION_FINDINGS - 1 ? "A_LAST_ITEM" : "Z_VALID_FINDING",
+      message: `Finding ${index.toString().padStart(4, "0")}`,
+      filename: "validation.sql",
+    }));
+
+    const result = sanitizeValidationFindings(findings, []);
+
+    expect(result).toHaveLength(200);
+    expect(result[0]).toEqual({
+      code: "A_LAST_ITEM",
+      message: `Finding ${(MAX_RAW_VALIDATION_FINDINGS - 1).toString().padStart(4, "0")}`,
+      filename: "validation.sql",
+    });
+  });
+
+  it("fails closed at raw maximum plus one without reading a hostile element", () => {
+    let elementReads = 0;
+    const findings = new Array<unknown>(MAX_RAW_VALIDATION_FINDINGS + 1);
+    Object.defineProperty(findings, 0, {
+      configurable: true,
+      get() {
+        elementReads += 1;
+        throw new Error("hostile element getter");
+      },
+    });
+
+    expect(sanitizeValidationFindings(findings, [])).toEqual([]);
+    expect(elementReads).toBe(0);
   });
 });

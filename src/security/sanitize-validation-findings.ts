@@ -11,11 +11,13 @@ const findingFilenames = new Set<MigrationArtifactFilename>([
 ]);
 const findingKeys = new Set<PropertyKey>(["code", "message", "filename"]);
 
+export const MAX_RAW_VALIDATION_FINDINGS = 1_000;
+
 export function sanitizeValidationFindings(
   findings: readonly unknown[],
   secrets: readonly string[],
 ): readonly PackageFinding[] {
-  if (!Array.isArray(findings)) return [];
+  if (!Array.isArray(findings) || findings.length > MAX_RAW_VALIDATION_FINDINGS) return [];
 
   const unique = new Map<string, PackageFinding>();
   for (const finding of findings) {

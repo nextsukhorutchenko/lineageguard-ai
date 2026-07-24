@@ -16,6 +16,7 @@ import {
   type VirtualArtifactFilename,
 } from "./run-envelope.js";
 import {
+  __testOnly,
   loadRegenerationContext,
   loadRunSnapshot,
   persistCompletedRun,
@@ -138,14 +139,41 @@ async function overwriteStoredEnvelope(
   await writeFile(join(runsRoot, `run-${runId}.json`), `${JSON.stringify(envelope, null, 2)}\n`);
 }
 
-function overrideReservation(
-  reservation: ReservedChildRun,
-  field: keyof Omit<ReservedChildRun, symbol>,
-  value: unknown,
-): ReservedChildRun {
-  return new Proxy(reservation, {
-    get(target, property, receiver) {
-      return property === field ? value : Reflect.get(target, property, receiver);
+function withFailedSnapshotString(
+  snapshot: WorkflowSnapshot,
+  surface: "failure" | "activity" | "facts" | "metadata",
+  value: string,
+): WorkflowSnapshot {
+  if (surface === "failure") {
+    return WorkflowSnapshotSchema.parse({
+      ...snapshot,
+      failure: { ...snapshot.failure, message: value },
+    });
+  }
+  if (surface === "activity") {
+    return WorkflowSnapshotSchema.parse({
+      ...snapshot,
+      activity: [
+        {
+          at: "2026-07-24T12:00:00.000Z",
+          status: snapshot.status,
+          label: value,
+          outcome: "failed",
+        },
+      ],
+    });
+  }
+  if (surface === "facts") {
+    return WorkflowSnapshotSchema.parse({ ...snapshot, facts: [value] });
+  }
+  return WorkflowSnapshotSchema.parse({
+    ...snapshot,
+    datahub: {
+      source: "fixture",
+      verification: "REPLAY_FIXTURE",
+      configuredMcpPackage: "mcp-server-datahub@0.6.0",
+      allowedTools: ["search", "list_schema_fields", "get_lineage", "get_entities"],
+      reportedServerName: value,
     },
   });
 }
@@ -221,6 +249,63 @@ describe("flat run store", () => {
         message: "The stored run is unavailable.",
       });
       expect(await readdir(runsRoot)).toEqual(["run-failed.json"]);
+    } finally {
+      await rm(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["failure", "private-provider-token", ["private-provider-token"]],
+    ["activity", "sk-proj-12345678901234567890", []],
+    ["facts", "unsafe\nfact", []],
+    ["metadata", "Bearer abcdefghijklmnop", []],
+  ] as const)(
+    "rejects a failed snapshot whose %s string is not already boundary-safe",
+    async (surface, value, secrets) => {
+      const { sandbox, runsRoot } = await freshRoot();
+      const context = makeChangeContext();
+      const base = failedSnapshot("unsafe-failed", "GENERATION_FAILED", {
+        contextHash: context.contextHash,
+      });
+      try {
+        await expect(
+          persistFailedRun({
+            runsRoot,
+            runId: "unsafe-failed",
+            snapshot: withFailedSnapshotString(base, surface, value),
+            secrets,
+            context,
+          }),
+        ).rejects.toMatchObject({
+          code: "ARTIFACT_WRITE_FAILED",
+          message: "The failed run is inconsistent.",
+        });
+        expect(await readdir(runsRoot)).toEqual([]);
+      } finally {
+        await rm(sandbox, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("rejects a completed snapshot with credential-shaped content before publication", async () => {
+    const { sandbox, runsRoot } = await freshRoot();
+    const fixture = completedFixture("unsafe-completed");
+    try {
+      await expect(
+        persistCompletedRun({
+          runsRoot,
+          runId: "unsafe-completed",
+          ...fixture,
+          snapshot: WorkflowSnapshotSchema.parse({
+            ...fixture.snapshot,
+            facts: ["sk-proj-12345678901234567890"],
+          }),
+        }),
+      ).rejects.toMatchObject({
+        code: "ARTIFACT_WRITE_FAILED",
+        message: "The completed run is inconsistent.",
+      });
+      expect(await readdir(runsRoot)).toEqual([]);
     } finally {
       await rm(sandbox, { recursive: true, force: true });
     }
@@ -601,25 +686,20 @@ describe("generation retry reservation", () => {
     }
   });
 
-  it.each([
-    ["canonicalRunsRoot", "X:\\wrong-root"],
-    ["parentRunId", "wrong-parent"],
-    ["childRunId", "wrong-child"],
-    ["childMode", "LIVE"],
-    ["generationAttempt", 1],
-  ] as const)("rejects an authentic reservation with wrong %s", async (field, value) => {
-    const { sandbox, runsRoot } = await freshRoot();
+  it("reaches the canonical-root comparison with an authentic reservation", async () => {
+    const first = await freshRoot();
+    const second = await freshRoot();
     const context = makeChangeContext();
     try {
-      await persistEligibleParent(runsRoot);
+      await persistEligibleParent(first.runsRoot);
       const reservation = await reserveGenerationRetry({
-        runsRoot,
+        runsRoot: first.runsRoot,
         parentRunId: "parent",
         childRunId: "child",
       });
       await expect(
         persistFailedRun({
-          runsRoot,
+          runsRoot: second.runsRoot,
           runId: "child",
           snapshot: failedSnapshot("child", "GENERATION_FAILED", {
             contextHash: context.contextHash,
@@ -627,15 +707,90 @@ describe("generation retry reservation", () => {
           }),
           secrets: [],
           context,
-          reservedChild: overrideReservation(reservation, field, value),
+          reservedChild: reservation,
         }),
       ).rejects.toMatchObject({
         code: "INVALID_REQUEST",
         message: "The child run has not been reserved.",
       });
-      expect((await readdir(runsRoot)).sort()).toEqual(
-        ["retry-parent.json", "run-parent.json"].sort(),
-      );
+      expect(await readdir(second.runsRoot)).toEqual([]);
+    } finally {
+      await rm(first.sandbox, { recursive: true, force: true });
+      await rm(second.sandbox, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["parent", "child", "different-parent", "REPLAY"],
+    ["child", "different-child", "parent", "REPLAY"],
+    ["mode", "child", "parent", "LIVE"],
+  ] as const)(
+    "reaches the %s comparison with an authentic reservation",
+    async (_comparison, runId, parentRunId, mode) => {
+      const { sandbox, runsRoot } = await freshRoot();
+      const context = makeChangeContext();
+      try {
+        await persistEligibleParent(runsRoot);
+        const reservation = await reserveGenerationRetry({
+          runsRoot,
+          parentRunId: "parent",
+          childRunId: "child",
+        });
+        await expect(
+          persistFailedRun({
+            runsRoot,
+            runId,
+            snapshot: failedSnapshot(runId, "GENERATION_FAILED", {
+              contextHash: context.contextHash,
+              parentRunId,
+              mode,
+            }),
+            secrets: [],
+            context,
+            reservedChild: reservation,
+          }),
+        ).rejects.toMatchObject({
+          code: "INVALID_REQUEST",
+          message: "The child run has not been reserved.",
+        });
+        expect((await readdir(runsRoot)).sort()).toEqual(
+          ["retry-parent.json", "run-parent.json"].sort(),
+        );
+      } finally {
+        await rm(sandbox, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("directly proves the immutable generation-attempt predicate used by production", async () => {
+    const { sandbox, runsRoot } = await freshRoot();
+    try {
+      await persistEligibleParent(runsRoot);
+      const reservation = await reserveGenerationRetry({
+        runsRoot,
+        parentRunId: "parent",
+        childRunId: "child",
+      });
+      const expected = {
+        canonicalRunsRoot: reservation.canonicalRunsRoot,
+        parentRunId: "parent",
+        childRunId: "child",
+        childMode: "REPLAY" as const,
+      };
+
+      expect(__testOnly.reservationFieldsMatch(reservation, expected)).toBe(true);
+      expect(
+        __testOnly.reservationFieldsMatch(
+          {
+            canonicalRunsRoot: reservation.canonicalRunsRoot,
+            parentRunId: "parent",
+            childRunId: "child",
+            childMode: "REPLAY",
+            generationAttempt: 1,
+          },
+          expected,
+        ),
+      ).toBe(false);
     } finally {
       await rm(sandbox, { recursive: true, force: true });
     }
