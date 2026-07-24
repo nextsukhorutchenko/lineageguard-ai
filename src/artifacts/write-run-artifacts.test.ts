@@ -2,6 +2,7 @@ import { access, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { MAX_VIRTUAL_ARTIFACT_BYTES } from "../runs/run-envelope.js";
 import { WorkflowSnapshotSchema } from "../workflow/contracts.js";
 import { persistFailedRun } from "../runs/run-store.js";
 import { readImpactReport, writeRunArtifact } from "./write-run-artifacts.js";
@@ -16,6 +17,92 @@ async function createFreshRunsRoot(): Promise<{
 }
 
 describe("impact report compatibility", () => {
+  async function expectRejectedBeforePublication(
+    overrides: Partial<Parameters<typeof writeRunArtifact>[0]>,
+    forbiddenValue: string,
+  ): Promise<void> {
+    const { sandbox, runsRoot } = await createFreshRunsRoot();
+
+    try {
+      const caught = await writeRunArtifact({
+        runsRoot,
+        runId: "safe-run",
+        filename: "impact-report.md",
+        content: "# Impact report\n",
+        status: "COMPLETED",
+        ...overrides,
+      }).catch((error: unknown) => error);
+
+      expect(caught).toMatchObject({
+        code: "ARTIFACT_WRITE_FAILED",
+        message: "Unable to persist the run.",
+        details: {},
+      });
+      expect(caught).not.toHaveProperty("issues");
+      expect(JSON.stringify(caught)).not.toContain(runsRoot);
+      expect(JSON.stringify(caught)).not.toContain(forbiddenValue);
+      expect(await readdir(runsRoot)).toEqual([]);
+    } finally {
+      await rm(sandbox, { recursive: true, force: true });
+    }
+  }
+
+  it("rejects a runtime path-like filename before filesystem publication", async () => {
+    const unsafeFilename = "../../outside.md";
+
+    await expectRejectedBeforePublication(
+      {
+        filename: unsafeFilename as unknown as "impact-report.md",
+      },
+      unsafeFilename,
+    );
+  });
+
+  it.each([
+    {
+      name: "unsafe run ID",
+      overrides: { runId: "../outside" },
+      forbiddenValue: "../outside",
+    },
+    {
+      name: "unknown status",
+      overrides: {
+        status: "UNSAFE_STATUS" as unknown as "COMPLETED",
+      },
+      forbiddenValue: "UNSAFE_STATUS",
+    },
+    {
+      name: "maximum-plus-one content",
+      overrides: {
+        content: "x".repeat(MAX_VIRTUAL_ARTIFACT_BYTES + 1),
+      },
+      forbiddenValue: "x".repeat(512),
+    },
+    {
+      name: "credential-shaped content",
+      overrides: {
+        content: "# Report\nsk-proj-1234567890abcdefghijkl\n",
+      },
+      forbiddenValue: "sk-proj-1234567890abcdefghijkl",
+    },
+    {
+      name: "control-bearing content",
+      overrides: {
+        content: "# Report\u001b[2J\n",
+      },
+      forbiddenValue: "\u001b[2J",
+    },
+    {
+      name: "non-normalized content",
+      overrides: {
+        content: "# Cafe\u0301\n",
+      },
+      forbiddenValue: "Cafe\u0301",
+    },
+  ])("rejects $name before filesystem publication", async ({ overrides, forbiddenValue }) => {
+    await expectRejectedBeforePublication(overrides, forbiddenValue);
+  });
+
   it.each([
     "COMPLETED",
     "COMPLETED_WITH_LIMITATIONS",
@@ -76,11 +163,36 @@ describe("impact report compatibility", () => {
       expect(caught).toMatchObject({
         code: "CANCELLED",
         message: "The run was cancelled.",
+        details: {},
       });
       expect(JSON.stringify(caught)).not.toContain(runsRoot);
       expect(JSON.stringify(caught)).not.toContain(secretAbortReason);
       await expect(access(join(runsRoot, "run-run-aborted.json"))).rejects.toThrow();
       expect(await readdir(runsRoot)).toEqual([]);
+    } finally {
+      await rm(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves the lower create-only collision error", async () => {
+    const { sandbox, runsRoot } = await createFreshRunsRoot();
+    const input = {
+      runsRoot,
+      runId: "existing-run",
+      filename: "impact-report.md",
+      content: "# Impact report\n",
+      status: "COMPLETED",
+    } as const;
+
+    try {
+      await writeRunArtifact(input);
+
+      await expect(writeRunArtifact(input)).rejects.toMatchObject({
+        code: "ARTIFACT_WRITE_FAILED",
+        message: "The run already exists.",
+        details: {},
+      });
+      expect(await readdir(runsRoot)).toEqual(["run-existing-run.json"]);
     } finally {
       await rm(sandbox, { recursive: true, force: true });
     }
