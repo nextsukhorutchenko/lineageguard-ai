@@ -1,43 +1,51 @@
 import { describe, expect, it } from "vitest";
 import { MigrationPackageDraftSchema } from "./migration-draft.js";
 
+const stagedDraft = {
+  schemaVersion: "1",
+  strategy: "STAGED_COMPATIBILITY",
+  executionClassification: "ADVISORY_ONLY",
+  rationale: "CRITICAL_DOWNSTREAM_IMPACT",
+  evidenceIds: ["datahub:target-dataset", "datahub:source-column:customer_id"],
+  stages: [
+    "PREPARE",
+    "ADD_COMPATIBLE_COLUMN",
+    "BACKFILL",
+    "MIGRATE_DOWNSTREAM",
+    "VALIDATE",
+    "RETIRE_SOURCE_COLUMN",
+  ],
+  validationChecks: ["SOURCE_COLUMN_EXISTS", "TARGET_COLUMN_EXISTS", "BACKFILL_COMPLETE"],
+  rollback: "KEEP_SOURCE_AND_REMOVE_TARGET_AFTER_REVIEW",
+  warnings: ["DIRECT_RENAME_BLOCKED", "HUMAN_APPROVAL_REQUIRED"],
+} as const;
+
 describe("MigrationPackageDraftSchema", () => {
   it("accepts the bounded staged strategy", () => {
-    expect(
-      MigrationPackageDraftSchema.parse({
-        schemaVersion: "1",
-        strategy: "STAGED_COMPATIBILITY",
-        executionClassification: "ADVISORY_ONLY",
-        rationale: "CRITICAL_DOWNSTREAM_IMPACT",
-        evidenceIds: ["datahub:target-dataset", "datahub:source-column:customer_id"],
-        stages: [
-          "PREPARE",
-          "ADD_COMPATIBLE_COLUMN",
-          "BACKFILL",
-          "MIGRATE_DOWNSTREAM",
-          "VALIDATE",
-          "RETIRE_SOURCE_COLUMN",
-        ],
-        validationChecks: ["SOURCE_COLUMN_EXISTS", "TARGET_COLUMN_EXISTS", "BACKFILL_COMPLETE"],
-        rollback: "KEEP_SOURCE_AND_REMOVE_TARGET_AFTER_REVIEW",
-        warnings: ["DIRECT_RENAME_BLOCKED", "HUMAN_APPROVAL_REQUIRED"],
-      }).strategy,
-    ).toBe("STAGED_COMPATIBILITY");
+    expect(MigrationPackageDraftSchema.parse(stagedDraft).strategy).toBe("STAGED_COMPATIBILITY");
   });
 
-  it("rejects free-form strategy and warning values", () => {
+  it("rejects an unknown strategy in an otherwise valid draft", () => {
     expect(() =>
       MigrationPackageDraftSchema.parse({
-        schemaVersion: "1",
+        ...stagedDraft,
         strategy: "DROP_AND_RECREATE",
-        executionClassification: "EXECUTABLE_WITH_REVIEW",
-        rationale: "MODEL_DECIDED",
-        evidenceIds: [],
-        stages: [],
-        validationChecks: [],
-        rollback: "NONE",
-        warnings: [],
       }),
+    ).toThrow();
+  });
+
+  it("rejects an unknown warning in an otherwise valid draft", () => {
+    expect(() =>
+      MigrationPackageDraftSchema.parse({
+        ...stagedDraft,
+        warnings: ["MODEL_DECIDED"],
+      }),
+    ).toThrow();
+  });
+
+  it("rejects unexpected draft properties", () => {
+    expect(() =>
+      MigrationPackageDraftSchema.parse({ ...stagedDraft, modelText: "unsafe" }),
     ).toThrow();
   });
 
