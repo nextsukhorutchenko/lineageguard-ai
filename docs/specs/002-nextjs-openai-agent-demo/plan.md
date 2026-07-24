@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Last amended:** 2026-07-23 — approved DataHub tutorial, operator-documentation, MCP, Agent Context Kit, and DataHub Skills coverage
+**Last amended:** 2026-07-24 — approved flat run-envelope storage and cumulative-gate remediation
 
 **Goal:** Build a polished local Next.js demo that proves complete-or-explicitly-incomplete DataHub impact analysis, enriches it with bounded read-only business context, uses one bounded OpenAI agent to plan a grounded Snowflake-first migration package, validates every artifact deterministically, and ships a truthful hackathon submission package.
 
@@ -14,7 +14,7 @@
 
 - Keep one TypeScript `pnpm` package; do not introduce a monorepo.
 - Support exactly one change kind: `rename_column`.
-- Preserve the existing deterministic intent, DataHub, evidence, impact, redaction, and artifact-path behavior.
+- Preserve the existing deterministic intent, DataHub, evidence, impact, redaction, and virtual-artifact behavior.
 - Keep DataHub MCP read-only; do not add database, shell, raw MCP, filesystem, or GitHub tools to the agent.
 - Internally allowlist only `search`, `list_schema_fields`, `get_lineage`, and `get_entities`; verify all four advertise `readOnlyHint: true`, ignore every other advertised MCP tool, and never confuse protocol discovery with an agent tool.
 - Treat tutorial totals such as `22 tools`, `10 read`, or `12 write` as configuration-dependent observations, never as a runtime contract or authorization boundary.
@@ -31,7 +31,7 @@
 - Map deterministic impact scores to `PROCEED_WITH_REVIEW` for 0–39, `MANUAL_APPROVAL_REQUIRED` for 40–74, and `BLOCK_DIRECT_RENAME` for 75–100 without changing the existing impact formula.
 - Render executable Snowflake SQL only when a physical object name is confirmed as exactly `database.schema.table`; otherwise emit `NON_EXECUTABLE_TEMPLATE`.
 - The golden fixture's four-part DataHub dataset name must remain a safe staged template unless a separate exact three-part physical name is validated; do not silently drop the datapack prefix.
-- Write only allowlisted files beneath `LINEAGEGUARD_RUNS_DIR/<run-id>/`; keep create-only semantics and expose completed artifacts only after an atomic `package/manifest.json` commit.
+- Persist each terminal run as one immutable `run-<run-id>.json` envelope directly beneath an explicit absolute, pre-created trusted `LINEAGEGUARD_RUNS_DIR`; expose only allowlisted virtual artifacts after strict envelope and hash validation.
 - Label fixture runs `REPLAY`; never imply that replay used live DataHub or OpenAI.
 - Keep ordinary CI offline and secret-free; live DataHub and OpenAI checks remain opt-in.
 - Never interpret continuation, token truncation, repeated pages, zero progress, or configured caps as complete evidence.
@@ -104,8 +104,8 @@ Primary references:
 - Create `src/migrations/render-snowflake-package.ts` — deterministic four-file renderer.
 - Create `src/migrations/validate-sql.ts` — parser-backed syntax and statement allowlist checks.
 - Create `src/migrations/validate-package.ts` — cross-file and classification validation.
-- Modify `src/artifacts/write-run-artifacts.ts` — accept an explicit immutable filename allowlist.
-- Create `src/runs/run-store.ts` — sanitized JSON persistence, artifact hashes, atomic package manifest, and safe reads.
+- Modify `src/artifacts/write-run-artifacts.ts` — preserve the virtual-only legacy impact-report facade.
+- Create `src/runs/run-store.ts` — immutable flat-envelope persistence, strict reload, virtual downloads, and retry reservation.
 
 ### Agent and application boundaries
 
@@ -153,7 +153,7 @@ Primary references:
 - Create `tests/e2e/lineageguard-demo.spec.ts` — Chromium acceptance suite.
 - Create `playwright.config.ts` — local Next.js web server and Chromium project.
 - Modify `.github/workflows/ci.yml` — install Chromium and run offline browser tests.
-- Create `examples/002-nextjs-openai-agent-demo/` — golden rendered artifacts and sanitized metadata.
+- Create `examples/002-nextjs-openai-agent-demo/` — four golden rendered virtual artifacts only.
 - Modify `README.md` — quick starts for replay and live mode.
 - Modify `docs/demo-scenario.md` — exact agent demo script and fallback path.
 - Create `docs/architecture/agent-demo.md` — boundaries, modes, storage, and security.
@@ -3726,338 +3726,23 @@ git commit -m "feat: render validated Snowflake migration packages"
 
 ### Task 6: Generalize Safe Run Storage and Artifact Downloads
 
-> **Approved authority amendment (2026-07-24):** The nested run-directory, package-directory,
-> manifest-file, and directory-rename steps below are superseded by
-> `docs/superpowers/specs/2026-07-24-flat-run-envelope-storage-design.md` and the executable
-> amendment plan at `docs/superpowers/plans/2026-07-24-flat-run-envelope-storage.md`. Do not
-> implement the superseded snippets below. Task 7 may start only after every task in the amendment
-> plan has passed its review gate.
+> **Completed through approved authority amendments (2026-07-24).** The original nested
+> run-directory, package-directory, manifest-file, and directory-rename design is superseded by
+> `docs/superpowers/specs/2026-07-24-flat-run-envelope-storage-design.md`,
+> `docs/superpowers/plans/2026-07-24-flat-run-envelope-storage.md`, and
+> `docs/superpowers/specs/2026-07-24-flat-storage-cumulative-gate-remediation-design.md`.
 
-**Files:**
+**Authoritative outputs:**
 
-- Modify: `src/artifacts/write-run-artifacts.ts`
-- Modify: `src/artifacts/write-run-artifacts.test.ts`
-- Create: `src/runs/run-store.ts`
-- Create: `src/runs/run-store.test.ts`
-- Create: `src/security/sanitize-validation-findings.ts`
-- Create: `src/security/sanitize-validation-findings.test.ts`
-- Modify: `src/cli.ts`
-- Modify: `src/cli.test.ts`
+- strict completed, failed, impact-report, and retry-reservation envelopes;
+- one create-only `run-<run-id>.json` final entry per terminal run;
+- bounded, hash-verified, one-read reload and virtual-download services;
+- immutable branded retry reservations;
+- the virtual-only legacy `impact-report.md` facade; and
+- an explicit absolute pre-created trusted runs root.
 
-**Interfaces:**
-
-- Consumes: the existing symlink-resistant run-directory boundary and `RenderedMigrationPackage`.
-- Produces: `RunFilename`, `writeRunArtifact(options)`, `readRunArtifact(options)`, `commitPackageAtomically(options)`, `readCompletedPackageFile(options)`, `readRunMetadataFile(options)`, `persistCompletedRun(input)`, `persistFailedRun(input)`, `loadRunSnapshot(input)`, integrity-gated `loadRegenerationContext(input)`, and atomic create-only `reserveGenerationRetry(input)`.
-
-- [ ] **Step 1: Extend the existing safety tests before changing the writer**
-
-Extend the existing local import to `import { readRunArtifact, writeRunArtifact } from "./write-run-artifacts.js";`, then add these cases. Reuse the existing `createFreshRunsRoot()` helper and keep per-test cleanup explicit:
-
-```ts
-it("writes every allowlisted run-level diagnostic artifact", async () => {
-  const { sandbox, runsRoot } = await createFreshRunsRoot();
-  try {
-    for (const filename of [
-      "impact-report.md",
-      "change-context.json",
-      "migration-package-draft.json",
-      "validation-findings.json",
-      "run-metadata.json",
-    ] as const) {
-      await expect(
-        writeRunArtifact({ runsRoot, runId: `run-${filename}`, filename, content: "safe" }),
-      ).resolves.toContain(filename);
-    }
-  } finally {
-    await rm(sandbox, { recursive: true, force: true });
-  }
-});
-
-it("rejects filenames outside the fixed allowlist", async () => {
-  const { sandbox, runsRoot } = await createFreshRunsRoot();
-  try {
-    await expect(
-      writeRunArtifact({
-        runsRoot,
-        runId: "run-1",
-        filename: "../../secret.txt" as never,
-        content: "unsafe",
-      }),
-    ).rejects.toMatchObject({ code: "ARTIFACT_WRITE_FAILED" });
-  } finally {
-    await rm(sandbox, { recursive: true, force: true });
-  }
-});
-
-it("reads only a real allowlisted file beneath the run root", async () => {
-  const { sandbox, runsRoot } = await createFreshRunsRoot();
-  try {
-    await writeRunArtifact({
-      runsRoot,
-      runId: "run-1",
-      filename: "impact-report.md",
-      content: "# Sanitized impact report\n",
-    });
-    await expect(
-      readRunArtifact({ runsRoot, runId: "run-1", filename: "impact-report.md" }),
-    ).resolves.toBe("# Sanitized impact report\n");
-  } finally {
-    await rm(sandbox, { recursive: true, force: true });
-  }
-});
-```
-
-Create `src/runs/run-store.test.ts` and assert that a completed run writes all four artifacts plus context, draft, findings, metadata, and `package/manifest.json`; metadata contains SHA-256 hashes and parses with `status === "COMPLETED"`; a post-analysis failed run writes only sanitized context/draft/findings/metadata outside `package/`; and loading metadata rejects a symlinked run directory. Prove that an eligible `GENERATION_FAILED` or `VALIDATION_FAILED` diagnostic context is accepted only when its internally recomputed hash matches both its `contextHash` and the diagnostic snapshot, while tampering, mode mismatch, an ineligible status, or a missing file is rejected with fixed text. The atomic retry reservation must reject an existing child directory, regular file, or symlink before any provider call without consuming the parent retry. Race two retry reservations and prove exactly one create-only reservation succeeds. Inject a write hook that aborts or throws after the second staged file, then assert `persistCompletedRun` rejects, staging is removed, `package/manifest.json` does not exist, and no completed artifact can be downloaded. Add two barrier-controlled race tests: abort immediately before the final rename must clean staging and expose no package, while abort immediately after a successful rename must leave the manifest-gated completed package readable and authoritative. Task 9 owns the corresponding workflow-state and event assertions.
-
-- [ ] **Step 2: Run focused storage tests and verify the old single-filename boundary fails**
-
-Run:
-
-```powershell
-pnpm vitest run src/artifacts/write-run-artifacts.test.ts src/runs/run-store.test.ts
-```
-
-Expected: FAIL because only `impact-report.md` is allowed and the run store does not exist.
-
-- [ ] **Step 3: Expand the immutable allowlist and add safe reads**
-
-In `src/artifacts/write-run-artifacts.ts`, export this allowlist and use it in both write and read operations:
-
-```ts
-export const runFilenames = [
-  "impact-report.md",
-  "change-context.json",
-  "migration-package-draft.json",
-  "validation-findings.json",
-  "run-metadata.json",
-] as const;
-export type RunFilename = (typeof runFilenames)[number];
-
-export const completedPackageFilenames = [
-  "change-context.json",
-  "migration-package-draft.json",
-  "migration-up.sql",
-  "migration-down.sql",
-  "validation.sql",
-  "rollout-plan.md",
-  "validation-findings.json",
-  "run-metadata.json",
-] as const;
-export type CompletedPackageFilename = (typeof completedPackageFilenames)[number];
-
-function assertAllowedFilename(filename: string): asserts filename is RunFilename {
-  if (!(runFilenames as readonly string[]).includes(filename)) {
-    throw new AppError("ARTIFACT_WRITE_FAILED", "The artifact filename is not allowed.");
-  }
-}
-```
-
-Change `writeRunArtifact.options.filename` from the literal `"impact-report.md"` to `RunFilename`, call `assertAllowedFilename` before resolving a path, and preserve `flag: "wx"`.
-
-Add this safe reader after the writer using the existing `assertSafeRunId`, `assertNoLinkedExistingPathComponents`, and `assertWithinRunsRoot` helpers:
-
-```ts
-export async function readRunArtifact(options: {
-  readonly runsRoot: string;
-  readonly runId: string;
-  readonly filename: RunFilename;
-}): Promise<string> {
-  try {
-    assertSafeRunId(options.runId);
-    assertAllowedFilename(options.filename);
-    const root = await realpath(resolve(options.runsRoot));
-    const runDirectory = resolve(root, options.runId);
-    await assertNoLinkedExistingPathComponents(runDirectory);
-    const realRunDirectory = await realpath(runDirectory);
-    assertWithinRunsRoot(root, realRunDirectory);
-    const candidate = resolve(realRunDirectory, options.filename);
-    assertWithinRunsRoot(root, candidate);
-    const stats = await lstat(candidate);
-    if (stats.isSymbolicLink() || !stats.isFile()) {
-      throw new Error("Not a regular file.");
-    }
-    return await readFile(candidate, "utf8");
-  } catch (error) {
-    if (error instanceof AppError) throw error;
-    throw new AppError("ARTIFACT_WRITE_FAILED", "The requested artifact is unavailable.");
-  }
-}
-```
-
-Add `readFile` to the `node:fs/promises` import and import `WorkflowSnapshotSchema` from `src/workflow/contracts.ts` for the completed-metadata gate; the contracts module has no artifact dependency, so this remains acyclic. API callers catch only this sanitized boundary and return no native filesystem error text. Keep `readRunArtifact` for run-level diagnostics and failed snapshots; completed downloads must use the separate manifest-gated reader below.
-
-In the same module, add `commitPackageAtomically`. It must first require exactly `completedPackageFilenames` with no missing or extra key and parse the staged `run-metadata.json` as a valid snapshot whose status is exactly `COMPLETED`. Then create a unique run-local `.package-<nonce>` staging directory with create-only semantics, write every final file plus `manifest.json` there, check the caller signal before and after every write, close all file handles, and check the signal once more immediately before atomically renaming the staging directory to the absent final `package` directory. The manifest contains schema version, run ID, and SHA-256 for every file except itself, including the hash of `run-metadata.json`.
-
-Define the successful directory rename as the completion linearization point. Before it, any error or abort must verify that staging remains beneath the already-validated run directory, recursively remove only that staging directory, and rethrow a sanitized `ARTIFACT_WRITE_FAILED` or cancellation. After it succeeds, do not check the signal again, do not enter cancellation cleanup, and never delete or replace the committed `package` directory; return success even if the caller aborts immediately afterward.
-
-Add `readCompletedPackageFile`. It must traverse the same symlink-resistant boundary, require a regular `package/manifest.json`, require its run ID to equal the requested run ID, require both the requested fixed filename and `run-metadata.json` in the manifest, verify both hashes, parse the metadata through `WorkflowSnapshotSchema`, and require both `status === "COMPLETED"` and the same run ID before returning any content. Reject `manifest.json` itself as a public download. No API route may fall back to a run-root file when this gate fails. Add `readRunMetadataFile` for reload only: if `package/` is absent it may return run-root diagnostic metadata tagged as `diagnostic`; if `package/` exists it must use the same manifest/hash/completed-status gate and never fall back after an integrity failure. A diagnostic snapshot whose status is `COMPLETED` is invalid.
-
-- [ ] **Step 4: Implement terminal run persistence and hashes**
-
-Create `src/runs/run-store.ts`:
-
-```ts
-import { createHash } from "node:crypto";
-import {
-  commitPackageAtomically,
-  readCompletedPackageFile,
-  readRunMetadataFile,
-  writeRunArtifact,
-} from "../artifacts/write-run-artifacts.js";
-import { AppError } from "../errors/app-error.js";
-import type { RenderedMigrationPackage } from "../migrations/render-snowflake-package.js";
-import { WorkflowSnapshotSchema, type WorkflowSnapshot } from "../workflow/contracts.js";
-import { ChangeContextSchema, type ChangeContext } from "../workflow/change-context.js";
-import {
-  MigrationPackageDraftSchema,
-  type MigrationPackageDraft,
-} from "../workflow/migration-draft.js";
-import type { PackageFinding } from "../migrations/validate-sql.js";
-
-const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
-const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
-
-export async function persistCompletedRun(input: {
-  readonly runsRoot: string;
-  readonly runId: string;
-  readonly context: ChangeContext;
-  readonly draft: MigrationPackageDraft;
-  readonly rendered: RenderedMigrationPackage;
-  readonly snapshot: WorkflowSnapshot;
-  readonly signal?: AbortSignal;
-}): Promise<WorkflowSnapshot> {
-  const artifacts = Object.entries(input.rendered.files).map(([filename, content]) => ({
-    filename: filename as keyof typeof input.rendered.files,
-    sha256: sha256(content),
-    validated: true,
-  }));
-  const snapshot = WorkflowSnapshotSchema.parse({ ...input.snapshot, artifacts });
-  if (snapshot.status !== "COMPLETED") {
-    throw new AppError("ARTIFACT_WRITE_FAILED", "Only a completed snapshot can be committed.");
-  }
-  await commitPackageAtomically({
-    runsRoot: input.runsRoot,
-    runId: input.runId,
-    files: {
-      ...input.rendered.files,
-      "change-context.json": json(ChangeContextSchema.parse(input.context)),
-      "migration-package-draft.json": json(MigrationPackageDraftSchema.parse(input.draft)),
-      "validation-findings.json": json([]),
-      "run-metadata.json": json(snapshot),
-    },
-    signal: input.signal,
-  });
-  return snapshot;
-}
-
-export async function persistFailedRun(input: {
-  readonly runsRoot: string;
-  readonly runId: string;
-  readonly snapshot: WorkflowSnapshot;
-  readonly secrets: readonly string[];
-  readonly context?: ChangeContext;
-  readonly draft?: MigrationPackageDraft;
-  readonly findings?: readonly PackageFinding[];
-}): Promise<void> {
-  const snapshot = WorkflowSnapshotSchema.parse(input.snapshot);
-  if (input.context !== undefined) {
-    const context = ChangeContextSchema.parse(input.context);
-    if (snapshot.contextHash !== context.contextHash) {
-      throw new AppError("ARTIFACT_WRITE_FAILED", "The diagnostic context is inconsistent.");
-    }
-    await writeRunArtifact({
-      runsRoot: input.runsRoot,
-      runId: input.runId,
-      filename: "change-context.json",
-      content: json(context),
-    });
-  }
-  if (input.draft !== undefined) {
-    await writeRunArtifact({
-      runsRoot: input.runsRoot,
-      runId: input.runId,
-      filename: "migration-package-draft.json",
-      content: json(input.draft),
-    });
-  }
-  if (input.findings !== undefined) {
-    await writeRunArtifact({
-      runsRoot: input.runsRoot,
-      runId: input.runId,
-      filename: "validation-findings.json",
-      content: json(input.findings),
-    });
-  }
-  await writeRunArtifact({
-    runsRoot: input.runsRoot,
-    runId: input.runId,
-    filename: "run-metadata.json",
-    content: json(snapshot),
-  });
-}
-
-export async function loadRunSnapshot(input: {
-  readonly runsRoot: string;
-  readonly runId: string;
-}): Promise<WorkflowSnapshot> {
-  const stored = await readRunMetadataFile(input);
-  const snapshot = WorkflowSnapshotSchema.parse(JSON.parse(stored.content));
-  if (stored.source === "diagnostic" && snapshot.status === "COMPLETED") {
-    throw new AppError("ARTIFACT_WRITE_FAILED", "Completed package metadata is unavailable.");
-  }
-  return snapshot;
-}
-
-export async function loadRegenerationContext(input: {
-  readonly runsRoot: string;
-  readonly runId: string;
-}): Promise<{ readonly snapshot: WorkflowSnapshot; readonly context: ChangeContext }> {
-  const snapshot = await loadRunSnapshot(input);
-  const raw =
-    snapshot.status === "COMPLETED"
-      ? await readCompletedPackageFile({ ...input, filename: "change-context.json" })
-      : snapshot.status === "GENERATION_FAILED" || snapshot.status === "VALIDATION_FAILED"
-        ? await readRunArtifact({ ...input, filename: "change-context.json" })
-        : undefined;
-  if (raw === undefined) {
-    throw new AppError("INVALID_REQUEST", "The parent run cannot be regenerated.");
-  }
-  const context = ChangeContextSchema.parse(JSON.parse(raw));
-  const { contextHash, ...payload } = context;
-  if (hashChangeContext(payload) !== contextHash || snapshot.contextHash !== contextHash) {
-    throw new AppError("INVALID_REQUEST", "The parent run cannot be regenerated.");
-  }
-  return { snapshot, context };
-}
-```
-
-Import `readRunArtifact` and `hashChangeContext` explicitly. `loadRegenerationContext` must collapse JSON, Zod, hash, filesystem, and status failures to the same fixed public `INVALID_REQUEST` message above. No route may return the private context directly.
-
-Create and export `sanitizeValidationFindings(findings, secrets): readonly PackageFinding[]` from `src/security/sanitize-validation-findings.ts`; both `runAgentWorkflow` and `persistFailedRun` must import this one implementation. It normalizes at most 200 findings, retains only a canonical code matching the validation-summary regex, an allowlisted filename, and `sanitizeBoundaryText(message, secrets, 500)`; it rebuilds the closed shape, rejects extra keys, and never serializes a native exception or model trace. Before `persistFailedRun` writes debugging material, parse the draft through `MigrationPackageDraftSchema` and call that helper. Pass `secrets` into `persistFailedRun` whenever draft/findings are present. The snapshot's `validation.findingCount` and sorted, unique first 20 `findingCodes` must summarize exactly the bounded persisted findings; `validation-findings.json` remains private and is never a download route. Unit tests cover secret-bearing messages, extra keys, invalid codes/filenames, 201 findings, and deterministic ordering.
-
-Implement `reserveGenerationRetry` beside it as one atomic two-resource reservation. After the same safe parent/child root and symlink checks, create the child run directory with exclusive `mkdir` semantics first, then create the parent's private `generation-retry.lock` with `open(..., "wx")` and write only schema version and child run ID. If the parent lock cannot be created, remove only the just-created, still-empty child directory after revalidating it beneath the runs root. If child creation collides, do not consume the parent reservation. After both resources exist, the reservation is committed and is not silently removed after downstream failure. Return a branded reserved-child handle that `runAgentWorkflowFromContext` and all child run writers require, preventing an unreserved child path from entering generation or persistence.
-
-Freshness is part of that reservation; there is no separate check-then-act API. Existing child directories, regular files, or symlinks yield fixed `INVALID_REQUEST` before provider execution and without consuming the parent's one retry. Barrier-controlled tests race a competing child-directory creator both before and between the two exclusive operations, prove no TOCTOU overwrite is possible, prove exactly one concurrent regeneration wins, and prove rollback removes only this call's empty child reservation.
-
-In `src/cli.ts`, remove the `diagnosticDetails` branch that prints `error.details.attemptedPath`. Artifact-write failures may print only the fixed status/guidance and sanitized run ID. Add CLI and workflow capture tests with a recognizable absolute `runsRoot` and `attemptedPath`; stdout, stderr, NDJSON, metadata, logs, and thrown public messages must not contain either path.
-
-- [ ] **Step 5: Run storage tests and the existing path-safety suite**
-
-Run:
-
-```powershell
-pnpm vitest run src/artifacts/write-run-artifacts.test.ts src/runs/run-store.test.ts src/security/sanitize-output.test.ts src/security/sanitize-validation-findings.test.ts
-pnpm typecheck
-```
-
-Expected: allowlist, create-only, traversal, symlink, manifest/hash verification, atomic completed persistence, injected mid-write cleanup, download denial without a committed manifest, and failed diagnostic persistence tests pass.
-
-- [ ] **Step 6: Commit the safe run store**
-
-```powershell
-git add src/artifacts/write-run-artifacts.ts src/artifacts/write-run-artifacts.test.ts src/runs/run-store.ts src/runs/run-store.test.ts src/security/sanitize-validation-findings.ts src/security/sanitize-validation-findings.test.ts src/cli.ts src/cli.test.ts
-git commit -m "feat: persist validated agent run artifacts"
-```
+Do not implement or restore nested run directories, package manifests, generic path-based artifact
+APIs, private-file downloads, relative runs-root defaults, or application-owned root creation.
 
 ---
 
@@ -4921,11 +4606,10 @@ Create `tests/helpers/workflow-dependencies.ts` with an async `makeWorkflowDepen
 Create `src/app/run-agent-workflow.test.ts` with this complete setup, then use these exact assertions:
 
 ```ts
-import { access } from "node:fs/promises";
-import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
+import { readRunEnvelope } from "../artifacts/run-envelope-files.js";
 import type { DataHubCatalog } from "../datahub/catalog.js";
-import { loadRunSnapshot } from "../runs/run-store.js";
+import { loadRunSnapshot, readCompletedPackageFile } from "../runs/run-store.js";
 import type { WorkflowEvent } from "../workflow/contracts.js";
 import {
   cleanupWorkflowRoots,
@@ -4989,11 +4673,15 @@ it("preserves the impact report when the provider fails", async () => {
   expect(result.status).toBe("GENERATION_FAILED");
   expect(result.impact).toMatchObject({ score: 90, downstreamAssets: 24 });
   await expect(
-    access(join(dependencies.runsRoot, result.runId, "impact-report.md")),
-  ).resolves.toBeUndefined();
-  await expect(
     loadRunSnapshot({ runsRoot: dependencies.runsRoot, runId: result.runId }),
   ).resolves.toMatchObject({ status: "GENERATION_FAILED", contextHash: result.contextHash });
+  await expect(
+    readCompletedPackageFile({
+      runsRoot: dependencies.runsRoot,
+      runId: result.runId,
+      filename: "migration-up.sql",
+    }),
+  ).rejects.toMatchObject({ code: "ARTIFACT_WRITE_FAILED" });
 });
 
 it("maps abort to CANCELLED and never emits COMPLETED afterwards", async () => {
@@ -5023,9 +4711,33 @@ Add a provider that passes a different request inside `analyze_rename_change`. T
 
 Add adversarial custom-provider cases that bypass `OpenAIAgentProvider`: one calls the application generation tool again after an accepted package, and one calls it more than twice with rejected drafts while reporting false attempt counters. The application boundary must return `ATTEMPT_AFTER_ACCEPTED` or `ATTEMPT_LIMIT` without another validation transition/tool invocation. Terminal status, `agent.generationAttempts`, tool-call counts, and the validation summary must come only from the application-owned counter and findings, never provider telemetry.
 
-Add a two-rejection provider case that submits a schema-valid but policy-invalid draft twice. Assert terminal `VALIDATION_FAILED`, no `package/manifest.json`, and sanitized run-root `migration-package-draft.json`, `validation-findings.json`, and `run-metadata.json`. Parse the first two files and assert they equal the last rejected draft and its closed findings; no prompt, secret, raw exception, or unvalidated artifact tab is exposed. An artifact-commit failure after successful validation must likewise preserve the validated structured draft plus an empty findings array as diagnostics, without publishing final artifacts.
+Add a two-rejection provider case that submits a schema-valid but policy-invalid draft twice. Assert
+terminal `VALIDATION_FAILED`, then inspect the internal envelope through `readRunEnvelope`:
 
-Create `src/app/regenerate-package.test.ts` and assert that regeneration loads `change-context.json`, never creates a catalog or invokes DataHub analysis, writes to a fresh child run ID, records `parentRunId`, and preserves the same `contextHash`.
+```ts
+const envelope = await readRunEnvelope({
+  runsRoot: dependencies.runsRoot,
+  runId: result.runId,
+});
+expect(envelope).toMatchObject({
+  kind: "failed",
+  snapshot: { status: "VALIDATION_FAILED", artifacts: [] },
+  draft: lastRejectedDraft,
+  findings: expectedSanitizedFindings,
+});
+expect(envelope).not.toHaveProperty("package");
+```
+
+Assert that no prompt, secret, raw exception, private envelope section, or unvalidated artifact tab
+is exposed through the public snapshot or download boundary. An envelope-publication failure after
+successful validation must preserve one authoritative failed envelope containing the validated
+structured draft plus an empty findings array, while every public virtual download remains
+unavailable.
+
+Create `src/app/regenerate-package.test.ts` and assert that regeneration uses
+`loadRegenerationContext` and `reserveGenerationRetry`, never creates a catalog or invokes DataHub
+analysis, writes to a fresh reserved child run ID, records `parentRunId`, and preserves the same
+`contextHash`.
 
 Create `tests/fixture-agent-workflow.test.ts` and assert the real fixture catalog plus `FakeAgentProvider` produces 24/11/90, `BLOCK_DIRECT_RENAME`, `NON_EXECUTABLE_TEMPLATE`, four validated artifacts, and a `REPLAY` snapshot.
 
@@ -5488,9 +5200,28 @@ Import `ImpactReportPersistenceError`, `RunRequestSchema`, `compareCanonicalText
 
 Add a 1,000-candidate ambiguity test. It must persist the same first 20 candidates in stable order, set `omittedCandidateCount: 980`, mention that count in fixed retry guidance, never call generation, and never fail schema parsing. Add `COLUMN_NOT_FOUND` coverage that passes unsorted/duplicate/overlong `details.knownFields`, then proves the snapshot contains at most 100 sanitized, unique, sorted fields. Inject `ImpactReportPersistenceError` after deterministic analysis and prove `impact`, `contextHash`, and sanitized evidence remain in the terminal `ARTIFACT_WRITE_FAILED` snapshot while no completed package or download exists.
 
-Add one adversarial workflow capture test with a recognizable active secret embedded independently in the incoming request suffix, DataHub description/facts/quality text and reported server identity, provider failure text, and a rejected validation-finding message. The provider spy must receive only the sanitized request and `ChangeContext`; the raw secret must be absent from every captured model input. After the terminal failure, recursively read the bounded run directory and assert the raw value is absent from snapshot JSON, diagnostic context/draft/findings, metadata, rendered package content if any, emitted NDJSON event objects, thrown public text, and captured logs. Assert the expected `[REDACTED]` markers instead, so the test cannot pass by silently dropping all diagnostic context. Task 10 reuses this fixture through the route and Task 12 checks the rendered DOM, giving one traceable request-to-UI regression rather than unrelated unit-only assertions.
+Add one adversarial workflow capture test with a recognizable active secret embedded independently
+in the incoming request suffix, DataHub description/facts/quality text and reported server identity,
+provider failure text, and a rejected validation-finding message. The provider spy must receive only
+the sanitized request and `ChangeContext`; the raw secret must be absent from every captured model
+input. After the terminal failure, inspect the single bounded validated envelope and assert the raw
+value is absent from the snapshot, private context/draft/findings, any completed virtual artifacts,
+emitted NDJSON event objects, thrown public text, and captured logs. Assert the expected
+`[REDACTED]` markers instead, so the test cannot pass by silently dropping all diagnostic context.
+Task 10 reuses this fixture through the route and Task 12 checks the rendered DOM, giving one
+traceable request-to-UI regression rather than unrelated unit-only assertions.
 
-Implement `previewCompletion` as a pure helper: it validates only `VALIDATING_ARTIFACTS -> COMPLETED`, closes the in-progress validation entry in a cloned activity array, appends one completed entry, and returns `{ status, activity, completedEntry }` without mutating or emitting. The prospective completed snapshot is therefore written inside the atomic staging package while live state remains `VALIDATING_ARTIFACTS`. Only after the package rename succeeds may the workflow adopt and best-effort emit that completion. Add injected-failure and abort tests after staged file two and immediately before rename; none may emit a completion event or leave a readable final package. Add a separate abort-immediately-after-rename test: it must not emit `CANCELLED`, delete the package, or persist diagnostic metadata over the result. If the response is already disconnected and the final event cannot be delivered, manifest-gated reload is the authority and returns `COMPLETED`.
+Implement `previewCompletion` as a pure helper: it validates only
+`VALIDATING_ARTIFACTS -> COMPLETED`, closes the in-progress validation entry in a cloned activity
+array, appends one completed entry, and returns `{ status, activity, completedEntry }` without
+mutating or emitting. The prospective completed snapshot is serialized inside the caller-owned
+temporary envelope while live state remains `VALIDATING_ARTIFACTS`. Only after final hard-link
+publication succeeds may the workflow adopt and best-effort emit that completion. Add
+injected-failure and abort tests before the final link; none may emit a completion event, leave a
+final completed envelope, or expose a virtual artifact. Add a separate
+abort-immediately-after-link test: it must not emit `CANCELLED`, delete the completed envelope, or
+publish a failed envelope over the result. If the response is already disconnected and the final
+event cannot be delivered, strict envelope reload is the authority and returns `COMPLETED`.
 
 Implement `terminalSnapshot` in the same file with this exact serialization boundary:
 
@@ -5795,14 +5526,23 @@ describe("createDeadline", () => {
 });
 ```
 
-Add workflow tests with a catalog call that waits for `options.signal.abort`. Assert the terminal snapshot is `DATAHUB_UNAVAILABLE`, `closeCount === 1`, provider generation calls remain zero, the final four artifact paths do not exist, and resolving the original pending promise afterward cannot emit `COMPLETED`.
+Add workflow tests with a catalog call that waits for `options.signal.abort`. Assert the terminal
+snapshot is `DATAHUB_UNAVAILABLE`, `closeCount === 1`, provider generation calls remain zero, all
+four public virtual downloads are unavailable, and resolving the original pending promise
+afterward cannot emit `COMPLETED`.
 
 Add an otherwise-successful analysis whose catalog close rejects and one whose close expires at the
 shared five-second boundary. Both must terminate as `MCP_UNAVAILABLE`, observe `closeCount === 1`,
 leave no legacy `impact-report.md`, never make deterministic context ready, make zero provider
-generation calls, and leave no package manifest or finalized package.
+generation calls, and publish no completed envelope or virtual artifact.
 
-Add browser-cancellation tests at the workflow boundary. Before package rename, assert the sanitized `CANCELLED` snapshot is persisted and emitted exactly once while the callback remains connected. With a callback that simulates a disconnected stream and returns without throwing, assert persistence still succeeds and `loadRunSnapshot` returns `CANCELLED`. At the storage barrier immediately after rename, assert reload returns `COMPLETED`, no cancellation diagnostic overwrites it, and a closed response merely omits the last event.
+Add browser-cancellation tests at the workflow boundary. Before final-envelope hard-link
+publication, assert the sanitized `CANCELLED` snapshot is persisted and emitted exactly once while
+the callback remains connected. With a callback that simulates a disconnected stream and returns
+without throwing, assert persistence still succeeds and `loadRunSnapshot` returns `CANCELLED`. At
+the storage barrier immediately after successful hard-link publication, assert reload returns
+`COMPLETED`, no cancellation diagnostic overwrites it, and a closed response merely omits the last
+event.
 
 Add a connection test whose fake SDK client never completes `connect`; abort the 15-second connection signal, then assert the SDK client `close()` is called exactly once and the safe error code is `MCP_UNAVAILABLE`.
 
@@ -5931,7 +5671,15 @@ weaken the exhaustive map with `Partial` or a catch-all key.
 
 Serialize the six configured values once through `WorkflowSnapshot.deadlinePolicy`. The 60-second Agents SDK analysis-tool limit is policy-only because the application-owned 55-second DataHub deadline is the authoritative event owner. Append instantiated owned events through `WorkflowSnapshot.deadlineEvents` with `{ kind, durationMs, attempt, outcome }`; never persist raw exceptions or provider traces. `MCP_CONNECT_TIMEOUT`, `DATAHUB_ANALYSIS_TIMEOUT`, `AGENT_TIMEOUT`, and `WORKFLOW_TIMEOUT` may appear only with `attempt: 1`; `GENERATION_TIMEOUT` may appear once for attempt 1 and once for attempt 2. Thus a run has at most six unique owner/attempt events. Add schema tests for the exact policy, the five event kinds, generation attempts 1–2, duplicate rejection, policy/event duration agreement, inconsistent Context Coverage, and rejection of any unexpected raw-reason field.
 
-Create `src/runtime/deadline-events.ts` with a workflow-owned `DeadlineEventRecorder`. Export only the narrow `RecordDeadlineEvent` callback type plus `createDeadlineEventRecorder()`. `record(event)` must parse through `DeadlineEventSchema`, reject a duplicate `kind:attempt`, and store no timestamps or errors. `snapshot()` returns an immutable array sorted by this owner order: MCP connect, DataHub analysis, generation, agent, workflow; generation then sorts by attempt. `preview(event)` returns the same validated/sorted prospective array without mutating recorder state, and `adopt(event)` is called only after atomic rename. Tests must prove duplicate rejection, six-event maximum, stable sort, preview non-mutation, and adopt-after-commit behavior.
+Create `src/runtime/deadline-events.ts` with a workflow-owned `DeadlineEventRecorder`. Export only
+the narrow `RecordDeadlineEvent` callback type plus `createDeadlineEventRecorder()`. `record(event)`
+must parse through `DeadlineEventSchema`, reject a duplicate `kind:attempt`, and store no timestamps
+or errors. `snapshot()` returns an immutable array sorted by this owner order: MCP connect, DataHub
+analysis, generation, agent, workflow; generation then sorts by attempt. `preview(event)` returns
+the same validated/sorted prospective array without mutating recorder state, and `adopt(event)` is
+called only after successful final-envelope hard-link publication. Tests must prove duplicate
+rejection, six-event maximum, stable sort, preview non-mutation, and adopt-after-publication
+behavior.
 
 - [ ] **Step 4: Apply deadlines at the owner of each resource**
 
@@ -5951,7 +5699,13 @@ deadline. A shared per-call expiry remains fixed `DATAHUB_UNAVAILABLE`; a shared
 rejection/expiry remains fixed `MCP_UNAVAILABLE`. Both settle before the parent budget and suppress
 late results.
 
-Task 9A must also replace Task 9's `signal: deps.signal` on `persistCompletedRun` with `signal: workflowScope.signal`. That exact classified 95-second signal must reach every staged write and the pre-rename check in `commitPackageAtomically`; a live browser signal cannot outlast and bypass the workflow deadline. Add a barrier-controlled fake-timer test that expires `WORKFLOW_TIMEOUT` between staged file writes, then releases the writer: staging is removed, no rename/package appears, and the only authoritative terminal snapshot is `CANCELLED`.
+Task 9A must also replace Task 9's `signal: deps.signal` on `persistCompletedRun` with
+`signal: workflowScope.signal`. That exact classified 95-second signal must reach temporary-envelope
+creation, handle writes, synchronization, and the pre-link abort check in `publishRunEnvelope`; a
+live browser signal cannot outlast and bypass the workflow deadline. Add a barrier-controlled
+fake-timer test that expires `WORKFLOW_TIMEOUT` before final hard-link publication, then releases
+the writer: the caller-owned temporary entry is removed, no final completed envelope appears, and
+the only authoritative terminal snapshot is `CANCELLED`.
 
 Create the deadline-event accumulator before the first transition. Pass it through the MCP connection owner and provider boundary, record each instantiated owner/attempt exactly once, and include its immutable snapshot plus the exact policy in every terminal `terminalSnapshot` call. A deadline that is never instantiated has no event. Completed owners record `completed`; the owner that expires records `expired`; already-instantiated owners interrupted by parent cancellation record `cancelled`. The SDK analysis-tool timeout remains visible in policy but produces no duplicate event. Tests must use a fake clock/timer and compare exact records rather than sleeping. Add a two-attempt generation case that yields two `GENERATION_TIMEOUT` records and a maximal case with exactly six events; a seventh event or duplicate owner/attempt must fail schema validation.
 
@@ -5971,7 +5725,13 @@ deadlineEvents,
 
 Import `DEADLINES_MS` and the deadline event type only in Task 9A. Update every application, fixture, cancellation, deadline, and regeneration test through the shared factory so no caller can inject fabricated persisted events.
 
-For the successful path, finalize the `AGENT_TIMEOUT` event when the provider returns, then preview only the still-active `WORKFLOW_TIMEOUT` event as `completed` in the same immutable prospective snapshot used by `previewCompletion`. Commit that preview only inside staging; if atomic rename fails, discard it and build the failure snapshot from the real recorder state. Once rename succeeds, adopt both the completed workflow state and the previewed workflow-deadline event without another abort check. This keeps committed metadata truthful without a post-commit rewrite.
+For the successful path, finalize the `AGENT_TIMEOUT` event when the provider returns, then preview
+only the still-active `WORKFLOW_TIMEOUT` event as `completed` in the same immutable prospective
+snapshot used by `previewCompletion`. Serialize that preview only inside the caller-owned temporary
+envelope; if final hard-link publication fails, discard it and build the failure snapshot from the
+real recorder state. Once the hard link succeeds, adopt both the completed workflow state and the
+previewed workflow-deadline event without another abort check. This keeps published metadata
+truthful without a post-publication rewrite.
 
 On every non-success terminal path, close all still-active events deterministically before constructing the snapshot: the owning expiry is `expired`, parent abort is `cancelled`, and an owner that returned before another component failed is `completed`. Persist the resulting immutable event array once; do not append events after serializing terminal metadata.
 
@@ -5985,15 +5745,34 @@ const toolDeadlinePolicy = {
 } as const;
 ```
 
-Add a fake-timer generation regression whose tool promise resolves after 30 seconds. Assert `GENERATION_TIMEOUT: expired`, terminal `GENERATION_FAILED`, no accepted draft, no artifact commit, and no late `COMPLETED` event. Also assert the captured `Runner.run` signal is exactly `input.abortScope.signal` and that no native `AbortSignal.timeout` or second agent timer is constructed.
+Add a fake-timer generation regression whose tool promise resolves after 30 seconds. Assert
+`GENERATION_TIMEOUT: expired`, terminal `GENERATION_FAILED`, no accepted draft, no completed-envelope
+publication, and no late `COMPLETED` event. Also assert the captured `Runner.run` signal is exactly
+`input.abortScope.signal` and that no native `AbortSignal.timeout` or second agent timer is
+constructed.
 
-After every awaited provider, catalog, renderer, validator, or nonterminal success-path pre-commit operation, call the active signal's `throwIfAborted()` before advancing status, emitting a success event, writing a final artifact, or publishing a success snapshot. This is the late-result guard. Once cancellation or a deadline has been classified into an immutable terminal outcome, diagnostic persistence and best-effort emission must use that captured outcome and must not recheck the necessarily aborted signal. The other exception is after the atomic `package` rename: that rename is the completion linearization point, so the workflow must adopt the already-committed completed snapshot and must not run a post-commit abort check that could relabel it `CANCELLED`.
+After every awaited provider, catalog, renderer, validator, or nonterminal success-path
+pre-publication operation, call the active signal's `throwIfAborted()` before advancing status,
+emitting a success event, or publishing a completed envelope. This is the late-result guard. Once
+cancellation or a deadline has been classified into an immutable terminal outcome, failed-envelope
+persistence and best-effort emission must use that captured outcome and must not recheck the
+necessarily aborted signal. The other exception is after final-envelope hard-link publication:
+successful link creation is the completion linearization point, so the workflow must adopt the
+already-published completed snapshot and must not run a post-publication abort check that could
+relabel it `CANCELLED`.
 
 Replace Task 9's raw-abort-only outer catch with one classified terminal boundary. If any active scope is aborted, use the innermost scope's `classifyAbort()` result; if the caught value is already a deadline `AppError`, preserve it. Map `AGENT_TIMEOUT` or `GENERATION_TIMEOUT` to `GENERATION_FAILED`, `WORKFLOW_TIMEOUT` or `REQUEST_CANCELLED` to `CANCELLED`, MCP connection expiry to `MCP_UNAVAILABLE`, and DataHub expiry to `DATAHUB_UNAVAILABLE`. Before building the snapshot, close the recorder events as described above and transition once. Persist through `persistFailedRun` with sanitized context plus the accepted draft and empty findings when validation had passed, or the last rejected draft and its bounded findings when rejection had occurred; the validation summary must describe exactly that persisted diagnostic payload. Then best-effort emit the same terminal snapshot. Only errors with no classified scope or closed `AppError` escape to the route fallback.
 
 Because the 90-second agent owner can expire before the first tool, during analysis, during generation, or during validation, Task 9A must add `GENERATION_FAILED` transitions from `RESOLVING_CONTEXT`, `ANALYZING_IMPACT`, and `VALIDATING_ARTIFACTS`; `GENERATING_ARTIFACTS` already permits it. Add a table-driven state-machine test for all four source states. Keep `CANCELLED` available from every nonterminal state.
 
-Add two explicit fake-timer workflow regressions. A provider that ignores work until the 90-second agent owner expires must persist and emit exactly one `GENERATION_FAILED` snapshot with `AGENT_TIMEOUT: expired`, `WORKFLOW_TIMEOUT: completed`, and no route fallback. A post-agent pre-commit hook that remains pending until the 95-second workflow owner expires must persist and emit exactly one `CANCELLED` snapshot with `AGENT_TIMEOUT: completed` and `WORKFLOW_TIMEOUT: expired`; resolving either stale promise afterward must not emit `COMPLETED`. Both tests reload the diagnostic snapshot from disk and compare the full exact bounded deadline-event array.
+Add two explicit fake-timer workflow regressions. A provider that ignores work until the 90-second
+agent owner expires must persist and emit exactly one `GENERATION_FAILED` snapshot with
+`AGENT_TIMEOUT: expired`, `WORKFLOW_TIMEOUT: completed`, and no route fallback. A post-agent
+pre-publication hook that remains pending until the 95-second workflow owner expires must persist
+and emit exactly one `CANCELLED` snapshot with `AGENT_TIMEOUT: completed` and
+`WORKFLOW_TIMEOUT: expired`; resolving either stale promise afterward must not emit `COMPLETED`.
+Both tests reload the failed envelope snapshot through `loadRunSnapshot` and compare the full exact
+bounded deadline-event array.
 
 The existing `runImpactAnalysis` close-before-publication path remains the sole owner after
 successful catalog creation: build the report in memory, close through the shared bounded
@@ -6011,7 +5790,14 @@ pnpm typecheck
 pnpm test
 ```
 
-Expected: connection or paginated capability-discovery timeout maps to `MCP_UNAVAILABLE`; required-read or `get_entities` timeout maps to `DATAHUB_UNAVAILABLE`; generation timeout maps to `GENERATION_FAILED`; browser cancellation before commit maps to `CANCELLED`; every terminal snapshot contains the exact policy and only stable deadline events; each owned MCP client closes exactly once; no pre-commit late result can mark a run completed or publish final artifacts; an abort after atomic rename leaves the committed completion authoritative on reload; a valid impact report that existed before generation failure remains available.
+Expected: connection or paginated capability-discovery timeout maps to `MCP_UNAVAILABLE`;
+required-read or `get_entities` timeout maps to `DATAHUB_UNAVAILABLE`; generation timeout maps to
+`GENERATION_FAILED`; browser cancellation before final-envelope publication maps to `CANCELLED`;
+every terminal snapshot contains the exact policy and only stable deadline events; each owned MCP
+client closes exactly once; no pre-publication late result can mark a run completed or expose
+virtual artifacts; an abort after successful hard-link publication leaves the completed envelope
+authoritative on reload; a valid impact report that existed before generation failure remains
+available.
 
 - [ ] **Step 6: Commit the deadline and cleanup boundary**
 
@@ -6051,19 +5837,34 @@ git commit -m "feat: enforce agent workflow deadlines"
 Create `src/config/web-config.test.ts` and assert:
 
 ```ts
+import { resolve } from "node:path";
 import { expect, it } from "vitest";
 import { loadWebConfig } from "./web-config.js";
 
 it("loads replay without DataHub or OpenAI secrets", () => {
-  expect(loadWebConfig({ LINEAGEGUARD_DEMO_MODE: "REPLAY" })).toMatchObject({
+  const runsRoot = resolve("test-runs");
+  expect(
+    loadWebConfig({ LINEAGEGUARD_DEMO_MODE: "REPLAY", LINEAGEGUARD_RUNS_DIR: runsRoot }),
+  ).toMatchObject({
     mode: "REPLAY",
-    runsRoot: "runs",
+    runsRoot,
   });
+});
+
+it.each([
+  ["missing", { LINEAGEGUARD_DEMO_MODE: "REPLAY" }],
+  ["relative", { LINEAGEGUARD_DEMO_MODE: "REPLAY", LINEAGEGUARD_RUNS_DIR: "relative-runs" }],
+])("rejects a %s runs root", (_name, environment) => {
+  expect(() => loadWebConfig(environment)).toThrow("Demo service configuration is invalid.");
 });
 
 it("requires OpenAI and DataHub configuration for live mode without echoing values", () => {
   expect(() =>
-    loadWebConfig({ LINEAGEGUARD_DEMO_MODE: "LIVE", OPENAI_API_KEY: "sk-secret" }),
+    loadWebConfig({
+      LINEAGEGUARD_DEMO_MODE: "LIVE",
+      LINEAGEGUARD_RUNS_DIR: resolve("test-runs"),
+      OPENAI_API_KEY: "sk-secret",
+    }),
   ).toThrow("Live demo configuration is incomplete.");
 });
 ```
@@ -6077,9 +5878,14 @@ Create `src/runs/create-run-id.test.ts` by moving the existing fixed-date format
 - `GET /api/runs/<run-id>` returns only sanitized metadata;
 - regeneration writes a new run and retains the parent context hash;
 - artifact download accepts only the four public names;
-- a missing/tampered package manifest or hash returns 404 and never falls back to a same-named run-root file;
-- traversal, unknown names, and symlink targets return 404 without an absolute path.
-- the Task 9 adversarial secret fixture runs through `POST /api/runs`; its raw sentinel is absent from the provider spy's request/context, route body, NDJSON events, every recursively read run file (context, draft, findings, metadata, or package), reload response, captured logs, and error text, while sanitized markers and bounded diagnostics remain.
+- a missing or hash/invariant-tampered final envelope returns 404 without any fallback;
+- traversal, unknown names, and malformed or linked final entries return 404 without an absolute path;
+- missing, relative, nonexistent, regular-file, symlink, and Windows-junction roots fail preflight
+  before provider, catalog, DataHub, or workflow calls; and
+- the Task 9 adversarial secret fixture runs through `POST /api/runs`; its raw sentinel is absent
+  from the provider spy's request/context, route body, NDJSON events, the validated internal
+  envelope, reload response, every public virtual download, captured logs, and error text, while
+  sanitized markers and bounded diagnostics remain.
 
 - [ ] **Step 2: Run the focused tests and verify route modules are absent**
 
@@ -6096,11 +5902,12 @@ Expected: FAIL because the web configuration, decoder, shared run-ID module, and
 Create `src/config/web-config.ts`:
 
 ```ts
+import { RunsRootPathSchema } from "./runtime-config.js";
 import { z } from "zod";
 
 const baseSchema = z.object({
   LINEAGEGUARD_DEMO_MODE: z.enum(["LIVE", "REPLAY"]).default("REPLAY"),
-  LINEAGEGUARD_RUNS_DIR: z.string().min(1).default("runs"),
+  LINEAGEGUARD_RUNS_DIR: RunsRootPathSchema,
   OPENAI_MODEL: z.string().min(1).default("gpt-5.6-sol"),
 });
 
@@ -6117,9 +5924,10 @@ export type WebConfig =
     };
 
 export function loadWebConfig(environment: NodeJS.ProcessEnv): WebConfig {
-  const base = baseSchema.parse(environment);
-  if (base.LINEAGEGUARD_DEMO_MODE === "REPLAY") {
-    return { mode: "REPLAY", runsRoot: base.LINEAGEGUARD_RUNS_DIR };
+  const base = baseSchema.safeParse(environment);
+  if (!base.success) throw new Error("Demo service configuration is invalid.");
+  if (base.data.LINEAGEGUARD_DEMO_MODE === "REPLAY") {
+    return { mode: "REPLAY", runsRoot: base.data.LINEAGEGUARD_RUNS_DIR };
   }
   const live = z
     .object({
@@ -6132,9 +5940,9 @@ export function loadWebConfig(environment: NodeJS.ProcessEnv): WebConfig {
   if (!live.success) throw new Error("Live demo configuration is incomplete.");
   return {
     mode: "LIVE",
-    runsRoot: base.LINEAGEGUARD_RUNS_DIR,
+    runsRoot: base.data.LINEAGEGUARD_RUNS_DIR,
     openaiApiKey: live.data.OPENAI_API_KEY,
-    openaiModel: base.OPENAI_MODEL,
+    openaiModel: base.data.OPENAI_MODEL,
     datahubGmsUrl: live.data.DATAHUB_GMS_URL,
     datahubGmsToken: live.data.DATAHUB_GMS_TOKEN,
     uvxPath: live.data.DATAHUB_MCP_UVX_PATH,
@@ -6179,7 +5987,9 @@ Create `src/runs/create-run-id.ts` by moving the existing `randomBytes`-backed `
 
 - [ ] **Step 5: Implement the initial streamed Route Handler**
 
-Create `app/api/runs/route.ts` with `export const runtime = "nodejs"`, import `createRunId` from `src/runs/create-run-id.ts`, and use this response pattern:
+Create `app/api/runs/route.ts` with `export const runtime = "nodejs"`, import
+`assertTrustedRunsRoot` from `src/artifacts/run-envelope-files.ts`, import `createRunId` from
+`src/runs/create-run-id.ts`, and use this response pattern:
 
 ```ts
 export async function POST(request: Request): Promise<Response> {
@@ -6194,6 +6004,12 @@ export async function POST(request: Request): Promise<Response> {
     config = loadWebConfig(process.env);
   } catch {
     return Response.json({ error: "Demo service is not configured." }, { status: 503 });
+  }
+  let trustedRunsRoot: string;
+  try {
+    trustedRunsRoot = await assertTrustedRunsRoot(config.runsRoot);
+  } catch {
+    return Response.json({ error: "Demo service storage is unavailable." }, { status: 503 });
   }
   if (input.mode !== config.mode) {
     return Response.json({ error: "Requested mode does not match server mode." }, { status: 409 });
@@ -6223,6 +6039,7 @@ export async function POST(request: Request): Promise<Response> {
         const snapshot = await runAgentWorkflow(
           createWebWorkflowDependencies({
             config,
+            runsRoot: trustedRunsRoot,
             request: input.request,
             runId,
             signal: abortController.signal,
@@ -6234,7 +6051,7 @@ export async function POST(request: Request): Promise<Response> {
         const snapshot = safeUnexpectedFailureSnapshot(runId, config.mode);
         try {
           await persistFailedRun({
-            runsRoot: config.runsRoot,
+            runsRoot: trustedRunsRoot,
             runId,
             snapshot,
             secrets: config.mode === "LIVE" ? [config.openaiApiKey, config.datahubGmsToken] : [],
@@ -6265,9 +6082,28 @@ export async function POST(request: Request): Promise<Response> {
 }
 ```
 
-Import `WorkflowEvent`, `isTerminalWorkflowStatus`, and `persistFailedRun`. Route tests must prove that an already-aborted request and an abort after stream creation both reach the same cancellation path; a connected client receives one terminal cancellation/deadline snapshot; a disconnected controller does not make persistence fail; an injected unclassified workflow error persists the same closed fallback so `GET` can reopen it; a simulated persistence failure still streams only that fallback; and reloading after an abort that races after atomic rename returns the committed `COMPLETED` snapshot rather than `CANCELLED`.
+Import `WorkflowEvent`, `isTerminalWorkflowStatus`, and `persistFailedRun`. Route tests must prove
+that storage preflight happens before `createWebWorkflowDependencies` or any provider, catalog,
+DataHub, or workflow call; an already-aborted request and an abort after stream creation both reach
+the same cancellation path; a connected client receives one terminal cancellation/deadline
+snapshot; a disconnected controller does not make persistence fail; an injected unclassified
+workflow error persists the same closed fallback so `GET` can reopen it; a simulated persistence
+failure still streams only that fallback; and reloading after an abort that races after successful
+final-envelope hard-link publication returns the authoritative `COMPLETED` snapshot rather than
+`CANCELLED`.
 
-Create `src/app/web-dependencies.ts`. Export `createWebWorkflowDependencies(input)` returning `RunAgentWorkflowDependencies`: shared fields are the request, mode, run ID, runs root, signal, `clock: () => new Date()`, and event callback. For `REPLAY`, return `new FakeAgentProvider()`, `async (_scope, _recordDeadlineEvent) => new FixtureCatalog()`, and `secrets: []`; the fixture factory accepts but ignores the classified scope and recorder callback. For `LIVE`, return `new OpenAIAgentProvider({ apiKey: config.openaiApiKey, model: config.openaiModel })`, `(scope, recordDeadlineEvent) => createDataHubCatalog(runtimeConfig, scope, recordDeadlineEvent)`, and `secrets: [config.openaiApiKey, config.datahubGmsToken]`. Construct `runtimeConfig` with `loadRuntimeConfig` from a new object containing only `DATAHUB_GMS_URL`, `DATAHUB_GMS_TOKEN`, and `DATAHUB_MCP_UVX_PATH`; never log, spread into a response, or serialize that object.
+Create `src/app/web-dependencies.ts`. Export `createWebWorkflowDependencies(input)` returning
+`RunAgentWorkflowDependencies`: shared fields are the request, mode, run ID, the already-canonical
+`input.runsRoot`, signal, `clock: () => new Date()`, and event callback. For `REPLAY`, return
+`new FakeAgentProvider()`, `async (_scope, _recordDeadlineEvent) => new FixtureCatalog()`, and
+`secrets: []`; the fixture factory accepts but ignores the classified scope and recorder callback.
+For `LIVE`, return
+`new OpenAIAgentProvider({ apiKey: config.openaiApiKey, model: config.openaiModel })`,
+`(scope, recordDeadlineEvent) => createDataHubCatalog(runtimeConfig, scope, recordDeadlineEvent)`,
+and `secrets: [config.openaiApiKey, config.datahubGmsToken]`. Construct `runtimeConfig` with
+`loadRuntimeConfig` from a new object containing only `DATAHUB_GMS_URL`, `DATAHUB_GMS_TOKEN`,
+`DATAHUB_MCP_UVX_PATH`, and `LINEAGEGUARD_RUNS_DIR: input.runsRoot`; never log, spread into a
+response, or serialize that object.
 
 Export `safeUnexpectedFailureSnapshot(runId, mode)` from the same file by parsing a snapshot with status/failure `GENERATION_FAILED`, message `"The workflow failed unexpectedly."`, empty activity/evidence/facts/assumptions/unknowns/artifacts, `validation: { outcome: "NOT_RUN", findingCount: 0, findingCodes: [] }`, the exact six-value deadline policy, an empty deadline-event list, and no provider, prompt, path, or exception details. Route tests must parse this fallback through `WorkflowSnapshotSchema` and cover both modes.
 
@@ -6275,14 +6111,22 @@ Export `safeUnexpectedFailureSnapshot(runId, mode)` from the same file by parsin
 
 Use explicit local parameter types and `runtime = "nodejs"` in all three handlers. Do not depend on generated global `RouteContext`, because `.next/types` is absent in a clean checkout before the first Next build:
 
+Import `loadRunSnapshot`, `loadRegenerationContext`, `reserveGenerationRetry`, and
+`readCompletedPackageFile` from `src/runs/run-store.ts`; do not import persistence readers from the
+legacy artifact facade. Every handler must load configuration and call `assertTrustedRunsRoot`
+before storage access. Run creation must complete this preflight before provider, catalog, DataHub,
+or workflow construction.
+
 ```ts
 type RunRouteContext = { readonly params: Promise<{ readonly runId: string }> };
 
 export async function GET(_request: Request, context: RunRouteContext): Promise<Response> {
   try {
     const { runId } = await context.params;
+    const config = loadWebConfig(process.env);
+    const runsRoot = await assertTrustedRunsRoot(config.runsRoot);
     const snapshot = await loadRunSnapshot({
-      runsRoot: loadWebConfig(process.env).runsRoot,
+      runsRoot,
       runId,
     });
     return Response.json(snapshot, { headers: { "Cache-Control": "no-store" } });
@@ -6294,7 +6138,21 @@ export async function GET(_request: Request, context: RunRouteContext): Promise<
 
 The artifact handler similarly declares `{ readonly params: Promise<{ readonly runId: string; readonly filename: string }> }`. A clean-copy test deletes `.next`, runs `pnpm typecheck` before any `next dev`, `next build`, or `next typegen`, and must pass.
 
-The regeneration handler accepts no JSON body and must not accept a client-supplied mode. It loads `WebConfig`, allocates a fresh run ID, and builds server-owned regeneration dependencies from the configured mode: the matching fixture/OpenAI provider, runs root, request signal (including the already-aborted case), clock, active secret list, and event callback. It calls `regeneratePackage`, which owns the fresh agent/workflow deadline chain, loads the parent context/DataHub metadata, and rejects when the persisted parent mode differs from the current server configuration. The route must not accept provider, model, secrets, runs root, DataHub metadata, or deadlines from JSON and must never construct a catalog. Return NDJSON using the same stream helper. Route tests cover both server modes, a non-empty request-body rejection, configuration failure, pre-abort, persisted-parent/server-mode mismatch, secret propagation to the sanitizer boundary, and zero DataHub calls. The E2E regeneration assertion must additionally prove the POST request has an empty body. The download handler must parse `filename` with this public allowlist before calling `readCompletedPackageFile`; that manifest-gated reader is the only artifact download path:
+The regeneration handler accepts no JSON body and must not accept a client-supplied mode. It loads
+`WebConfig`, preflights and canonicalizes the trusted runs root, allocates a fresh run ID, and
+builds server-owned regeneration dependencies from the configured mode: the matching
+fixture/OpenAI provider, canonical runs root, request signal (including the already-aborted case),
+clock, active secret list, and event callback. It calls `regeneratePackage`, whose application
+boundary owns `loadRegenerationContext` and `reserveGenerationRetry`, the fresh agent/workflow
+deadline chain, parent context/DataHub metadata loading, and persisted-parent/server-mode
+validation. The route must not accept provider, model, secrets, runs root, DataHub metadata, or
+deadlines from JSON and must never construct a catalog. Return NDJSON using the same stream helper.
+Route tests cover both server modes, a non-empty request-body rejection, configuration failure,
+storage-preflight failure, pre-abort, persisted-parent/server-mode mismatch, secret propagation to
+the sanitizer boundary, and zero DataHub calls. The E2E regeneration assertion must additionally
+prove the POST request has an empty body. The download handler must parse `filename` with this
+public allowlist before calling `readCompletedPackageFile`; that strict, hash-verified envelope
+reader is the only artifact download path:
 
 ```ts
 const PublicArtifactSchema = z.enum([
@@ -6312,11 +6170,13 @@ Return `Content-Type: text/sql; charset=utf-8` for SQL, `text/markdown; charset=
 Run:
 
 ```powershell
-pnpm vitest run src/config/web-config.test.ts src/ui/read-ndjson.test.ts src/runs/create-run-id.test.ts tests/api/run-routes.test.ts src/artifacts/write-run-artifacts.test.ts src/cli.test.ts
+pnpm vitest run src/config/web-config.test.ts src/ui/read-ndjson.test.ts src/runs/create-run-id.test.ts tests/api/run-routes.test.ts src/runs/run-store.test.ts src/artifacts/run-envelope-files.test.ts src/cli.test.ts
 pnpm typecheck
 ```
 
-Expected: chunked event decoding, replay/live configuration, streamed success, regeneration, safe reload, allowlisted downloads, traversal rejection, and secret-safe failures pass.
+Expected: chunked event decoding, replay/live configuration, trusted-root rejection before external
+calls, streamed success, regeneration, strict envelope reload, allowlisted virtual downloads,
+tampered-envelope and traversal rejection, and secret-safe failures pass.
 
 - [ ] **Step 8: Commit the browser API boundary**
 
@@ -6342,6 +6202,7 @@ git commit -m "feat: stream agent runs through safe Next.js routes"
 - Create: `src/ui/artifact-workspace.tsx`
 - Create: `src/ui/run-error.tsx`
 - Create: `playwright.config.ts`
+- Create: `tests/e2e/global-teardown.ts`
 - Create: `tests/e2e/lineageguard-demo.spec.ts`
 - Create: `tests/integration/runtime-mode-page.integration.test.ts`
 - Modify: `package.json`
@@ -6357,13 +6218,20 @@ git commit -m "feat: stream agent runs through safe Next.js routes"
 Create `playwright.config.ts`:
 
 ```ts
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { defineConfig, devices } from "@playwright/test";
+
+const runsRoot = mkdtempSync(join(tmpdir(), "lineageguard-playwright-runs-"));
+process.env.LINEAGEGUARD_E2E_RUNS_DIR = runsRoot;
 
 export default defineConfig({
   testDir: "./tests/e2e",
   fullyParallel: false,
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
+  globalTeardown: "./tests/e2e/global-teardown.ts",
   use: {
     baseURL: "http://127.0.0.1:3107",
     screenshot: "only-on-failure",
@@ -6374,7 +6242,7 @@ export default defineConfig({
     command: "pnpm dev --hostname 127.0.0.1 --port 3107",
     env: {
       LINEAGEGUARD_DEMO_MODE: "REPLAY",
-      LINEAGEGUARD_RUNS_DIR: ".tmp/playwright-runs",
+      LINEAGEGUARD_RUNS_DIR: runsRoot,
     },
     reuseExistingServer: false,
     timeout: 120_000,
@@ -6382,6 +6250,35 @@ export default defineConfig({
   },
 });
 ```
+
+Create `tests/e2e/global-teardown.ts`:
+
+```ts
+import { realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute } from "node:path";
+
+export default async function globalTeardown(): Promise<void> {
+  const configuredRoot = process.env.LINEAGEGUARD_E2E_RUNS_DIR;
+  if (configuredRoot === undefined || !isAbsolute(configuredRoot)) {
+    throw new Error("The Playwright runs root is invalid.");
+  }
+  const [canonicalRoot, canonicalTemp] = await Promise.all([
+    realpath(configuredRoot),
+    realpath(tmpdir()),
+  ]);
+  if (
+    dirname(canonicalRoot) !== canonicalTemp ||
+    !basename(canonicalRoot).startsWith("lineageguard-playwright-runs-")
+  ) {
+    throw new Error("The Playwright runs root is outside the owned temporary boundary.");
+  }
+  await rm(canonicalRoot, { recursive: true, force: true });
+}
+```
+
+The Playwright harness, not application runtime code, owns creation and cleanup of this explicit
+absolute root.
 
 Create the first test in `tests/e2e/lineageguard-demo.spec.ts`:
 
@@ -8332,10 +8229,14 @@ In `.github/workflows/ci.yml`, keep all existing action references pinned to the
 Replace the individual validation commands with:
 
 ```yaml
+- name: Prepare trusted runs root
+  shell: bash
+  run: mkdir -p "$RUNNER_TEMP/lineageguard-runs"
+
 - name: Run offline validation gate
   env:
     LINEAGEGUARD_DEMO_MODE: REPLAY
-    LINEAGEGUARD_RUNS_DIR: .tmp/ci-runs
+    LINEAGEGUARD_RUNS_DIR: ${{ runner.temp }}/lineageguard-runs
   run: pnpm verify:offline
 ```
 
@@ -8387,7 +8288,6 @@ git commit -m "ci: add offline browser acceptance"
 - Create: `examples/002-nextjs-openai-agent-demo/migration-down.sql`
 - Create: `examples/002-nextjs-openai-agent-demo/validation.sql`
 - Create: `examples/002-nextjs-openai-agent-demo/rollout-plan.md`
-- Create: `examples/002-nextjs-openai-agent-demo/run-metadata.json`
 - Modify: `package.json`
 - Modify: `README.md`
 - Modify: `docs/demo-scenario.md`
@@ -8414,7 +8314,7 @@ import { OpenAIAgentProvider } from "../../src/agent/openai-agent-provider.js";
 import { runAgentWorkflow } from "../../src/app/run-agent-workflow.js";
 import { loadRuntimeConfig } from "../../src/config/runtime-config.js";
 import { createDataHubCatalog } from "../../src/datahub/create-catalog.js";
-import { readCompletedPackageFile } from "../../src/artifacts/write-run-artifacts.js";
+import { loadRunSnapshot } from "../../src/runs/run-store.js";
 
 const enabled = process.env.RUN_LIVE_OPENAI_TEST === "1";
 const roots: string[] = [];
@@ -8426,12 +8326,15 @@ afterAll(async () => {
 (enabled ? it : it.skip)(
   "uses live DataHub and OpenAI without executing or mutating",
   async () => {
-    const config = loadRuntimeConfig(process.env);
     const apiKey = process.env.OPENAI_API_KEY;
     if (apiKey === undefined)
       throw new Error("OPENAI_API_KEY is required for the live smoke test.");
     const runsRoot = await mkdtemp(join(tmpdir(), "lineageguard-openai-live-"));
     roots.push(runsRoot);
+    const config = loadRuntimeConfig({
+      ...process.env,
+      LINEAGEGUARD_RUNS_DIR: runsRoot,
+    });
     const result = await runAgentWorkflow({
       request:
         "Rename column customer_id to customer_key in dataset snowflake:b2fd91.order_entry_db.analytics.order_details",
@@ -8454,13 +8357,12 @@ afterAll(async () => {
       impact: { score: 90, downstreamAssets: 24, columnAffectedAssets: 11 },
     });
     expect(result.artifacts).toHaveLength(4);
-    const metadata = await readCompletedPackageFile({
+    const snapshot = await loadRunSnapshot({
       runsRoot,
       runId: result.runId,
-      filename: "run-metadata.json",
     });
-    expect(metadata).not.toContain(apiKey);
-    expect(metadata).not.toContain(config.datahubGmsToken);
+    expect(JSON.stringify(snapshot)).not.toContain(apiKey);
+    expect(JSON.stringify(snapshot)).not.toContain(config.datahubGmsToken);
   },
   120_000,
 );
@@ -8488,16 +8390,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { FakeAgentProvider } from "../src/agent/fake-agent-provider.js";
 import { runAgentWorkflow } from "../src/app/run-agent-workflow.js";
-import { readCompletedPackageFile } from "../src/artifacts/write-run-artifacts.js";
 import { FixtureCatalog } from "../src/demo/fixture-catalog.js";
+import { virtualArtifactFilenames } from "../src/runs/run-envelope.js";
+import { readCompletedPackageFile } from "../src/runs/run-store.js";
 
-const filenames = [
-  "migration-up.sql",
-  "migration-down.sql",
-  "validation.sql",
-  "rollout-plan.md",
-  "run-metadata.json",
-] as const;
+const filenames = virtualArtifactFilenames;
 const runsRoot = await mkdtemp(join(tmpdir(), "lineageguard-example-"));
 const runId = "nextjs-openai-agent-demo";
 const destination = resolve("examples", "002-nextjs-openai-agent-demo");
@@ -8541,7 +8438,6 @@ migration-up.sql
 migration-down.sql
 validation.sql
 rollout-plan.md
-run-metadata.json
 ```
 
 Before staging, run these exact checks:
@@ -8697,9 +8593,13 @@ Application code—not the model—owns dataset resolution, completeness, Contex
 
 The Route Handler emits only `WorkflowEventSchema` records as `application/x-ndjson`. The client validates every record before rendering. A run has one terminal snapshot, and late events cannot replace a terminal failure, cancellation, or committed completion.
 
-## Run Directory Layout
+## Flat Run Envelope Storage
 
-Each run writes only beneath `LINEAGEGUARD_RUNS_DIR/<run-id>/`. Drafts and findings remain outside the public package. Four allowlisted artifacts become downloadable only after create-only staging and an atomic `package/manifest.json` commit with verified hashes.
+Each terminal run is published once as an immutable `run-<run-id>.json` envelope directly beneath
+an explicit absolute, pre-created trusted `LINEAGEGUARD_RUNS_DIR`. The envelope is bounded,
+strictly parsed, hash-verified, and cross-field validated before use. Completed runs expose only
+the four allowlisted virtual migration artifacts; context, draft, findings, hashes, temporary
+names, and native paths remain private.
 
 ## Artifact Classification
 
@@ -8707,11 +8607,16 @@ Executable Snowflake SQL is permitted only for a separately verified three-part 
 
 ## Validation and Repair Limit
 
-The agent receives one initial package attempt and at most one validation-driven repair. Acceptance closes generation permanently. Failed validation preserves only sanitized draft findings and never publishes a package manifest.
+The agent receives one initial package attempt and at most one validation-driven repair. Acceptance
+closes generation permanently. Failed validation preserves only bounded sanitized private envelope
+data and never publishes a completed envelope.
 
 ## Cancellation and Timeouts
 
-The browser request, MCP connection and reads, agent run, nested generation, and overall workflow have explicit abort/deadline handling. Owned subprocesses close, staging data is removed, and a late continuation cannot publish `COMPLETED` after cancellation or failure.
+The browser request, MCP connection and reads, agent run, nested generation, and overall workflow
+have explicit abort/deadline handling. Owned subprocesses close, caller-owned temporary envelope
+entries are removed before publication, and a late continuation cannot publish `COMPLETED` after
+cancellation or failure.
 
 ## Secret and Trace Handling
 
@@ -11247,7 +11152,10 @@ checkbox unchecked unless that row is `PASSED`. The replay checks may be complet
 gate. The repository validator requires the links and coherent structured record but must not
 require or fabricate a live `PASSED` value.
 
-Create `examples/002-nextjs-openai-agent-demo/README.md` explaining each artifact and `run-metadata.json`, the 24/11/90 fixture facts, Evidence Completeness, Context Coverage, execution classification, and why replay is not a live service claim.
+Create `examples/002-nextjs-openai-agent-demo/README.md` explaining each of the four public virtual
+artifacts, the 24/11/90 fixture facts, Evidence Completeness, Context Coverage, execution
+classification, and why replay is not a live service claim. Do not publish snapshot metadata,
+context, draft, findings, hashes, or native envelope paths with the examples.
 
 - [ ] **Step 4: Strengthen setup and the three-minute story**
 
