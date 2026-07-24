@@ -63,6 +63,13 @@ interface ExecutionState {
   analysisResult?: AnalyzeRenameResult;
 }
 
+function toolSignal(runSignal: AbortSignal, sdkSignal?: AbortSignal): AbortSignal {
+  if (sdkSignal === undefined || sdkSignal === runSignal) {
+    return runSignal;
+  }
+  return AbortSignal.any([runSignal, sdkSignal]);
+}
+
 export class OpenAIAgentProvider implements AgentProvider {
   readonly #model: string;
   readonly #runner: Runner;
@@ -89,7 +96,9 @@ export class OpenAIAgentProvider implements AgentProvider {
       generationAttempts: 0,
       accepted: false,
     };
-    const tools = this.createTools(input.tools, input.signal, execution);
+    const deadline = AbortSignal.timeout(90_000);
+    const signal = AbortSignal.any([input.signal, deadline]);
+    const tools = this.createTools(input.tools, signal, execution);
     const agent = new Agent({
       name: "LineageGuard migration planner",
       instructions: migrationAgentInstructions,
@@ -102,8 +111,6 @@ export class OpenAIAgentProvider implements AgentProvider {
       outputType: CompletionSchema,
       tools,
     });
-    const deadline = AbortSignal.timeout(90_000);
-    const signal = AbortSignal.any([input.signal, deadline]);
     const attempt = await (async () => {
       try {
         const result = await this.#runner.run(agent, input.request, {
@@ -202,7 +209,9 @@ export class OpenAIAgentProvider implements AgentProvider {
         parameters: z.object({ request: z.string().min(1).max(500) }).strict(),
         timeoutMs: 60_000,
         timeoutBehavior: "raise_exception",
-        execute: async ({ request }) => {
+        execute: async ({ request }, _context, details) => {
+          const effectiveSignal = toolSignal(signal, details?.signal);
+          effectiveSignal.throwIfAborted();
           if (execution.analysisCalls >= 1) {
             return {
               kind: "failed" as const,
@@ -211,7 +220,8 @@ export class OpenAIAgentProvider implements AgentProvider {
             };
           }
           execution.analysisCalls += 1;
-          const result = await tools.analyzeRenameChange({ request }, signal);
+          const result = await tools.analyzeRenameChange({ request }, effectiveSignal);
+          effectiveSignal.throwIfAborted();
           execution.analysisResult = result;
           return result;
         },
@@ -220,7 +230,9 @@ export class OpenAIAgentProvider implements AgentProvider {
         name: "generate_migration_package",
         description: "Validate, render, and persist one grounded structured migration package.",
         parameters: MigrationPackageDraftSchema,
-        execute: async (draft) => {
+        execute: async (draft, _context, details) => {
+          const effectiveSignal = toolSignal(signal, details?.signal);
+          effectiveSignal.throwIfAborted();
           if (execution.analysisResult?.kind !== "ready") {
             return {
               kind: "rejected" as const,
@@ -244,7 +256,8 @@ export class OpenAIAgentProvider implements AgentProvider {
             };
           }
           execution.generationAttempts += 1;
-          const result = await tools.generateMigrationPackage(draft, signal);
+          const result = await tools.generateMigrationPackage(draft, effectiveSignal);
+          effectiveSignal.throwIfAborted();
           if (result.kind === "accepted") {
             execution.accepted = true;
           }

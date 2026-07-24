@@ -17,7 +17,11 @@ interface MockToolConfig {
   readonly strict: boolean;
   readonly timeoutMs?: number;
   readonly timeoutBehavior?: string;
-  readonly execute: (input: unknown) => Promise<unknown>;
+  readonly execute: (
+    input: unknown,
+    context?: unknown,
+    details?: { readonly signal?: AbortSignal },
+  ) => Promise<unknown>;
 }
 
 interface MockAgentConfig {
@@ -135,15 +139,17 @@ function findTool(agent: MockAgentConfig, name: string): MockToolConfig {
 async function analyze(
   agent: MockAgentConfig,
   request = "Rename column customer_id to customer_key in dataset example",
+  details?: { readonly signal?: AbortSignal },
 ): Promise<unknown> {
-  return findTool(agent, "analyze_rename_change").execute({ request });
+  return findTool(agent, "analyze_rename_change").execute({ request }, undefined, details);
 }
 
 async function generate(
   agent: MockAgentConfig,
   draft: MigrationPackageDraft = createGoldenDraft(makeChangeContext()),
+  details?: { readonly signal?: AbortSignal },
 ): Promise<unknown> {
-  return findTool(agent, "generate_migration_package").execute(draft);
+  return findTool(agent, "generate_migration_package").execute(draft, undefined, details);
 }
 
 function expectSanitizedGenerationFailure(
@@ -596,6 +602,195 @@ describe("OpenAIAgentProvider", () => {
       },
     });
     expect(JSON.stringify(result)).not.toContain("private model reasoning");
+  });
+
+  it("passes the combined agent deadline signal to both application tools", async () => {
+    let runnerSignal: AbortSignal | undefined;
+    const callbackSignals: AbortSignal[] = [];
+    const tools = makeTools({
+      analyzeRenameChange: vi.fn().mockImplementation(async (_input, signal: AbortSignal) => {
+        callbackSignals.push(signal);
+        return { kind: "ready", context: makeChangeContext() };
+      }),
+      generateMigrationPackage: vi.fn().mockImplementation(async (_draft, signal: AbortSignal) => {
+        callbackSignals.push(signal);
+        return { kind: "accepted", classification: "ADVISORY_ONLY" };
+      }),
+    });
+    sdk.run.mockImplementation(async (agent, _request, options) => {
+      const signal = options.signal;
+      if (!(signal instanceof AbortSignal)) {
+        throw new Error("Missing runner signal.");
+      }
+      runnerSignal = signal;
+      await analyze(agent);
+      await generate(agent);
+      return mockResult({ status: "completed" });
+    });
+
+    await new OpenAIAgentProvider({ apiKey: "test-provider-key" }).run({
+      request: "Rename column customer_id to customer_key in dataset example",
+      tools,
+      signal: new AbortController().signal,
+    });
+
+    expect(callbackSignals).toEqual([runnerSignal, runnerSignal]);
+  });
+
+  it("combines the SDK analysis timeout signal into the application callback signal", async () => {
+    const toolTimeout = new AbortController();
+    let callbackSignal: AbortSignal | undefined;
+    sdk.run.mockImplementation(async (agent) => {
+      await analyze(agent, undefined, { signal: toolTimeout.signal });
+      await generate(agent);
+      return mockResult({ status: "completed" });
+    });
+    const tools = makeTools({
+      analyzeRenameChange: vi.fn().mockImplementation(async (_input, signal: AbortSignal) => {
+        callbackSignal = signal;
+        return { kind: "ready", context: makeChangeContext() };
+      }),
+    });
+
+    await new OpenAIAgentProvider({ apiKey: "test-provider-key" }).run({
+      request: "Rename column customer_id to customer_key in dataset example",
+      tools,
+      signal: new AbortController().signal,
+    });
+    const reason = new Error("SDK analysis tool timeout");
+    toolTimeout.abort(reason);
+
+    expect(callbackSignal).toBeInstanceOf(AbortSignal);
+    expect(callbackSignal).not.toBe(toolTimeout.signal);
+    expect(callbackSignal?.aborted).toBe(true);
+    expect(callbackSignal?.reason).toBe(reason);
+  });
+
+  it("does not retain ready analysis that resolves after its effective signal aborts", async () => {
+    const toolTimeout = new AbortController();
+    const reason = new Error("analysis timeout");
+    let resolveAnalysis!: (value: AnalyzeRenameResult) => void;
+    const pendingAnalysis = new Promise<AnalyzeRenameResult>((resolve) => {
+      resolveAnalysis = resolve;
+    });
+    let lateResult: unknown;
+    let lateError: unknown;
+    let postAbortGeneration: unknown;
+    sdk.run.mockImplementation(async (agent) => {
+      const pending = analyze(agent, undefined, { signal: toolTimeout.signal });
+      toolTimeout.abort(reason);
+      resolveAnalysis({ kind: "ready", context: makeChangeContext() });
+      try {
+        lateResult = await pending;
+      } catch (error) {
+        lateError = error;
+      }
+      postAbortGeneration = await generate(agent);
+      return mockResult({ status: "completed" });
+    });
+    const generateMigrationPackage = vi.fn();
+
+    const result = await new OpenAIAgentProvider({ apiKey: "test-provider-key" }).run({
+      request: "Rename column customer_id to customer_key in dataset example",
+      tools: makeTools({
+        analyzeRenameChange: vi.fn().mockReturnValue(pendingAnalysis),
+        generateMigrationPackage,
+      }),
+      signal: new AbortController().signal,
+    });
+
+    expect(lateResult).toBeUndefined();
+    expect(lateError).toBe(reason);
+    expect(postAbortGeneration).toEqual({
+      kind: "rejected",
+      findings: [{ code: "ANALYSIS_REQUIRED", message: "Complete analysis before generation." }],
+    });
+    expect(generateMigrationPackage).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      status: "failed",
+      analysisCalls: 1,
+      generationAttempts: 0,
+      failure: { code: "ANALYSIS_FAILED" },
+    });
+  });
+
+  it("does not retain package acceptance that resolves after its effective signal aborts", async () => {
+    const toolTimeout = new AbortController();
+    const reason = new Error("generation timeout");
+    let resolveGeneration!: (value: GeneratePackageResult) => void;
+    const pendingGeneration = new Promise<GeneratePackageResult>((resolve) => {
+      resolveGeneration = resolve;
+    });
+    let lateResult: unknown;
+    let lateError: unknown;
+    let retryResult: unknown;
+    sdk.run.mockImplementation(async (agent) => {
+      await analyze(agent);
+      const pending = generate(agent, undefined, { signal: toolTimeout.signal });
+      toolTimeout.abort(reason);
+      resolveGeneration({ kind: "accepted", classification: "ADVISORY_ONLY" });
+      try {
+        lateResult = await pending;
+      } catch (error) {
+        lateError = error;
+      }
+      retryResult = await generate(agent);
+      return mockResult({ status: "completed" });
+    });
+    const generateMigrationPackage = vi
+      .fn()
+      .mockReturnValueOnce(pendingGeneration)
+      .mockResolvedValueOnce({
+        kind: "accepted",
+        classification: "ADVISORY_ONLY",
+      } satisfies GeneratePackageResult);
+
+    const result = await new OpenAIAgentProvider({ apiKey: "test-provider-key" }).run({
+      request: "Rename column customer_id to customer_key in dataset example",
+      tools: makeTools({ generateMigrationPackage }),
+      signal: new AbortController().signal,
+    });
+
+    expect(lateResult).toBeUndefined();
+    expect(lateError).toBe(reason);
+    expect(retryResult).toEqual({ kind: "accepted", classification: "ADVISORY_ONLY" });
+    expect(generateMigrationPackage).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      status: "completed",
+      analysisCalls: 1,
+      generationAttempts: 2,
+    });
+  });
+
+  it("rejects repeated analysis without calling the application twice", async () => {
+    let repeatedResult: unknown;
+    sdk.run.mockImplementation(async (agent) => {
+      await analyze(agent);
+      repeatedResult = await analyze(agent);
+      await generate(agent);
+      return mockResult({ status: "completed" });
+    });
+    const analyzeRenameChange = vi
+      .fn()
+      .mockResolvedValue({ kind: "ready", context: makeChangeContext() });
+
+    const result = await new OpenAIAgentProvider({ apiKey: "test-provider-key" }).run({
+      request: "Rename column customer_id to customer_key in dataset example",
+      tools: makeTools({ analyzeRenameChange }),
+      signal: new AbortController().signal,
+    });
+
+    expect(repeatedResult).toEqual({
+      kind: "failed",
+      code: "ANALYSIS_FAILED",
+      message: "Analysis may be called only once per run.",
+    });
+    expect(analyzeRenameChange).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      status: "completed",
+      analysisCalls: 1,
+      generationAttempts: 1,
+    });
   });
 
   it("propagates request cancellation instead of converting it to generation failure", async () => {
