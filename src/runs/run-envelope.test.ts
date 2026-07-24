@@ -5,12 +5,16 @@ import { WorkflowSnapshotSchema } from "../workflow/contracts.js";
 import { MigrationPackageDraftSchema } from "../workflow/migration-draft.js";
 import {
   MAX_RUN_ENVELOPE_BYTES,
+  MAX_RETRY_RESERVATION_BYTES,
   MAX_VIRTUAL_ARTIFACT_BYTES,
   RunEnvelopeSchema,
   RetryReservationEnvelopeSchema,
   assertEnvelopeByteLimit,
+  assertSafeRunId,
   parseRunEnvelope,
+  parseRetryReservation,
   serializeRunEnvelope,
+  serializeRetryReservation,
   virtualArtifactFilenames,
 } from "./run-envelope.js";
 
@@ -374,17 +378,74 @@ describe("run envelopes", () => {
 });
 
 describe("retry reservations", () => {
+  const value = {
+    schemaVersion: "1",
+    kind: "retry-reservation",
+    parentRunId: "parent-1",
+    childRunId: "child-1",
+    childMode: "REPLAY",
+    generationAttempt: 2,
+  } as const;
+
   it("accepts only the fixed closed reservation shape", () => {
-    const value = {
-      schemaVersion: "1",
-      kind: "retry-reservation",
-      parentRunId: "parent-1",
-      childRunId: "child-1",
-      childMode: "REPLAY",
-      generationAttempt: 2,
-    };
     expect(RetryReservationEnvelopeSchema.parse(value)).toEqual(value);
     expect(() => RetryReservationEnvelopeSchema.parse({ ...value, token: "forbidden" })).toThrow();
+  });
+
+  it("accepts a safe run ID and rejects an unsafe one with a fixed boundary error", () => {
+    expect(() => assertSafeRunId("run-1._safe")).not.toThrow();
+    try {
+      assertSafeRunId("../raw-input");
+      throw new Error("Expected the unsafe run ID to fail.");
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: "ARTIFACT_WRITE_FAILED",
+        message: "The run ID is invalid.",
+      });
+    }
+  });
+
+  it("serializes canonically and round-trips a retry reservation", () => {
+    const serialized = serializeRetryReservation(value);
+    expect(serialized).toBe(
+      "{\n" +
+        '  "schemaVersion": "1",\n' +
+        '  "kind": "retry-reservation",\n' +
+        '  "parentRunId": "parent-1",\n' +
+        '  "childRunId": "child-1",\n' +
+        '  "childMode": "REPLAY",\n' +
+        '  "generationAttempt": 2\n' +
+        "}\n",
+    );
+    expect(parseRetryReservation(serialized, value.parentRunId)).toEqual(value);
+  });
+
+  it.each([
+    ["a different expected parent", serializeRetryReservation(value), "parent-2"],
+    ["malformed JSON", '{"raw":"INPUT_MUST_NOT_LEAK"', value.parentRunId],
+    [
+      "a raw value over the byte limit",
+      "x".repeat(MAX_RETRY_RESERVATION_BYTES + 1),
+      value.parentRunId,
+    ],
+  ])("returns a fixed storage error for %s", (_label, raw, expectedParentRunId) => {
+    try {
+      parseRetryReservation(raw, expectedParentRunId);
+      throw new Error("Expected retry-reservation parsing to fail.");
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: "ARTIFACT_WRITE_FAILED",
+        message: "The stored run is unavailable.",
+      });
+      expect((error as Error).message).not.toContain(raw);
+    }
+  });
+
+  it.each([
+    ["an unknown key", { token: "forbidden" }],
+    ["an invalid generation attempt", { generationAttempt: 1 }],
+  ])("rejects serialization with %s", (_label, invalid) => {
+    expect(() => serializeRetryReservation({ ...value, ...invalid } as never)).toThrow();
   });
 
   it.each([
