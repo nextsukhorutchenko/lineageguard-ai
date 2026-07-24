@@ -27,7 +27,7 @@ __pycache__/
 .mcp/
 
 # Generated run artifacts
-runs/
+/runs/
 
 # Logs and temporary files
 *.log
