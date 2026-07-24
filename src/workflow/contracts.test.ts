@@ -895,4 +895,128 @@ describe("workflow contracts", () => {
       }),
     ).toThrow();
   });
+
+  it.each([
+    ["analysis", "clarification", 1, "accepted", 1],
+    ["analysis", "failed", 1, "accepted", 1],
+    ["analysis", "not_called", 0, "accepted", 1],
+    ["generation", "clarification", 1, "accepted", 1],
+    ["generation", "failed", 1, "accepted", 1],
+    ["generation", "not_called", 0, "accepted", 1],
+  ] as const)(
+    "rejects COMPLETED snapshots with wrong %s outcome %s",
+    (wrongTool, wrongOutcome, wrongCalls, otherOutcome, otherCalls) => {
+      const analysis = {
+        ...agentMetadata.toolCalls[0],
+        calls: wrongTool === "analysis" ? wrongCalls : 1,
+        outcome: wrongTool === "analysis" ? wrongOutcome : otherOutcome,
+      };
+      const generation = {
+        ...agentMetadata.toolCalls[1],
+        calls: wrongTool === "generation" ? wrongCalls : otherCalls,
+        outcome: wrongTool === "generation" ? wrongOutcome : otherOutcome,
+      };
+      expect(() =>
+        WorkflowEventSchema.parse({
+          type: "snapshot",
+          snapshot: {
+            ...emptySnapshot,
+            contextHash: "a".repeat(64),
+            agent: {
+              ...agentMetadata,
+              generationAttempts: generation.calls,
+              toolCalls: [analysis, generation],
+            },
+          },
+        }),
+      ).toThrow();
+    },
+  );
+
+  it.each([
+    ["accepted", 1],
+    ["failed", 1],
+    ["not_called", 0],
+  ] as const)(
+    "rejects NEEDS_USER_CLARIFICATION with non-clarification analysis outcome %s",
+    (outcome, calls) => {
+      expect(() =>
+        WorkflowEventSchema.parse({
+          type: "snapshot",
+          snapshot: {
+            ...emptySnapshot,
+            status: "NEEDS_USER_CLARIFICATION",
+            validation: { outcome: "NOT_RUN", findingCount: 0, findingCodes: [] },
+            failure: { code: "NEEDS_USER_CLARIFICATION", message: "clarify" },
+            contextHash: "a".repeat(64),
+            agent: {
+              ...agentMetadata,
+              toolCalls: [
+                { ...agentMetadata.toolCalls[0], calls, outcome },
+                agentMetadata.toolCalls[1],
+              ],
+            },
+          },
+        }),
+      ).toThrow("Agent tool proof contradicts the workflow snapshot");
+    },
+  );
+
+  it("rejects NEEDS_USER_CLARIFICATION when generation was called", () => {
+    expect(() =>
+      WorkflowEventSchema.parse({
+        type: "snapshot",
+        snapshot: {
+          ...emptySnapshot,
+          status: "NEEDS_USER_CLARIFICATION",
+          validation: { outcome: "NOT_RUN", findingCount: 0, findingCodes: [] },
+          failure: { code: "NEEDS_USER_CLARIFICATION", message: "clarify" },
+          contextHash: "a".repeat(64),
+          agent: {
+            ...agentMetadata,
+            generationAttempts: 1,
+            toolCalls: [
+              { ...agentMetadata.toolCalls[0], calls: 1, outcome: "clarification" },
+              { ...agentMetadata.toolCalls[1], calls: 1, outcome: "accepted" },
+            ],
+          },
+        },
+      }),
+    ).toThrow("Agent tool proof contradicts the workflow snapshot");
+  });
+
+  it.each([
+    {
+      name: "accepted analysis with zero generation",
+      generationAttempts: 0,
+      toolCalls: [
+        { ...agentMetadata.toolCalls[0], calls: 1, outcome: "accepted" },
+        agentMetadata.toolCalls[1],
+      ],
+    },
+    {
+      name: "positive generation",
+      generationAttempts: 1,
+      toolCalls: [
+        { ...agentMetadata.toolCalls[0], calls: 1, outcome: "accepted" },
+        { ...agentMetadata.toolCalls[1], calls: 1, outcome: "accepted" },
+      ],
+    },
+  ])("requires contextHash for $name", ({ generationAttempts, toolCalls }) => {
+    const snapshot = {
+      ...emptySnapshot,
+      status: "DRAFT",
+      validation: undefined,
+      agent: { ...agentMetadata, generationAttempts, toolCalls },
+    };
+    expect(() => WorkflowEventSchema.parse({ type: "snapshot", snapshot })).toThrow(
+      "Agent tool proof contradicts the workflow snapshot",
+    );
+    expect(() =>
+      WorkflowEventSchema.parse({
+        type: "snapshot",
+        snapshot: { ...snapshot, contextHash: "a".repeat(64) },
+      }),
+    ).not.toThrow();
+  });
 });
