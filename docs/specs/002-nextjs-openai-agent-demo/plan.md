@@ -4608,6 +4608,8 @@ git commit -m "feat: add the bounded OpenAI migration agent"
 
 - Create: `src/datahub/create-catalog.ts`
 - Modify: `src/cli.ts`
+- Modify: `src/app/run-impact-analysis.ts`
+- Modify: `src/app/run-impact-analysis.test.ts`
 - Create: `src/app/run-agent-workflow.ts`
 - Create: `src/app/run-agent-workflow.test.ts`
 - Create: `src/app/regenerate-package.ts`
@@ -4617,7 +4619,7 @@ git commit -m "feat: add the bounded OpenAI migration agent"
 
 **Interfaces:**
 
-- Consumes: real or fixture `DataHubCatalog`, `runImpactAnalysis`, `AgentProvider`, workflow contracts, renderer, validators, and run store.
+- Consumes: real or fixture `DataHubCatalog`, non-publishing `analyzeImpact`, `AgentProvider`, workflow contracts, renderer, validators, and run store.
 - Produces: `runAgentWorkflow(deps)`, `regeneratePackage(deps)`, streamed `WorkflowEvent` callbacks, preserved deterministic results, and a new run for every regeneration.
 
 - [ ] **Step 1: Write failing application tests for the complete lifecycle**
@@ -4772,7 +4774,7 @@ pnpm vitest run src/app/run-agent-workflow.test.ts src/app/regenerate-package.te
 
 Expected: FAIL because workflow orchestration and regeneration do not exist.
 
-- [ ] **Step 3: Extract the reusable live catalog factory**
+- [ ] **Step 3: Extract the reusable live catalog factory and non-publishing analysis boundary**
 
 Create `src/datahub/create-catalog.ts`:
 
@@ -4792,6 +4794,23 @@ export async function createDataHubCatalog(
 ```
 
 Replace the private `defaultCreateCatalog` implementation in `src/cli.ts` with an import of `createDataHubCatalog`, and assign it to `defaultDependencies.createCatalog`. Keep all CLI behavior and tests unchanged.
+
+Before changing production code, extend `src/app/run-impact-analysis.test.ts` with a failing test
+that calls a new public `analyzeImpact(...)` entry point, verifies the same deterministic report,
+catalog-call order, cancellation behavior, and exactly-once catalog close, and proves no
+`run-<run-id>.json` envelope or other filesystem entry is published. Preserve and run the existing
+`runImpactAnalysis(...)` tests to prove the CLI-facing wrapper still renders and create-only
+publishes the virtual `impact-report.md` compatibility envelope and still converts publication
+failure to `ImpactReportPersistenceError`.
+
+Extract and export `analyzeImpact(...)` from `src/app/run-impact-analysis.ts`. It owns the existing
+DataHub calls, cancellation semantics, evidence normalization, assessment, report construction,
+and exactly-once catalog close, and returns the validated `ImpactReportDraft` without rendering or
+filesystem publication. Keep `runImpactAnalysis(...)` as a behavior-compatible wrapper around
+`analyzeImpact(...)`: render the returned report, create-only publish the legacy impact-report
+envelope, preserve `ImpactReportPersistenceError`, and preserve every current public result and
+error contract. The Task 9 workflow must call `analyzeImpact(...)`; terminal run-store publication
+is the workflow's only run-envelope publication.
 
 - [ ] **Step 4: Implement one application-owned workflow**
 
@@ -4890,7 +4909,7 @@ export async function runAgentWorkflow(
             allowedTools: ["search", "list_schema_fields", "get_lineage", "get_entities"],
             ...sanitizeDataHubServerInfo(catalog.getServerInfo(), deps.secrets),
           });
-          const report = await runImpactAnalysis({
+          const report = await analyzeImpact({
             request: deps.request,
             catalog,
             clock: deps.clock,
@@ -5445,7 +5464,7 @@ Extend `src/app/regenerate-package.test.ts` with an ineligible failure status, e
 Run:
 
 ```powershell
-pnpm vitest run src/app/run-agent-workflow.test.ts src/app/regenerate-package.test.ts tests/fixture-agent-workflow.test.ts src/cli.test.ts
+pnpm vitest run src/app/run-impact-analysis.test.ts src/app/run-agent-workflow.test.ts src/app/regenerate-package.test.ts tests/fixture-agent-workflow.test.ts src/cli.test.ts
 pnpm test
 pnpm typecheck
 ```
@@ -5455,7 +5474,7 @@ Expected: lifecycle, clarification, 24/11/90 replay, validation failure, generat
 - [ ] **Step 7: Commit the complete application workflow**
 
 ```powershell
-git add src/datahub/create-catalog.ts src/cli.ts src/app/run-agent-workflow.ts src/app/run-agent-workflow.test.ts src/app/regenerate-package.ts src/app/regenerate-package.test.ts tests/helpers/workflow-dependencies.ts tests/fixture-agent-workflow.test.ts
+git add src/datahub/create-catalog.ts src/cli.ts src/app/run-impact-analysis.ts src/app/run-impact-analysis.test.ts src/app/run-agent-workflow.ts src/app/run-agent-workflow.test.ts src/app/regenerate-package.ts src/app/regenerate-package.test.ts tests/helpers/workflow-dependencies.ts tests/fixture-agent-workflow.test.ts
 git commit -m "feat: orchestrate grounded agent migration runs"
 ```
 
