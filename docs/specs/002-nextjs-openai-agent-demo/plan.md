@@ -6639,8 +6639,11 @@ git commit -m "feat: stream agent runs through safe Next.js routes"
 - Create: `src/ui/artifact-workspace.tsx`
 - Create: `src/ui/run-error.tsx`
 - Create: `playwright.config.ts`
+- Create: `tests/e2e/global-setup.ts`
+- Create: `tests/e2e/server-lifecycle.ts`
 - Create: `tests/e2e/global-teardown.ts`
 - Create: `tests/e2e/lineageguard-demo.spec.ts`
+- Create: `tests/integration/e2e-harness.integration.test.ts`
 - Create: `tests/integration/runtime-mode-page.integration.test.ts`
 - Modify: `package.json`
 - Modify: `tests/smoke/toolchain.test.ts`
@@ -7599,6 +7602,212 @@ Expected: the golden replay reaches 24/11/90, exposes the block decision and fou
 ```powershell
 git add app/layout.tsx app/page.tsx app/globals.css src/ui tests/e2e/lineageguard-demo.spec.ts tests/integration/runtime-mode-page.integration.test.ts tests/smoke/toolchain.test.ts playwright.config.ts package.json
 git commit -m "feat: build the LineageGuard browser demo"
+```
+
+- [ ] **Step 10: Record the Windows teardown regression and write failing cleanup tests**
+
+The `webServer` block from Step 1 is superseded by the owner-approved
+`2026-07-25-task-11-playwright-windows-lifecycle-amendment-design.md`. Preserve the existing RED
+evidence: all four Chromium scenarios report success, Playwright logs
+`Terminating the WebServer`, the command does not exit before an external failure timeout, port
+3107 remains owned by the run, and `globalTeardown` is never entered. An externally terminated
+command is RED even when the scenario reporter says four tests passed.
+
+Create `tests/integration/e2e-harness.integration.test.ts`:
+
+```ts
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { expect, it } from "vitest";
+import { removeOwnedRunsRoot } from "../e2e/global-teardown.js";
+
+it("removes only its canonical harness-owned runs root", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lineageguard-playwright-runs-"));
+  await writeFile(join(root, "sentinel.txt"), "owned", "utf8");
+
+  await removeOwnedRunsRoot(root);
+
+  await expect(access(root)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("rejects an unowned temporary root without deleting it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lineageguard-unowned-runs-"));
+  try {
+    await expect(removeOwnedRunsRoot(root)).rejects.toThrow(
+      "The Playwright runs root is outside the owned temporary boundary.",
+    );
+    await expect(access(root)).resolves.toBeUndefined();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+```
+
+Run:
+
+```powershell
+pnpm vitest run tests/integration/e2e-harness.integration.test.ts
+```
+
+Expected: FAIL because `removeOwnedRunsRoot` is not exported with the required fixed contract.
+
+- [ ] **Step 11: Extract guarded, verifiable runs-root cleanup**
+
+Replace `tests/e2e/global-teardown.ts` with a named helper whose public behavior is:
+
+```ts
+export async function removeOwnedRunsRoot(configuredRoot: string): Promise<void>;
+```
+
+The implementation must:
+
+1. reject a non-absolute value with `The Playwright runs root is invalid.`;
+2. canonicalize the existing root and `tmpdir()`;
+3. require the canonical parent to equal canonical `tmpdir()` and the basename to start with
+   `lineageguard-playwright-runs-`;
+4. otherwise reject with
+   `The Playwright runs root is outside the owned temporary boundary.`;
+5. remove only the canonical root;
+6. verify `access(canonicalRoot)` fails with `ENOENT` before returning; and
+7. replace any other filesystem failure with `The Playwright runs root could not be removed.`
+   without exposing a native path.
+
+Run:
+
+```powershell
+pnpm vitest run tests/integration/e2e-harness.integration.test.ts
+```
+
+Expected: PASS, 2 tests.
+
+- [ ] **Step 12: Move Next ownership into bounded Playwright global setup**
+
+Create `tests/e2e/server-lifecycle.ts` with this closed interface:
+
+```ts
+export interface E2eServerHandle {
+  readonly runsRoot: string;
+  stop(): Promise<void>;
+}
+
+export async function startE2eServer(): Promise<E2eServerHandle>;
+```
+
+Use these exact closed constants:
+
+```ts
+const HOST = "127.0.0.1";
+const PORT = 3107;
+const BASE_URL = `http://${HOST}:${PORT}`;
+const RUNS_PREFIX = "lineageguard-playwright-runs-";
+const STARTUP_TIMEOUT_MS = 120_000;
+const PROBE_TIMEOUT_MS = 1_000;
+const POLL_INTERVAL_MS = 100;
+const TERMINATION_TIMEOUT_MS = 10_000;
+const DIAGNOSTIC_TAIL_BYTES = 16_384;
+```
+
+`startE2eServer` must:
+
+1. perform one bounded probe and fail with `The Playwright test endpoint is already in use.` if
+   any HTTP response is received;
+2. create the runs root with `mkdtemp(join(tmpdir(), RUNS_PREFIX))`;
+3. resolve `next/dist/bin/next` from the installed lockfile-pinned package using
+   `createRequire(import.meta.url).resolve`;
+4. spawn `process.execPath` with
+   `["<resolved-next-cli>", "dev", "--hostname", HOST, "--port", String(PORT)]`,
+   `shell: false`, `windowsHide: true`, ignored stdin, and piped stdout/stderr;
+5. pass the inherited environment plus only
+   `LINEAGEGUARD_DEMO_MODE: "REPLAY"` and `LINEAGEGUARD_RUNS_DIR: runsRoot`;
+6. drain both output streams, retaining no more than the final `DIAGNOSTIC_TAIL_BYTES` from each;
+7. poll `/` until HTTP 200, process exit, or `STARTUP_TIMEOUT_MS`, with each fetch bounded by
+   `PROBE_TIMEOUT_MS`; and
+8. on any startup failure, call the same idempotent `stop` path and then throw
+   `The Playwright test server failed to start.` without a raw process error or native path.
+
+The returned `stop` method must memoize and return one shutdown promise. It must:
+
+1. terminate only the recorded child process tree;
+2. on Windows, execute `taskkill` directly without a shell using
+   `["/PID", String(pid), "/T", "/F"]` and a `TERMINATION_TIMEOUT_MS` timeout;
+3. on non-Windows, terminate the owned detached process group with `SIGTERM`, wait boundedly, then
+   use `SIGKILL` only if required;
+4. wait boundedly for the recorded child `close` event;
+5. poll until `BASE_URL` no longer accepts a connection;
+6. call `removeOwnedRunsRoot(runsRoot)` only after process exit and port release are confirmed; and
+7. reject with `The Playwright test server could not be stopped.` if the process or endpoint
+   remains live, retaining the runs root in that failure case.
+
+Create `tests/e2e/global-setup.ts`:
+
+```ts
+import { startE2eServer } from "./server-lifecycle.js";
+
+export default async function globalSetup(): Promise<() => Promise<void>> {
+  const server = await startE2eServer();
+  process.env.LINEAGEGUARD_E2E_RUNS_DIR = server.runsRoot;
+  return async () => {
+    try {
+      await server.stop();
+    } finally {
+      delete process.env.LINEAGEGUARD_E2E_RUNS_DIR;
+    }
+  };
+}
+```
+
+Modify `playwright.config.ts` to retain the existing `testDir`, retries, reporter, Chromium
+project, `baseURL`, screenshot, and trace values, remove both the `webServer` block and direct
+`globalTeardown` configuration, and add:
+
+```ts
+globalSetup: "./tests/e2e/global-setup.ts",
+```
+
+Do not change the four browser scenarios or their five-second visible-result assertions. The
+existing OPTIONS prewarm may remain because it addresses Next development-mode route compilation,
+not lifecycle shutdown.
+
+- [ ] **Step 13: Prove the complete managed lifecycle**
+
+Run without an external success override:
+
+```powershell
+pnpm vitest run tests/integration/e2e-harness.integration.test.ts
+pnpm test:e2e --project=chromium
+```
+
+Expected:
+
+- cleanup integration: 2 tests pass;
+- Playwright: golden, cancellation, regeneration, and phone scenarios pass;
+- Playwright exits 0 by itself;
+- no process from the run listens on `127.0.0.1:3107`;
+- the specific `LINEAGEGUARD_E2E_RUNS_DIR` created by setup no longer exists; and
+- no live DataHub or OpenAI call occurs.
+
+Then run the complete Task 11 gates:
+
+```powershell
+pnpm build:web
+pnpm test:runtime-mode
+pnpm test
+pnpm lint
+pnpm typecheck
+pnpm format:check
+git diff --check
+```
+
+Expected: every command exits 0. Report the inherited multi-lockfile and Prettier-config warnings
+truthfully. Do not stage generated `next-env.d.ts` unless approved authority separately adds it to
+the repository contract.
+
+- [ ] **Step 14: Commit the Windows-safe test lifecycle**
+
+```powershell
+git add playwright.config.ts tests/e2e/global-setup.ts tests/e2e/server-lifecycle.ts tests/e2e/global-teardown.ts tests/integration/e2e-harness.integration.test.ts
+git commit -m "test: own the Playwright server lifecycle"
 ```
 
 ---

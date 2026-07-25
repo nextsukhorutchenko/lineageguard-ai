@@ -1,6 +1,6 @@
 # Task 11 Playwright Windows Lifecycle Amendment Design
 
-**Status:** Approved approach pending written-spec confirmation  
+**Status:** Approved
 **Date:** 2026-07-25  
 **Authority:** Owner-approved amendment A for Task 11
 
@@ -128,4 +128,3 @@ Follow strict RED-GREEN evidence:
 
 - [Playwright web server configuration](https://playwright.dev/docs/test-webserver)
 - [Playwright global setup and teardown](https://playwright.dev/docs/test-global-setup-teardown)
-
