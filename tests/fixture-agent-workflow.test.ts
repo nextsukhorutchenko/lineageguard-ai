@@ -23,4 +23,22 @@ it("produces the complete deterministic replay workflow", async () => {
     },
   });
   expect(result.artifacts).toHaveLength(4);
+  expect(result.deadlinePolicy).toEqual({
+    mcpConnectMs: 15_000,
+    datahubAnalysisMs: 55_000,
+    analysisToolMs: 60_000,
+    generationToolMs: 30_000,
+    agentMs: 90_000,
+    workflowMs: 95_000,
+  });
+  expect(result.deadlineEvents).toEqual([
+    {
+      kind: "DATAHUB_ANALYSIS_TIMEOUT",
+      durationMs: 55_000,
+      attempt: 1,
+      outcome: "completed",
+    },
+    { kind: "AGENT_TIMEOUT", durationMs: 90_000, attempt: 1, outcome: "completed" },
+    { kind: "WORKFLOW_TIMEOUT", durationMs: 95_000, attempt: 1, outcome: "completed" },
+  ]);
 });

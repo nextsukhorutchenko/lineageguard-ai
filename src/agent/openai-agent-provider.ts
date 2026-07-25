@@ -1,5 +1,8 @@
 import { Agent, OpenAIProvider, Runner, tool } from "@openai/agents";
 import { z } from "zod";
+import { AppError } from "../errors/app-error.js";
+import type { RecordDeadlineEvent } from "../runtime/deadline-events.js";
+import { createDeadline, DEADLINES_MS, type ClassifiedAbortScope } from "../runtime/deadlines.js";
 import { MigrationPackageDraftSchema } from "../workflow/migration-draft.js";
 import { MIGRATION_AGENT_PROMPT_VERSION, migrationAgentInstructions } from "./prompt.js";
 import type {
@@ -63,12 +66,11 @@ interface ExecutionState {
   analysisResult?: AnalyzeRenameResult;
 }
 
-function toolSignal(runSignal: AbortSignal, sdkSignal?: AbortSignal): AbortSignal {
-  if (sdkSignal === undefined || sdkSignal === runSignal) {
-    return runSignal;
-  }
-  return AbortSignal.any([runSignal, sdkSignal]);
-}
+const toolDeadlinePolicy = {
+  analysisSdkTimeoutMs: DEADLINES_MS.analysisTool,
+  generationApplicationDeadlineMs: DEADLINES_MS.generationTool,
+  generationSdkTimeoutMs: undefined,
+} as const;
 
 export class OpenAIAgentProvider implements AgentProvider {
   readonly #model: string;
@@ -96,9 +98,13 @@ export class OpenAIAgentProvider implements AgentProvider {
       generationAttempts: 0,
       accepted: false,
     };
-    const deadline = AbortSignal.timeout(90_000);
-    const signal = AbortSignal.any([input.signal, deadline]);
-    const tools = this.createTools(input.tools, signal, execution);
+    const signal = input.abortScope.signal;
+    const tools = this.createTools(
+      input.tools,
+      input.abortScope,
+      input.recordDeadlineEvent,
+      execution,
+    );
     const agent = new Agent({
       name: "LineageGuard migration planner",
       instructions: migrationAgentInstructions,
@@ -118,15 +124,17 @@ export class OpenAIAgentProvider implements AgentProvider {
           signal,
           toolExecution: { maxFunctionToolConcurrency: 1 },
         });
+        signal.throwIfAborted();
         return {
           kind: "result" as const,
           result,
           output: CompletionSchema.parse(result.finalOutput),
         };
       } catch (error) {
-        if (signal.aborted || input.signal.aborted) {
-          throw error;
+        if (input.abortScope.signal.aborted) {
+          throw input.abortScope.classifyAbort().error;
         }
+        if (error instanceof AppError) throw error;
         return {
           kind: "generation_failure" as const,
           message: "OpenAI generation failed.",
@@ -201,17 +209,22 @@ export class OpenAIAgentProvider implements AgentProvider {
     return { ...metadata, status: "completed" };
   }
 
-  private createTools(tools: AgentToolset, signal: AbortSignal, execution: ExecutionState) {
+  private createTools(
+    tools: AgentToolset,
+    abortScope: ClassifiedAbortScope,
+    recordDeadlineEvent: RecordDeadlineEvent,
+    execution: ExecutionState,
+  ) {
+    const signal = abortScope.signal;
     return [
       tool({
         name: "analyze_rename_change",
         description: "Resolve and deterministically analyze the one supported rename request.",
         parameters: z.object({ request: z.string().min(1).max(500) }).strict(),
-        timeoutMs: 60_000,
+        timeoutMs: toolDeadlinePolicy.analysisSdkTimeoutMs,
         timeoutBehavior: "raise_exception",
-        execute: async ({ request }, _context, details) => {
-          const effectiveSignal = toolSignal(signal, details?.signal);
-          effectiveSignal.throwIfAborted();
+        execute: async ({ request }) => {
+          signal.throwIfAborted();
           if (execution.analysisCalls >= 1) {
             return {
               kind: "failed" as const,
@@ -220,8 +233,8 @@ export class OpenAIAgentProvider implements AgentProvider {
             };
           }
           execution.analysisCalls += 1;
-          const result = await tools.analyzeRenameChange({ request }, effectiveSignal);
-          effectiveSignal.throwIfAborted();
+          const result = await tools.analyzeRenameChange({ request }, signal);
+          signal.throwIfAborted();
           execution.analysisResult = result;
           return result;
         },
@@ -230,9 +243,8 @@ export class OpenAIAgentProvider implements AgentProvider {
         name: "generate_migration_package",
         description: "Validate, render, and persist one grounded structured migration package.",
         parameters: MigrationPackageDraftSchema,
-        execute: async (draft, _context, details) => {
-          const effectiveSignal = toolSignal(signal, details?.signal);
-          effectiveSignal.throwIfAborted();
+        execute: async (draft) => {
+          signal.throwIfAborted();
           if (execution.analysisResult?.kind !== "ready") {
             return {
               kind: "rejected" as const,
@@ -256,12 +268,46 @@ export class OpenAIAgentProvider implements AgentProvider {
             };
           }
           execution.generationAttempts += 1;
-          const result = await tools.generateMigrationPackage(draft, effectiveSignal);
-          effectiveSignal.throwIfAborted();
-          if (result.kind === "accepted") {
-            execution.accepted = true;
+          const attempt = execution.generationAttempts;
+          const generationScope = createDeadline(
+            abortScope,
+            toolDeadlinePolicy.generationApplicationDeadlineMs,
+            "GENERATION_TIMEOUT",
+          );
+          try {
+            const result = await tools.generateMigrationPackage(draft, generationScope.signal);
+            generationScope.signal.throwIfAborted();
+            recordDeadlineEvent({
+              kind: "GENERATION_TIMEOUT",
+              durationMs: toolDeadlinePolicy.generationApplicationDeadlineMs,
+              attempt,
+              outcome: "completed",
+            });
+            if (result.kind === "accepted") {
+              execution.accepted = true;
+            }
+            return result;
+          } catch (error) {
+            if (generationScope.signal.aborted) {
+              const classification = generationScope.classifyAbort();
+              recordDeadlineEvent({
+                kind: "GENERATION_TIMEOUT",
+                durationMs: toolDeadlinePolicy.generationApplicationDeadlineMs,
+                attempt,
+                outcome: classification.owner === "GENERATION_TIMEOUT" ? "expired" : "cancelled",
+              });
+              throw classification.error;
+            }
+            recordDeadlineEvent({
+              kind: "GENERATION_TIMEOUT",
+              durationMs: toolDeadlinePolicy.generationApplicationDeadlineMs,
+              attempt,
+              outcome: "completed",
+            });
+            throw error;
+          } finally {
+            generationScope.dispose();
           }
-          return result;
         },
       }),
     ];

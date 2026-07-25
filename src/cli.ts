@@ -16,6 +16,8 @@ import { createDataHubCatalog } from "./datahub/create-catalog.js";
 import { parseChangeIntent } from "./domain/change-intent.js";
 import type { RunStatus } from "./domain/run-result.js";
 import { AppError, type AppErrorCode } from "./errors/app-error.js";
+import type { RecordDeadlineEvent } from "./runtime/deadline-events.js";
+import { createRequestAbortScope, type ClassifiedAbortScope } from "./runtime/deadlines.js";
 import { sanitizeTerminalText } from "./security/sanitize-output.js";
 
 const help = [
@@ -38,6 +40,7 @@ const guidance = {
   COLUMN_NOT_FOUND: "Choose one of the actual schema fields listed above.",
   ARTIFACT_WRITE_FAILED:
     "Verify that the configured runs root is a pre-created writable real directory with no symbolic-link or junction path components.",
+  GENERATION_FAILED: "Retry migration generation without changing the validated DataHub context.",
   CANCELLED: "The operation was cancelled. Retry when ready.",
 } as const satisfies Readonly<Record<Exclude<AppErrorCode, "INVALID_REQUEST">, string>>;
 
@@ -49,6 +52,7 @@ const exitCodes = {
   DATAHUB_UNAVAILABLE: 3,
   MCP_UNAVAILABLE: 3,
   ARTIFACT_WRITE_FAILED: 4,
+  GENERATION_FAILED: 5,
   CANCELLED: 130,
 } as const satisfies Readonly<Record<AppErrorCode, number>>;
 
@@ -79,7 +83,11 @@ export interface CliDependencies {
   readonly stderr: TextWriter;
   readonly signal: InterruptSignal;
   readonly shutdownTimeoutMs: number;
-  readonly createCatalog: (config: RuntimeConfig, signal: AbortSignal) => Promise<DataHubCatalog>;
+  readonly createCatalog: (
+    config: RuntimeConfig,
+    scope: ClassifiedAbortScope,
+    recordDeadlineEvent: RecordDeadlineEvent,
+  ) => Promise<DataHubCatalog>;
   readonly runImpactAnalysis: (input: RunImpactAnalysisDependencies) => Promise<CliAnalysisResult>;
 }
 
@@ -255,6 +263,8 @@ export async function runCli(
 
   try {
     const abortController = new AbortController();
+    const requestScope = createRequestAbortScope(abortController.signal);
+    const ignoreDeadlineEvent: RecordDeadlineEvent = () => undefined;
     let catalog: DataHubCatalog | undefined;
     let interruptedByUser = false;
     let resolveInterrupted!: (outcome: { readonly kind: "interrupted" }) => void;
@@ -271,16 +281,18 @@ export async function runCli(
     dependencies.signal.once("SIGINT", onInterrupt);
 
     try {
-      const catalogCreation = dependencies.createCatalog(config, abortController.signal).then(
-        async (created) => {
-          const ownedCatalog = closeOnce(created);
-          if (abortController.signal.aborted) {
-            await ownedCatalog.close().catch(() => undefined);
-          }
-          return { kind: "created" as const, catalog: ownedCatalog };
-        },
-        (error: unknown) => ({ kind: "failed" as const, error }),
-      );
+      const catalogCreation = dependencies
+        .createCatalog(config, requestScope, ignoreDeadlineEvent)
+        .then(
+          async (created) => {
+            const ownedCatalog = closeOnce(created);
+            if (abortController.signal.aborted) {
+              await ownedCatalog.close().catch(() => undefined);
+            }
+            return { kind: "created" as const, catalog: ownedCatalog };
+          },
+          (error: unknown) => ({ kind: "failed" as const, error }),
+        );
       const creationOutcome = await Promise.race([catalogCreation, interrupted]);
 
       if (interruptedByUser || creationOutcome.kind === "interrupted") {
@@ -335,6 +347,7 @@ export async function runCli(
       );
       return 0;
     } finally {
+      requestScope.dispose();
       dependencies.signal.off("SIGINT", onInterrupt);
       if (catalog !== undefined && !interruptedByUser) {
         await catalog.close().catch(() => undefined);

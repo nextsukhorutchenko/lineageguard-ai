@@ -32,6 +32,7 @@ const allowed: Readonly<Record<WorkflowStatus, readonly WorkflowStatus[]>> = {
     "COLUMN_NOT_FOUND",
     "ANALYSIS_FAILED",
     "ARTIFACT_WRITE_FAILED",
+    "GENERATION_FAILED",
     "CANCELLED",
   ],
   NEEDS_USER_CLARIFICATION: [],
@@ -44,6 +45,7 @@ const allowed: Readonly<Record<WorkflowStatus, readonly WorkflowStatus[]>> = {
     "COLUMN_NOT_FOUND",
     "ANALYSIS_FAILED",
     "ARTIFACT_WRITE_FAILED",
+    "GENERATION_FAILED",
     "CANCELLED",
   ],
   GENERATING_ARTIFACTS: [
@@ -55,6 +57,7 @@ const allowed: Readonly<Record<WorkflowStatus, readonly WorkflowStatus[]>> = {
   VALIDATING_ARTIFACTS: [
     "GENERATING_ARTIFACTS",
     "COMPLETED",
+    "GENERATION_FAILED",
     "VALIDATION_FAILED",
     "ARTIFACT_WRITE_FAILED",
     "CANCELLED",
@@ -111,6 +114,15 @@ describe("transitionWorkflow", () => {
     expect(transitionWorkflow("ANALYZING_IMPACT", "ARTIFACT_WRITE_FAILED")).toBe(
       "ARTIFACT_WRITE_FAILED",
     );
+  });
+
+  it.each([
+    "RESOLVING_CONTEXT",
+    "ANALYZING_IMPACT",
+    "GENERATING_ARTIFACTS",
+    "VALIDATING_ARTIFACTS",
+  ] as const)("allows the agent deadline to fail from %s", (source) => {
+    expect(transitionWorkflow(source, "GENERATION_FAILED")).toBe("GENERATION_FAILED");
   });
 
   it("identifies terminal statuses and prevents terminal transitions", () => {

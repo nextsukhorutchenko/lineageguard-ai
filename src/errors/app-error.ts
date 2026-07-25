@@ -6,6 +6,7 @@ export type AppErrorCode =
   | "DATAHUB_UNAVAILABLE"
   | "MCP_UNAVAILABLE"
   | "ARTIFACT_WRITE_FAILED"
+  | "GENERATION_FAILED"
   | "CANCELLED";
 
 export interface SuppressedFailure {

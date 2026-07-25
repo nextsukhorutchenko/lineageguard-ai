@@ -17,6 +17,7 @@ import type {
 } from "./domain/evidence.js";
 import type { DatasetCandidate } from "./domain/resolve-dataset.js";
 import { AppError, type AppErrorCode } from "./errors/app-error.js";
+import type { ClassifiedAbortScope } from "./runtime/deadlines.js";
 import { createRunId, runCli, type CliDependencies } from "./cli.js";
 
 const REQUEST = "Rename column customer_id to customer_key in dataset snowflake:orders";
@@ -92,7 +93,7 @@ interface CliHarness {
   readonly stderr: string[];
   readonly received: {
     config?: RuntimeConfig;
-    catalogSignal?: AbortSignal;
+    catalogScope?: ClassifiedAbortScope;
     analysis?: RunImpactAnalysisDependencies;
   };
 }
@@ -118,10 +119,10 @@ function harness(
     stdout: { write: (text) => stdout.push(text) },
     stderr: { write: (text) => stderr.push(text) },
     shutdownTimeoutMs: 25,
-    createCatalog: async (config, signal_) => {
+    createCatalog: async (config, scope) => {
       createCatalogCalls += 1;
       received.config = config;
-      received.catalogSignal = signal_;
+      received.catalogScope = scope;
       return catalog;
     },
     runImpactAnalysis: async (input) => {
@@ -222,7 +223,7 @@ describe("runCli", () => {
       runsRoot: defaultRunsRoot,
     });
     expect(test.received.analysis?.secrets).toEqual([ENVIRONMENT.DATAHUB_GMS_TOKEN]);
-    expect(test.received.analysis?.signal).toBe(test.received.catalogSignal);
+    expect(test.received.analysis?.signal).toBe(test.received.catalogScope?.signal);
     expect(test.received.config).toMatchObject({ runsRoot: defaultRunsRoot });
   });
 
@@ -403,6 +404,11 @@ describe("runCli", () => {
       exitCode: 4,
       recovery:
         "Verify that the configured runs root is a pre-created writable real directory with no symbolic-link or junction path components.",
+    },
+    {
+      code: "GENERATION_FAILED",
+      exitCode: 5,
+      recovery: "Retry migration generation without changing the validated DataHub context.",
     },
   ];
 

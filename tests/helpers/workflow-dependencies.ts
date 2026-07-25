@@ -19,7 +19,11 @@ export async function makeWorkflowDependencies(
     request: GOLDEN_REQUEST,
     mode: "REPLAY",
     provider: new FakeAgentProvider(),
-    createCatalog: async () => new FixtureCatalog(),
+    createCatalog: async (scope, recordDeadlineEvent) => {
+      void scope;
+      void recordDeadlineEvent;
+      return new FixtureCatalog();
+    },
     runsRoot,
     runId: "run-test",
     clock: () => new Date("2026-07-22T12:00:00.000Z"),

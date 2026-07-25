@@ -10,12 +10,31 @@ import {
 import { loadRuntimeConfig } from "../../src/config/runtime-config.js";
 import { DataHubMcpCatalog } from "../../src/datahub/mcp/datahub-mcp-catalog.js";
 import { connectDataHubMcp } from "../../src/datahub/mcp/mcp-client.js";
+import type { RecordDeadlineEvent } from "../../src/runtime/deadline-events.js";
+import {
+  createDeadline,
+  createRequestAbortScope,
+  type ClassifiedAbortScope,
+} from "../../src/runtime/deadlines.js";
 
 const DATASET_URN =
   "urn:li:dataset:(urn:li:dataPlatform:snowflake,b2fd91.order_entry_db.analytics.order_details,PROD)";
 const DATASET_HINT = "order+details";
 
 const integrationTest = test.runIf(Boolean(process.env.DATAHUB_GMS_TOKEN));
+const ignoreDeadlineEvent: RecordDeadlineEvent = () => undefined;
+
+async function withConnectionScope<T>(
+  run: (scope: ClassifiedAbortScope) => Promise<T>,
+  signal: AbortSignal = new AbortController().signal,
+): Promise<T> {
+  const request = createRequestAbortScope(signal);
+  try {
+    return await run(request);
+  } finally {
+    request.dispose();
+  }
+}
 
 describe("DataHub MCP live integration", () => {
   integrationTest(
@@ -27,9 +46,10 @@ describe("DataHub MCP live integration", () => {
         DATAHUB_MCP_UVX_PATH: process.env.DATAHUB_MCP_UVX_PATH,
         LINEAGEGUARD_RUNS_DIR: process.env.LINEAGEGUARD_RUNS_DIR ?? tmpdir(),
       });
-      const catalog = new DataHubMcpCatalog(await connectDataHubMcp(config), [
-        config.datahubGmsToken,
-      ]);
+      const catalog = new DataHubMcpCatalog(
+        await withConnectionScope((scope) => connectDataHubMcp(config, scope, ignoreDeadlineEvent)),
+        [config.datahubGmsToken],
+      );
 
       try {
         const candidates = await catalog.searchDatasets(DATASET_HINT);
@@ -124,9 +144,18 @@ describe("DataHub MCP live integration", () => {
         DATAHUB_MCP_UVX_PATH: process.env.DATAHUB_MCP_UVX_PATH,
         LINEAGEGUARD_RUNS_DIR: process.env.LINEAGEGUARD_RUNS_DIR ?? tmpdir(),
       });
-      await expect(connectDataHubMcp(config, AbortSignal.timeout(1))).rejects.toMatchObject({
-        name: "TimeoutError",
-      });
+      const request = createRequestAbortScope(AbortSignal.timeout(1));
+      const deadline = createDeadline(request, 1, "MCP_CONNECT_TIMEOUT");
+      try {
+        await expect(
+          connectDataHubMcp(config, deadline, ignoreDeadlineEvent),
+        ).rejects.toMatchObject({
+          code: "MCP_UNAVAILABLE",
+        });
+      } finally {
+        deadline.dispose();
+        request.dispose();
+      }
     },
     120_000,
   );
@@ -146,7 +175,9 @@ describe("DataHub MCP live integration", () => {
         DATAHUB_MCP_UVX_PATH: process.env.DATAHUB_MCP_UVX_PATH,
         LINEAGEGUARD_RUNS_DIR: process.env.LINEAGEGUARD_RUNS_DIR ?? tmpdir(),
       });
-      const catalog = new DataHubMcpCatalog(await connectDataHubMcp(config));
+      const catalog = new DataHubMcpCatalog(
+        await withConnectionScope((scope) => connectDataHubMcp(config, scope, ignoreDeadlineEvent)),
+      );
       try {
         const result = await catalog.getDownstreamLineage(process.env.DATAHUB_LARGE_LINEAGE_URN!, {
           maxHops: 2,

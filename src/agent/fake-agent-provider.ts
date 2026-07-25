@@ -113,6 +113,7 @@ export class FakeAgentProvider implements AgentProvider {
     const draft = createGoldenDraft(analysis.context);
     input.signal.throwIfAborted();
     const generated = await input.tools.generateMigrationPackage(draft, input.signal);
+    input.signal.throwIfAborted();
     return {
       status: generated.kind === "accepted" ? "completed" : "failed",
       provider: "fixture",

@@ -25,6 +25,7 @@ const allowed: Readonly<Record<WorkflowStatus, readonly WorkflowStatus[]>> = {
     "COLUMN_NOT_FOUND",
     "ANALYSIS_FAILED",
     "ARTIFACT_WRITE_FAILED",
+    "GENERATION_FAILED",
     "CANCELLED",
   ],
   NEEDS_USER_CLARIFICATION: [],
@@ -37,6 +38,7 @@ const allowed: Readonly<Record<WorkflowStatus, readonly WorkflowStatus[]>> = {
     "COLUMN_NOT_FOUND",
     "ANALYSIS_FAILED",
     "ARTIFACT_WRITE_FAILED",
+    "GENERATION_FAILED",
     "CANCELLED",
   ],
   GENERATING_ARTIFACTS: [
@@ -48,6 +50,7 @@ const allowed: Readonly<Record<WorkflowStatus, readonly WorkflowStatus[]>> = {
   VALIDATING_ARTIFACTS: [
     "GENERATING_ARTIFACTS",
     "COMPLETED",
+    "GENERATION_FAILED",
     "VALIDATION_FAILED",
     "ARTIFACT_WRITE_FAILED",
     "CANCELLED",

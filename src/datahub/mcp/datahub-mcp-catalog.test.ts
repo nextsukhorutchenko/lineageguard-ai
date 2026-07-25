@@ -6,6 +6,7 @@ import { calculateContextCoverage } from "../../domain/context-coverage.js";
 import { loadRuntimeConfig } from "../../config/runtime-config.js";
 import type { RequiredIncompleteReasonCode } from "../../domain/evidence.js";
 import { AppError } from "../../errors/app-error.js";
+import { createRequestAbortScope } from "../../runtime/deadlines.js";
 import {
   DataHubMcpCatalog,
   type McpToolClient,
@@ -419,7 +420,13 @@ describe("DataHubMcpCatalog owned boundary", () => {
         return new Promise<never>(() => undefined);
       },
     };
-    const operation = connectOwnedDataHubMcpClient(client, {} as never, ["secret-token"]);
+    const operation = connectOwnedDataHubMcpClient(
+      client,
+      {} as never,
+      ["secret-token"],
+      createRequestAbortScope(new AbortController().signal),
+      () => undefined,
+    );
     const rejected = expect(operation).rejects.toMatchObject({
       code: "MCP_UNAVAILABLE",
       message: "The DataHub MCP subprocess could not be started.",
@@ -458,7 +465,13 @@ describe("DataHubMcpCatalog owned boundary", () => {
         return new Promise<never>(() => undefined);
       },
     };
-    const operation = connectOwnedDataHubMcpClient(client, {} as never, [], caller.signal);
+    const operation = connectOwnedDataHubMcpClient(
+      client,
+      {} as never,
+      [],
+      createRequestAbortScope(caller.signal),
+      () => undefined,
+    );
     const outcome = operation.then(
       (value) => ({ value }),
       (error: unknown) => ({ error }),
@@ -478,6 +491,56 @@ describe("DataHubMcpCatalog owned boundary", () => {
     });
     expect("error" in settled && settled.error).not.toBe(classified);
     expect(closeCount).toBe(1);
+  });
+
+  it("closes exactly once when its classified connection deadline expires", async () => {
+    vi.useFakeTimers();
+    const request = createRequestAbortScope(new AbortController().signal);
+    const recorded: unknown[] = [];
+    let closeCount = 0;
+    const client = {
+      async connect(_transport: never, options?: { signal?: AbortSignal }) {
+        return new Promise<never>((_resolve, reject) => {
+          options?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          });
+        });
+      },
+      async listTools() {
+        return { tools: [] };
+      },
+      async callTool() {
+        return jsonResult({});
+      },
+      getServerVersion() {
+        return undefined;
+      },
+      async close() {
+        closeCount += 1;
+      },
+    };
+
+    const operation = connectOwnedDataHubMcpClient(client, {} as never, [], request, (event) =>
+      recorded.push(event),
+    );
+    const rejected = expect(operation).rejects.toMatchObject({
+      code: "MCP_UNAVAILABLE",
+      message: "The DataHub MCP connection exceeded its deadline.",
+    });
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await rejected;
+
+    expect(closeCount).toBe(1);
+    expect(recorded).toEqual([
+      {
+        kind: "MCP_CONNECT_TIMEOUT",
+        durationMs: 15_000,
+        attempt: 1,
+        outcome: "expired",
+      },
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 
@@ -1508,11 +1571,17 @@ describe("Task 1A capability boundary", () => {
       },
     };
 
-    const operation = connectOwnedDataHubMcpClient(client, {} as never, [], controller.signal);
+    const operation = connectOwnedDataHubMcpClient(
+      client,
+      {} as never,
+      [],
+      createRequestAbortScope(controller.signal),
+      () => undefined,
+    );
     await secondPageStarted;
     controller.abort();
 
-    await expect(operation).rejects.toMatchObject({ name: "AbortError" });
+    await expect(operation).rejects.toMatchObject({ code: "CANCELLED" });
     expect(listCalls).toBe(2);
     expect(closeCount).toBe(1);
   });
@@ -2324,8 +2393,11 @@ describe("dataHubMcpServerParameters", () => {
     await catalog.close();
 
     expect(closeCount).toBe(1);
-    const connect: (config: ReturnType<typeof loadRuntimeConfig>) => Promise<McpToolClient> =
-      connectDataHubMcp;
+    const connect: (
+      config: ReturnType<typeof loadRuntimeConfig>,
+      scope: ReturnType<typeof createRequestAbortScope>,
+      recordDeadlineEvent: () => void,
+    ) => Promise<McpToolClient> = connectDataHubMcp;
     expect(connect).toBe(connectDataHubMcp);
   });
 

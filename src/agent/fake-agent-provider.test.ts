@@ -1,10 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 import { makeChangeContext } from "../../tests/helpers/factories.js";
 import type { PackageFinding } from "../migrations/validate-sql.js";
+import { createRequestAbortScope } from "../runtime/deadlines.js";
 import type { ChangeContext } from "../workflow/change-context.js";
 import { MigrationPackageDraftSchema } from "../workflow/migration-draft.js";
 import { FakeAgentProvider, createGoldenDraft } from "./fake-agent-provider.js";
 import type { AnalyzeRenameResult } from "./provider.js";
+
+function abortBoundary(signal: AbortSignal = new AbortController().signal) {
+  return {
+    signal,
+    abortScope: createRequestAbortScope(signal),
+    recordDeadlineEvent: vi.fn(),
+  };
+}
 
 function withIncompleteEvidence(
   context: ChangeContext,
@@ -39,7 +48,7 @@ describe("FakeAgentProvider", () => {
       new FakeAgentProvider().run({
         request: "Rename column a to b in dataset example",
         tools: { analyzeRenameChange, generateMigrationPackage },
-        signal: controller.signal,
+        ...abortBoundary(controller.signal),
       }),
     ).rejects.toBe(reason);
     expect(analyzeRenameChange).not.toHaveBeenCalled();
@@ -57,7 +66,7 @@ describe("FakeAgentProvider", () => {
     const result = await new FakeAgentProvider().run({
       request: context.request,
       tools: { analyzeRenameChange, generateMigrationPackage },
-      signal: new AbortController().signal,
+      ...abortBoundary(),
     });
 
     expect(analyzeRenameChange).toHaveBeenCalledOnce();
@@ -92,7 +101,7 @@ describe("FakeAgentProvider", () => {
         }),
         generateMigrationPackage,
       },
-      signal: new AbortController().signal,
+      ...abortBoundary(),
     });
 
     expect(result).toMatchObject({
@@ -123,7 +132,7 @@ describe("FakeAgentProvider", () => {
           }),
           generateMigrationPackage,
         },
-        signal: controller.signal,
+        ...abortBoundary(controller.signal),
       }),
     ).rejects.toBe(reason);
     expect(generateMigrationPackage).not.toHaveBeenCalled();
@@ -152,10 +161,30 @@ describe("FakeAgentProvider", () => {
           analyzeRenameChange: vi.fn().mockResolvedValue({ kind: "ready", context }),
           generateMigrationPackage,
         },
-        signal: controller.signal,
+        ...abortBoundary(controller.signal),
       }),
     ).rejects.toBe(reason);
     expect(generateMigrationPackage).not.toHaveBeenCalled();
+  });
+
+  it("does not accept generation that resolves after cancellation", async () => {
+    const controller = new AbortController();
+    const reason = new Error("cancelled-at-generation-completion");
+    const context = makeChangeContext();
+
+    await expect(
+      new FakeAgentProvider().run({
+        request: context.request,
+        tools: {
+          analyzeRenameChange: vi.fn().mockResolvedValue({ kind: "ready", context }),
+          generateMigrationPackage: vi.fn().mockImplementation(async () => {
+            controller.abort(reason);
+            return { kind: "accepted", classification: "ADVISORY_ONLY" };
+          }),
+        },
+        ...abortBoundary(controller.signal),
+      }),
+    ).rejects.toBe(reason);
   });
 
   it.each([
@@ -189,7 +218,7 @@ describe("FakeAgentProvider", () => {
         analyzeRenameChange: vi.fn().mockResolvedValue(analysis),
         generateMigrationPackage,
       },
-      signal: new AbortController().signal,
+      ...abortBoundary(),
     });
 
     expect(result).toEqual({
@@ -225,7 +254,7 @@ describe("FakeAgentProvider", () => {
         analyzeRenameChange: vi.fn().mockResolvedValue({ kind: "ready", context }),
         generateMigrationPackage: vi.fn().mockResolvedValue({ kind: "rejected", findings }),
       },
-      signal: new AbortController().signal,
+      ...abortBoundary(),
     });
 
     expect(result).toEqual({

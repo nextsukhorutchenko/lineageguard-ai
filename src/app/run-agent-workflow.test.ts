@@ -10,11 +10,13 @@ import type {
   ToolTraceEntry,
 } from "../domain/evidence.js";
 import type { DatasetCandidate } from "../domain/resolve-dataset.js";
+import { FixtureCatalog } from "../demo/fixture-catalog.js";
+import { createBoundedMcpClose } from "../datahub/mcp/mcp-boundary-policy.js";
 import { createGoldenDraft } from "../agent/fake-agent-provider.js";
 import { migrationAgentInstructions } from "../agent/prompt.js";
 import type { AgentProvider } from "../agent/provider.js";
 import type { PackageFinding } from "../migrations/validate-sql.js";
-import { readCompletedPackageFile } from "../runs/run-store.js";
+import { loadRunSnapshot, readCompletedPackageFile } from "../runs/run-store.js";
 import type { MigrationPackageDraft } from "../workflow/migration-draft.js";
 import { WorkflowSnapshotSchema, type WorkflowEvent } from "../workflow/contracts.js";
 import {
@@ -102,6 +104,24 @@ it("emits the valid lifecycle and persists only after validation", async () => {
   expect(result.status).toBe("COMPLETED");
   expect(result.impact).toMatchObject({ score: 90, advisoryDecision: "BLOCK_DIRECT_RENAME" });
   expect(result.artifacts).toHaveLength(4);
+  expect(result.deadlinePolicy).toEqual({
+    mcpConnectMs: 15_000,
+    datahubAnalysisMs: 55_000,
+    analysisToolMs: 60_000,
+    generationToolMs: 30_000,
+    agentMs: 90_000,
+    workflowMs: 95_000,
+  });
+  expect(result.deadlineEvents).toEqual([
+    {
+      kind: "DATAHUB_ANALYSIS_TIMEOUT",
+      durationMs: 55_000,
+      attempt: 1,
+      outcome: "completed",
+    },
+    { kind: "AGENT_TIMEOUT", durationMs: 90_000, attempt: 1, outcome: "completed" },
+    { kind: "WORKFLOW_TIMEOUT", durationMs: 95_000, attempt: 1, outcome: "completed" },
+  ]);
   await expect(
     readCompletedPackageFile({
       runsRoot: dependencies.runsRoot,
@@ -109,6 +129,80 @@ it("emits the valid lifecycle and persists only after validation", async () => {
       filename: "migration-up.sql",
     }),
   ).resolves.toContain("LineageGuard");
+});
+
+it("persists the maximal six-event deadline record without duplicates", async () => {
+  const dependencies = await makeWorkflowDependencies({
+    createCatalog: async (_scope, recordDeadlineEvent) => {
+      recordDeadlineEvent({
+        kind: "MCP_CONNECT_TIMEOUT",
+        durationMs: 15_000,
+        attempt: 1,
+        outcome: "completed",
+      });
+      return new FixtureCatalog();
+    },
+    provider: {
+      async run({ tools, request, signal, recordDeadlineEvent }) {
+        const analysis = await tools.analyzeRenameChange({ request }, signal);
+        if (analysis.kind !== "ready") throw new Error("Expected ready analysis.");
+        await tools.generateMigrationPackage(invalidDirectRenameDraft(analysis.context), signal);
+        recordDeadlineEvent({
+          kind: "GENERATION_TIMEOUT",
+          durationMs: 30_000,
+          attempt: 1,
+          outcome: "completed",
+        });
+        await tools.generateMigrationPackage(createGoldenDraft(analysis.context), signal);
+        recordDeadlineEvent({
+          kind: "GENERATION_TIMEOUT",
+          durationMs: 30_000,
+          attempt: 2,
+          outcome: "completed",
+        });
+        return {
+          status: "completed",
+          provider: "fixture",
+          model: "maximal-deadline-test",
+          reasoningEffort: "none",
+          analysisCalls: 1,
+          generationAttempts: 2,
+        };
+      },
+    },
+  });
+
+  const result = await runAgentWorkflow(dependencies);
+
+  expect(result.status).toBe("COMPLETED");
+  expect(result.deadlineEvents).toEqual([
+    {
+      kind: "MCP_CONNECT_TIMEOUT",
+      durationMs: 15_000,
+      attempt: 1,
+      outcome: "completed",
+    },
+    {
+      kind: "DATAHUB_ANALYSIS_TIMEOUT",
+      durationMs: 55_000,
+      attempt: 1,
+      outcome: "completed",
+    },
+    {
+      kind: "GENERATION_TIMEOUT",
+      durationMs: 30_000,
+      attempt: 1,
+      outcome: "completed",
+    },
+    {
+      kind: "GENERATION_TIMEOUT",
+      durationMs: 30_000,
+      attempt: 2,
+      outcome: "completed",
+    },
+    { kind: "AGENT_TIMEOUT", durationMs: 90_000, attempt: 1, outcome: "completed" },
+    { kind: "WORKFLOW_TIMEOUT", durationMs: 95_000, attempt: 1, outcome: "completed" },
+  ]);
 });
 
 it("returns clarification and never calls package generation", async () => {
@@ -170,9 +264,188 @@ it("maps abort to CANCELLED and never emits COMPLETED afterwards", async () => {
     onEvent: (event) => events.push(event),
   });
   controller.abort();
-  expect((await work).status).toBe("CANCELLED");
+  const result = await work;
+  expect(result.status).toBe("CANCELLED");
   expect(
     events.some((event) => event.type === "activity" && event.entry.status === "COMPLETED"),
+  ).toBe(false);
+  expect(await loadRunSnapshot({ runsRoot: dependencies.runsRoot, runId: result.runId })).toEqual(
+    result,
+  );
+  expect(result.deadlineEvents).toEqual([
+    { kind: "AGENT_TIMEOUT", durationMs: 90_000, attempt: 1, outcome: "cancelled" },
+    { kind: "WORKFLOW_TIMEOUT", durationMs: 95_000, attempt: 1, outcome: "cancelled" },
+  ]);
+});
+
+it("classifies the complete DataHub analysis deadline and suppresses a late catalog result", async () => {
+  vi.useFakeTimers();
+  const events: WorkflowEvent[] = [];
+  const catalog = new BlockingAnalysisCatalog();
+  const dependencies = await makeWorkflowDependencies({
+    createCatalog: async () => catalog,
+    onEvent: (event) => events.push(event),
+  });
+  const work = runAgentWorkflow(dependencies);
+  await catalog.started.promise;
+
+  await vi.advanceTimersByTimeAsync(55_000);
+  const result = await work;
+
+  expect(result.status).toBe("DATAHUB_UNAVAILABLE");
+  expect(catalog.closeCount).toBe(1);
+  expect(result.agent?.generationAttempts).toBe(0);
+  expect(result.deadlineEvents).toEqual([
+    {
+      kind: "DATAHUB_ANALYSIS_TIMEOUT",
+      durationMs: 55_000,
+      attempt: 1,
+      outcome: "expired",
+    },
+    { kind: "AGENT_TIMEOUT", durationMs: 90_000, attempt: 1, outcome: "completed" },
+    { kind: "WORKFLOW_TIMEOUT", durationMs: 95_000, attempt: 1, outcome: "completed" },
+  ]);
+  for (const filename of [
+    "migration-up.sql",
+    "migration-down.sql",
+    "validation.sql",
+    "rollout-plan.md",
+  ] as const) {
+    await expect(
+      readCompletedPackageFile({
+        runsRoot: dependencies.runsRoot,
+        runId: result.runId,
+        filename,
+      }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_WRITE_FAILED" });
+  }
+
+  catalog.resolveLate();
+  await Promise.resolve();
+  expect(
+    events.some((event) => event.type === "snapshot" && event.snapshot.status === "COMPLETED"),
+  ).toBe(false);
+});
+
+it("closes a catalog factory result that arrives after the DataHub deadline", async () => {
+  vi.useFakeTimers();
+  const pendingCatalog = Promise.withResolvers<DataHubCatalog>();
+  const catalog = new FixtureCatalog();
+  const close = vi.spyOn(catalog, "close");
+  const dependencies = await makeWorkflowDependencies({
+    createCatalog: async () => pendingCatalog.promise,
+  });
+  const work = runAgentWorkflow(dependencies);
+
+  await vi.advanceTimersByTimeAsync(55_000);
+  pendingCatalog.resolve(catalog);
+  const result = await work;
+
+  expect(result.status).toBe("DATAHUB_UNAVAILABLE");
+  expect(close).toHaveBeenCalledOnce();
+  expect(result.deadlineEvents).toEqual([
+    {
+      kind: "DATAHUB_ANALYSIS_TIMEOUT",
+      durationMs: 55_000,
+      attempt: 1,
+      outcome: "expired",
+    },
+    { kind: "AGENT_TIMEOUT", durationMs: 90_000, attempt: 1, outcome: "completed" },
+    { kind: "WORKFLOW_TIMEOUT", durationMs: 95_000, attempt: 1, outcome: "completed" },
+  ]);
+});
+
+it.each([
+  { name: "rejects", catalog: () => new ClosingFixtureCatalog("reject") },
+  { name: "expires", catalog: () => new ClosingFixtureCatalog("hang") },
+] as const)(
+  "maps a catalog close that $name to MCP_UNAVAILABLE",
+  async ({ catalog: makeCatalog }) => {
+    vi.useFakeTimers();
+    const catalog = makeCatalog();
+    const dependencies = await makeWorkflowDependencies({
+      createCatalog: async () => catalog,
+    });
+    const work = runAgentWorkflow(dependencies);
+    await catalog.closeStarted.promise;
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await work;
+    const envelope = await readRunEnvelope({
+      runsRoot: dependencies.runsRoot,
+      runId: result.runId,
+    });
+
+    expect(result.status).toBe("MCP_UNAVAILABLE");
+    expect(catalog.closeCount).toBe(1);
+    expect(result.contextHash).toBeUndefined();
+    expect(result.agent?.generationAttempts).toBe(0);
+    expect(envelope).toMatchObject({
+      kind: "failed",
+      snapshot: { status: "MCP_UNAVAILABLE", artifacts: [] },
+    });
+    expect(envelope).not.toHaveProperty("impactReport");
+    expect(envelope).not.toHaveProperty("package");
+  },
+);
+
+it("persists one agent-deadline failure and never requires a route fallback", async () => {
+  vi.useFakeTimers();
+  const events: WorkflowEvent[] = [];
+  const dependencies = await makeWorkflowDependencies({
+    provider: providerThatWaitsForAbort(),
+    onEvent: (event) => events.push(event),
+  });
+  const work = runAgentWorkflow(dependencies);
+
+  await vi.advanceTimersByTimeAsync(90_000);
+  const result = await work;
+
+  expect(result.status).toBe("GENERATION_FAILED");
+  expect(result.deadlineEvents).toEqual([
+    { kind: "AGENT_TIMEOUT", durationMs: 90_000, attempt: 1, outcome: "expired" },
+    { kind: "WORKFLOW_TIMEOUT", durationMs: 95_000, attempt: 1, outcome: "completed" },
+  ]);
+  expect(await loadRunSnapshot({ runsRoot: dependencies.runsRoot, runId: result.runId })).toEqual(
+    result,
+  );
+  expect(events.filter((event) => event.type === "snapshot")).toHaveLength(1);
+});
+
+it("expires the workflow deadline at the pre-link barrier and publishes only CANCELLED", async () => {
+  vi.useFakeTimers();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const events: WorkflowEvent[] = [];
+  persistenceControl.beforePublish = async () => {
+    entered.resolve();
+    await release.promise;
+  };
+  const dependencies = await makeWorkflowDependencies({
+    onEvent: (event) => events.push(event),
+  });
+  const work = runAgentWorkflow(dependencies);
+  await entered.promise;
+
+  await vi.advanceTimersByTimeAsync(95_000);
+  release.resolve();
+  const result = await work;
+
+  expect(result.status).toBe("CANCELLED");
+  expect(result.deadlineEvents).toEqual([
+    {
+      kind: "DATAHUB_ANALYSIS_TIMEOUT",
+      durationMs: 55_000,
+      attempt: 1,
+      outcome: "completed",
+    },
+    { kind: "AGENT_TIMEOUT", durationMs: 90_000, attempt: 1, outcome: "completed" },
+    { kind: "WORKFLOW_TIMEOUT", durationMs: 95_000, attempt: 1, outcome: "expired" },
+  ]);
+  expect(await loadRunSnapshot({ runsRoot: dependencies.runsRoot, runId: result.runId })).toEqual(
+    result,
+  );
+  expect(
+    events.some((event) => event.type === "snapshot" && event.snapshot.status === "COMPLETED"),
   ).toBe(false);
 });
 
@@ -757,6 +1030,15 @@ it("does not emit completion or expose artifacts when cancellation wins before t
     findings: [],
     draft: expect.any(Object),
   });
+  expect(
+    events.filter((event) => event.type === "snapshot" && event.snapshot.status === "CANCELLED"),
+  ).toHaveLength(1);
+  expect(result.deadlineEvents?.at(-1)).toEqual({
+    kind: "WORKFLOW_TIMEOUT",
+    durationMs: 95_000,
+    attempt: 1,
+    outcome: "cancelled",
+  });
 });
 
 it("keeps the completed envelope authoritative when cancellation happens after the final link", async () => {
@@ -782,6 +1064,12 @@ it("keeps the completed envelope authoritative when cancellation happens after t
   ).toMatchObject({
     kind: "completed",
     snapshot: { status: "COMPLETED" },
+  });
+  expect(result.deadlineEvents?.at(-1)).toEqual({
+    kind: "WORKFLOW_TIMEOUT",
+    durationMs: 95_000,
+    attempt: 1,
+    outcome: "completed",
   });
 });
 
@@ -1016,6 +1304,57 @@ class AmbiguousFixtureCatalog implements DataHubCatalog {
     return [];
   }
   async close(): Promise<void> {}
+}
+
+class BlockingAnalysisCatalog extends FixtureCatalog {
+  readonly started = Promise.withResolvers<void>();
+  readonly #late = Promise.withResolvers<CollectionResult<DatasetCandidate>>();
+  closeCount = 0;
+
+  override async searchDatasets(
+    _hint: string,
+    options: { readonly signal?: AbortSignal } = {},
+  ): Promise<CollectionResult<DatasetCandidate>> {
+    this.started.resolve();
+    const signal = options.signal;
+    if (signal === undefined) throw new Error("Expected the application-owned analysis signal.");
+    return Promise.race([
+      this.#late.promise,
+      new Promise<never>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
+          once: true,
+        });
+      }),
+    ]);
+  }
+
+  resolveLate(): void {
+    this.#late.resolve(complete([]));
+  }
+
+  override async close(): Promise<void> {
+    this.closeCount += 1;
+  }
+}
+
+class ClosingFixtureCatalog extends FixtureCatalog {
+  readonly closeStarted = Promise.withResolvers<void>();
+  closeCount = 0;
+  readonly #close: () => Promise<void>;
+
+  constructor(outcome: "reject" | "hang") {
+    super();
+    this.#close = createBoundedMcpClose(async () => {
+      this.closeCount += 1;
+      this.closeStarted.resolve();
+      if (outcome === "reject") throw new Error("raw close failure");
+      return new Promise<never>(() => undefined);
+    });
+  }
+
+  override close(): Promise<void> {
+    return this.#close();
+  }
 }
 
 class ManyCandidateCatalog extends AmbiguousFixtureCatalog {

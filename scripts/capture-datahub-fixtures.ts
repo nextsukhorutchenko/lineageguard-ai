@@ -24,6 +24,8 @@ import { DataHubMcpCatalog } from "../src/datahub/mcp/datahub-mcp-catalog.js";
 import { connectDataHubMcp } from "../src/datahub/mcp/mcp-client.js";
 import type { EntityContext, LineageAsset, SchemaField } from "../src/domain/evidence.js";
 import type { DatasetCandidate } from "../src/domain/resolve-dataset.js";
+import type { RecordDeadlineEvent } from "../src/runtime/deadline-events.js";
+import { createRequestAbortScope } from "../src/runtime/deadlines.js";
 import { redact } from "../src/security/redact.js";
 
 const DATASET_URN =
@@ -514,7 +516,16 @@ export async function captureDataHubFixtures(
   destination: string,
 ): Promise<readonly CapturedFixture[]> {
   await validateCommittedFixtures();
-  const catalog = new DataHubMcpCatalog(await connectDataHubMcp(config), [config.datahubGmsToken]);
+  const requestScope = createRequestAbortScope(new AbortController().signal);
+  const ignoreDeadlineEvent: RecordDeadlineEvent = () => undefined;
+  const connectedClient = await (async () => {
+    try {
+      return await connectDataHubMcp(config, requestScope, ignoreDeadlineEvent);
+    } finally {
+      requestScope.dispose();
+    }
+  })();
+  const catalog = new DataHubMcpCatalog(connectedClient, [config.datahubGmsToken]);
 
   try {
     const candidates = await catalog.searchDatasets(DATASET_HINT);

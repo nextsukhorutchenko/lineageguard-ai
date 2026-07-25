@@ -45,6 +45,10 @@ it("regenerates from stored context into one fresh child without DataHub analysi
     datahub: parent.datahub,
   });
   expect(child.activity[0]?.status).toBe("GENERATING_ARTIFACTS");
+  expect(child.deadlineEvents).toEqual([
+    { kind: "AGENT_TIMEOUT", durationMs: 90_000, attempt: 1, outcome: "completed" },
+    { kind: "WORKFLOW_TIMEOUT", durationMs: 95_000, attempt: 1, outcome: "completed" },
+  ]);
   expect(
     await readRunEnvelope({
       runsRoot: parentDependencies.runsRoot,

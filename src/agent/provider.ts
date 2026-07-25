@@ -1,4 +1,6 @@
 import type { PackageFinding } from "../migrations/validate-sql.js";
+import type { RecordDeadlineEvent } from "../runtime/deadline-events.js";
+import type { ClassifiedAbortScope } from "../runtime/deadlines.js";
 import type { ChangeContext } from "../workflow/change-context.js";
 import type {
   ExecutionClassification,
@@ -75,5 +77,7 @@ export interface AgentProvider {
     readonly request: string;
     readonly tools: AgentToolset;
     readonly signal: AbortSignal;
+    readonly abortScope: ClassifiedAbortScope;
+    readonly recordDeadlineEvent: RecordDeadlineEvent;
   }): Promise<AgentProviderResult>;
 }

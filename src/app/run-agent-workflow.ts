@@ -15,6 +15,16 @@ import {
 import { validatePackage } from "../migrations/validate-package.js";
 import type { PackageFinding } from "../migrations/validate-sql.js";
 import { persistCompletedRun, persistFailedRun, type ReservedChildRun } from "../runs/run-store.js";
+import {
+  createDeadlineEventRecorder,
+  type RecordDeadlineEvent,
+} from "../runtime/deadline-events.js";
+import {
+  createDeadline,
+  createRequestAbortScope,
+  DEADLINES_MS,
+  type ClassifiedAbortScope,
+} from "../runtime/deadlines.js";
 import { sanitizeBoundaryText } from "../security/sanitize-output.js";
 import { sanitizeValidationFindings } from "../security/sanitize-validation-findings.js";
 import {
@@ -48,7 +58,10 @@ export interface RunAgentWorkflowDependencies {
   readonly request: string;
   readonly mode: DemoMode;
   readonly provider: AgentProvider;
-  readonly createCatalog: (signal: AbortSignal) => Promise<DataHubCatalog>;
+  readonly createCatalog: (
+    scope: ClassifiedAbortScope,
+    recordDeadlineEvent: RecordDeadlineEvent,
+  ) => Promise<DataHubCatalog>;
   readonly runsRoot: string;
   readonly runId: string;
   readonly parentRunId?: string;
@@ -85,7 +98,10 @@ interface InternalWorkflowDependencies {
   readonly signal: AbortSignal;
   readonly secrets: readonly string[];
   readonly onEvent?: (event: WorkflowEvent) => void;
-  readonly createCatalog?: (signal: AbortSignal) => Promise<DataHubCatalog>;
+  readonly createCatalog?: (
+    scope: ClassifiedAbortScope,
+    recordDeadlineEvent: RecordDeadlineEvent,
+  ) => Promise<DataHubCatalog>;
   readonly initialContext?: ChangeContext;
   readonly initialDataHubMetadata?: DataHubRunMetadata;
   readonly reservedChild?: ReservedChildRun;
@@ -113,6 +129,24 @@ function fixedWorkflowFailureMessage(
   code: Extract<AnalyzeRenameResult, { kind: "failed" }>["code"],
 ): string {
   return workflowFailureMessages[code];
+}
+
+type ClassifiedWorkflowFailure = {
+  readonly code: "CANCELLED" | "DATAHUB_UNAVAILABLE" | "MCP_UNAVAILABLE" | "GENERATION_FAILED";
+  readonly message: string;
+};
+
+function classifiedWorkflowFailure(error: unknown): ClassifiedWorkflowFailure | undefined {
+  if (!(error instanceof AppError)) return undefined;
+  switch (error.code) {
+    case "CANCELLED":
+    case "DATAHUB_UNAVAILABLE":
+    case "MCP_UNAVAILABLE":
+    case "GENERATION_FAILED":
+      return { code: error.code, message: error.message };
+    default:
+      return undefined;
+  }
 }
 
 function sanitizedUniqueStrings(
@@ -262,6 +296,7 @@ function terminalSnapshot(
   context: ChangeContext | undefined,
   provider: AgentProviderResult,
   validation: ValidationSummary,
+  deadlineEvents: readonly NonNullable<WorkflowSnapshot["deadlineEvents"]>[number][],
   executionClassification?: "EXECUTABLE_WITH_REVIEW" | "ADVISORY_ONLY" | "NON_EXECUTABLE_TEMPLATE",
 ): WorkflowSnapshot {
   const failureCode =
@@ -323,6 +358,15 @@ function terminalSnapshot(
     unknowns: safeContext?.unknowns ?? [],
     ...(safeContext === undefined ? {} : { narrativeSummary: safeContext.narrativeSummary }),
     ...(executionClassification === undefined ? {} : { executionClassification }),
+    deadlinePolicy: {
+      mcpConnectMs: DEADLINES_MS.mcpConnect,
+      datahubAnalysisMs: DEADLINES_MS.datahubAnalysis,
+      analysisToolMs: DEADLINES_MS.analysisTool,
+      generationToolMs: DEADLINES_MS.generationTool,
+      agentMs: DEADLINES_MS.agent,
+      workflowMs: DEADLINES_MS.workflow,
+    },
+    deadlineEvents,
     agent: {
       provider: provider.provider,
       model: sanitizeBoundaryText(provider.model, deps.secrets, 100),
@@ -376,14 +420,6 @@ function terminalSnapshot(
   });
 }
 
-function isAbort(error: unknown, signal: AbortSignal): boolean {
-  return (
-    signal.aborted ||
-    (error instanceof DOMException && error.name === "AbortError") ||
-    (error instanceof AppError && error.code === "CANCELLED")
-  );
-}
-
 function emit(deps: InternalWorkflowDependencies, event: WorkflowEvent): void {
   try {
     deps.onEvent?.(event);
@@ -396,6 +432,45 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
   const safeRequest = RunRequestSchema.shape.request.parse(
     sanitizeBoundaryText(inputDeps.request, inputDeps.secrets, 500),
   );
+  const deadlineEvents = createDeadlineEventRecorder();
+  const requestScope = createRequestAbortScope(inputDeps.signal);
+  const workflowScope = createDeadline(requestScope, DEADLINES_MS.workflow, "WORKFLOW_TIMEOUT");
+  const agentScope = createDeadline(workflowScope, DEADLINES_MS.agent, "AGENT_TIMEOUT");
+  let agentFinalized = false;
+  let workflowFinalized = false;
+  const deadlineOutcome = (
+    scope: ClassifiedAbortScope,
+    ownKind: "AGENT_TIMEOUT" | "WORKFLOW_TIMEOUT",
+  ): "completed" | "expired" | "cancelled" => {
+    if (!scope.signal.aborted) return "completed";
+    return scope.classifyAbort().owner === ownKind ? "expired" : "cancelled";
+  };
+  const finalizeAgent = (): void => {
+    if (agentFinalized) return;
+    deadlineEvents.record({
+      kind: "AGENT_TIMEOUT",
+      durationMs: DEADLINES_MS.agent,
+      attempt: 1,
+      outcome: deadlineOutcome(agentScope, "AGENT_TIMEOUT"),
+    });
+    agentFinalized = true;
+    agentScope.dispose();
+  };
+  const finalizeWorkflow = (): void => {
+    if (workflowFinalized) return;
+    deadlineEvents.record({
+      kind: "WORKFLOW_TIMEOUT",
+      durationMs: DEADLINES_MS.workflow,
+      attempt: 1,
+      outcome: deadlineOutcome(workflowScope, "WORKFLOW_TIMEOUT"),
+    });
+    workflowFinalized = true;
+    workflowScope.dispose();
+    requestScope.dispose();
+  };
+  const throwIfScopeAborted = (scope: ClassifiedAbortScope): void => {
+    if (scope.signal.aborted) throw scope.classifyAbort().error;
+  };
   let verifiedDataHubMetadata = inputDeps.initialDataHubMetadata;
   const deps = {
     ...inputDeps,
@@ -448,7 +523,7 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
     }
 
     const tools: AgentToolset = {
-      analyzeRenameChange: async (_input, signal) => {
+      analyzeRenameChange: async () => {
         if (applicationAnalysisCalls >= 1) {
           return {
             kind: "failed",
@@ -462,14 +537,24 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
           return analysisOutcome;
         }
         move("ANALYZING_IMPACT", "Analyze two-hop DataHub impact", "started");
+        const datahubScope = createDeadline(
+          agentScope,
+          DEADLINES_MS.datahubAnalysis,
+          "DATAHUB_ANALYSIS_TIMEOUT",
+        );
         try {
           if (deps.createCatalog === undefined) {
             throw new Error("Catalog creation is unavailable.");
           }
-          const catalog = await deps.createCatalog(signal);
+          const catalog = await deps.createCatalog(datahubScope, deadlineEvents.record);
+          if (datahubScope.signal.aborted) {
+            await catalog.close().catch(() => undefined);
+            throw datahubScope.classifyAbort().error;
+          }
           let serverInfo: DataHubServerInfo;
           try {
             serverInfo = catalog.getServerInfo();
+            throwIfScopeAborted(datahubScope);
           } catch (error) {
             await catalog.close().catch(() => undefined);
             throw error;
@@ -487,16 +572,17 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
             clock: deps.clock,
             runId: deps.runId,
             runsRoot: deps.runsRoot,
-            signal,
+            signal: datahubScope.signal,
             secrets: deps.secrets,
           });
-          signal.throwIfAborted();
+          throwIfScopeAborted(datahubScope);
           context = buildChangeContext(report, deps.secrets);
+          throwIfScopeAborted(datahubScope);
           move("GENERATING_ARTIFACTS", "Generate a grounded migration strategy", "started");
           analysisOutcome = { kind: "ready", context };
           return analysisOutcome;
         } catch (error) {
-          if (signal.aborted || deps.signal.aborted) throw error;
+          if (datahubScope.signal.aborted) throw datahubScope.classifyAbort().error;
           if (error instanceof AppError && error.code === "NEEDS_USER_CLARIFICATION") {
             const allCandidates = boundClarificationCandidates(
               error.details.candidates,
@@ -555,9 +641,22 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
             message: fixedWorkflowFailureMessage("ANALYSIS_FAILED"),
           };
           return analysisOutcome;
+        } finally {
+          deadlineEvents.record({
+            kind: "DATAHUB_ANALYSIS_TIMEOUT",
+            durationMs: DEADLINES_MS.datahubAnalysis,
+            attempt: 1,
+            outcome: datahubScope.signal.aborted
+              ? datahubScope.classifyAbort().owner === "DATAHUB_ANALYSIS_TIMEOUT"
+                ? "expired"
+                : "cancelled"
+              : "completed",
+          });
+          datahubScope.dispose();
         }
       },
       generateMigrationPackage: async (draft, signal) => {
+        signal.throwIfAborted();
         if (analysisOutcome?.kind !== "ready" || context === undefined) {
           return {
             kind: "rejected",
@@ -580,7 +679,9 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
         }
         applicationGenerationAttempts += 1;
         move("VALIDATING_ARTIFACTS", "Validate grounding, SQL, rollback, and paths", "started");
+        signal.throwIfAborted();
         const normalized = normalizeMigrationDraft(context, draft);
+        signal.throwIfAborted();
         if (normalized.kind === "invalid") {
           lastRejected = { findings: normalized.findings };
           move("GENERATING_ARTIFACTS", "Repair the rejected structured draft", "started");
@@ -588,11 +689,14 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
         }
         const safeDraft = normalized.draft;
         const draftFindings = validateMigrationDraft(context, safeDraft);
+        signal.throwIfAborted();
         const rendered = renderMigrationPackage(context, safeDraft);
+        signal.throwIfAborted();
         const findings = sanitizeValidationFindings(
           [...draftFindings, ...validatePackage(context, safeDraft, rendered)],
           deps.secrets,
         ).slice(0, 200);
+        signal.throwIfAborted();
         if (findings.length > 0) {
           lastRejected = { draft: safeDraft, findings };
           move("GENERATING_ARTIFACTS", "Repair the rejected structured draft", "started");
@@ -608,9 +712,12 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
     const reportedProviderResult = await deps.provider.run({
       request: deps.request,
       tools,
-      signal: deps.signal,
+      signal: agentScope.signal,
+      abortScope: agentScope,
+      recordDeadlineEvent: deadlineEvents.record,
     });
-    deps.signal.throwIfAborted();
+    throwIfScopeAborted(agentScope);
+    finalizeAgent();
     const providerResult: AgentProviderResult = {
       ...reportedProviderResult,
       analysisCalls: applicationAnalysisCalls,
@@ -619,6 +726,7 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
 
     if (analysisOutcome?.kind === "clarification") {
       move("NEEDS_USER_CLARIFICATION", "Select one exact DataHub dataset", "waiting");
+      finalizeWorkflow();
       const authoritativeProvider: AgentProviderResult = {
         ...providerResult,
         status: "needs_clarification",
@@ -638,6 +746,7 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
         context,
         authoritativeProvider,
         summarizeValidation("NOT_RUN"),
+        deadlineEvents.snapshot(),
       );
       await persistFailedRun({
         runsRoot: deps.runsRoot,
@@ -653,6 +762,7 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
 
     if (analysisOutcome?.kind === "failed") {
       move(analysisOutcome.code, analysisOutcome.message, "failed");
+      finalizeWorkflow();
       const authoritativeProvider: AgentProviderResult = {
         ...providerResult,
         status: "failed",
@@ -672,6 +782,7 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
         context,
         authoritativeProvider,
         summarizeValidation("NOT_RUN"),
+        deadlineEvents.snapshot(),
       );
       await persistFailedRun({
         runsRoot: deps.runsRoot,
@@ -698,6 +809,7 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
               ? "VALIDATION_FAILED"
               : "GENERATION_FAILED";
       move(next, providerResult.message ?? "Artifact generation failed", "failed");
+      finalizeWorkflow();
       const snapshot = terminalSnapshot(
         deps,
         status,
@@ -707,6 +819,7 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
         lastRejected === undefined
           ? summarizeValidation("NOT_RUN")
           : summarizeValidation("REJECTED", lastRejected.findings),
+        deadlineEvents.snapshot(),
       );
       await persistFailedRun({
         runsRoot: deps.runsRoot,
@@ -735,6 +848,12 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
       completedAt: deps.clock(),
       label: "Migration package validated and committed",
     });
+    const completedWorkflowEvent = {
+      kind: "WORKFLOW_TIMEOUT",
+      durationMs: DEADLINES_MS.workflow,
+      attempt: 1,
+      outcome: "completed",
+    } as const;
     const base = terminalSnapshot(
       deps,
       completion.status,
@@ -742,6 +861,7 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
       context,
       providerResult,
       summarizeValidation("PASSED"),
+      deadlineEvents.preview(completedWorkflowEvent),
       rendered.classification,
     );
     let snapshot: WorkflowSnapshot;
@@ -753,13 +873,14 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
         draft,
         rendered,
         snapshot: base,
-        signal: deps.signal,
+        signal: workflowScope.signal,
         ...(deps.reservedChild === undefined ? {} : { reservedChild: deps.reservedChild }),
       });
     } catch (error) {
-      if (isAbort(error, deps.signal)) throw error;
+      if (workflowScope.signal.aborted) throw workflowScope.classifyAbort().error;
       if (!(error instanceof AppError) || error.code !== "ARTIFACT_WRITE_FAILED") throw error;
       move("ARTIFACT_WRITE_FAILED", "Validated artifacts could not be persisted", "failed");
+      finalizeWorkflow();
       snapshot = terminalSnapshot(
         deps,
         status,
@@ -771,6 +892,7 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
           message: "Validated artifacts could not be persisted.",
         },
         summarizeValidation("PASSED"),
+        deadlineEvents.snapshot(),
         rendered.classification,
       );
       await persistFailedRun({
@@ -786,14 +908,27 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
       emit(deps, { type: "snapshot", snapshot });
       return snapshot;
     }
+    deadlineEvents.adopt(completedWorkflowEvent);
+    workflowFinalized = true;
+    workflowScope.dispose();
+    requestScope.dispose();
     status = completion.status;
     activity.splice(0, activity.length, ...completion.activity);
     emit(deps, { type: "activity", entry: completion.completedEntry });
     emit(deps, { type: "snapshot", snapshot });
     return snapshot;
   } catch (error) {
-    if (isAbort(error, deps.signal)) {
-      if (!isTerminalWorkflowStatus(status)) move("CANCELLED", "Run cancelled", "failed");
+    const classifiedFailure = agentScope.signal.aborted
+      ? classifiedWorkflowFailure(agentScope.classifyAbort().error)
+      : workflowScope.signal.aborted
+        ? classifiedWorkflowFailure(workflowScope.classifyAbort().error)
+        : classifiedWorkflowFailure(error);
+    if (classifiedFailure !== undefined) {
+      if (!isTerminalWorkflowStatus(status)) {
+        move(classifiedFailure.code, classifiedFailure.message, "failed");
+      }
+      finalizeAgent();
+      finalizeWorkflow();
       const fallbackProvider: AgentProviderResult = {
         status: "failed",
         provider: deps.mode === "LIVE" ? "openai" : "fixture",
@@ -801,7 +936,15 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
         reasoningEffort: deps.mode === "LIVE" ? "medium" : "none",
         analysisCalls: applicationAnalysisCalls,
         generationAttempts: applicationGenerationAttempts,
-        message: "Run cancelled.",
+        message: classifiedFailure.message,
+        ...(classifiedFailure.code === "CANCELLED"
+          ? {}
+          : {
+              failure: {
+                code: classifiedFailure.code,
+                message: classifiedFailure.message,
+              },
+            }),
       };
       const snapshot = terminalSnapshot(
         deps,
@@ -814,6 +957,7 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
           : lastRejected === undefined
             ? summarizeValidation("NOT_RUN")
             : summarizeValidation("REJECTED", lastRejected.findings),
+        deadlineEvents.snapshot(),
       );
       await persistFailedRun({
         runsRoot: deps.runsRoot,
@@ -834,6 +978,9 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
       emit(deps, { type: "snapshot", snapshot });
       return snapshot;
     }
+    agentScope.dispose();
+    workflowScope.dispose();
+    requestScope.dispose();
     throw error;
   }
 }
