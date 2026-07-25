@@ -76,7 +76,9 @@ export function ArtifactWorkspace(props: {
               event.preventDefault();
               const next = names[targetIndex]!;
               setActive(next);
-              document.getElementById(`${id}-${targetIndex}-tab`)?.focus();
+              const nextTab = document.getElementById(`${id}-${targetIndex}-tab`);
+              nextTab?.focus({ preventScroll: true });
+              nextTab?.scrollIntoView({ block: "nearest", inline: "nearest" });
             }}
           >
             {name}

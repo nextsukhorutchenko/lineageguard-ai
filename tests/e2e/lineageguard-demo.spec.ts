@@ -3,7 +3,11 @@ import {
   failedSnapshot,
   incompleteEvidenceSnapshot,
   ndjson,
+  sanitizedFailedSnapshot,
 } from "./fixtures/workflow-responses.js";
+
+const START_NEW_ANALYSIS_GUIDANCE =
+  "No preserved analysis is available. Start a new analysis to continue.";
 
 async function expectStableArtifactRelationships(page: Page): Promise<void> {
   const relationships = await page.getByRole("tab").evaluateAll((tabs) =>
@@ -95,16 +99,8 @@ for (const [status, text, recovery] of [
     "DataHub is unavailable",
     "Verify the local DataHub service and GMS endpoint before starting a new analysis.",
   ],
-  [
-    "GENERATION_FAILED",
-    "OpenAI generation failed",
-    "Retry generation from the preserved analysis without another DataHub read.",
-  ],
-  [
-    "VALIDATION_FAILED",
-    "Artifact validation failed",
-    "Review the bounded validation findings before retrying generation from the preserved analysis.",
-  ],
+  ["GENERATION_FAILED", "OpenAI generation failed", START_NEW_ANALYSIS_GUIDANCE],
+  ["VALIDATION_FAILED", "Artifact validation failed", START_NEW_ANALYSIS_GUIDANCE],
 ] as const) {
   test(`shows actionable ${status}`, async ({ page }) => {
     await page.route("**/api/runs", (route) =>
@@ -121,20 +117,26 @@ for (const [status, text, recovery] of [
   });
 }
 
-test("never renders the adversarial workflow secret", async ({ page }) => {
+test("publishes only bounded redacted workflow output to the browser", async ({ page }) => {
   const rawSecret = ["sentinel", "route", "secret"].join("-");
-  await page.route("**/api/runs", (route) =>
-    route.fulfill({
+  const unsafeMessage = `Validation rejected ${rawSecret} ${"x".repeat(700)}`;
+  let publishedBody = "";
+  await page.route("**/api/runs", (route) => {
+    publishedBody = ndjson(
+      sanitizedFailedSnapshot("VALIDATION_FAILED", unsafeMessage, [rawSecret]),
+    );
+    return route.fulfill({
       contentType: "application/x-ndjson",
-      body: ndjson({
-        ...failedSnapshot("VALIDATION_FAILED", "Validation rejected [REDACTED]."),
-        facts: ["DataHub description contained [REDACTED]."],
-      }),
-    }),
-  );
+      body: publishedBody,
+    });
+  });
   await page.goto("/");
   await page.getByRole("button", { name: "Analyze change" }).click();
-  await expect(page.locator(".error-panel")).toContainText("[REDACTED]");
+  await expect(page.locator(".error-panel > p").first()).toContainText("[REDACTED]");
+  const renderedFailure = await page.locator(".error-panel > p").first().innerText();
+  expect(renderedFailure.length).toBeLessThanOrEqual(500);
+  expect(publishedBody).toContain("[REDACTED]");
+  expect(publishedBody).not.toContain(rawSecret);
   expect(await page.locator("body").innerText()).not.toContain(rawSecret);
   expect(await page.content()).not.toContain(rawSecret);
 });
@@ -260,6 +262,9 @@ test("retries a preserved generation failure without a new analysis request", as
   await page.goto("/");
   await page.getByRole("button", { name: "Analyze change" }).click();
   await expect(page.getByText("Critical risk", { exact: true })).toBeVisible();
+  await expect(page.locator(".error-panel")).toContainText(
+    "Retry generation from the preserved analysis without another DataHub read.",
+  );
   await page.getByRole("button", { name: "Retry generation" }).click();
   await expect.poll(() => childRequests).toBe(1);
   expect(rootRequests).toBe(1);
@@ -354,6 +359,9 @@ test("shows bounded validation findings without artifact tabs", async ({ page })
   await page.getByRole("button", { name: "Analyze change" }).click();
   await expect(page.getByText("2 validation findings (unvalidated draft).")).toBeVisible();
   await expect(page.getByText("PROHIBITED SQL", { exact: true })).toBeVisible();
+  await expect(page.locator(".error-panel")).toContainText(
+    "Review the bounded validation findings before retrying generation from the preserved analysis.",
+  );
   await expect(page.getByRole("button", { name: "Retry generation" })).toBeEnabled();
   await expect(page.getByRole("tab")).toHaveCount(0);
 });
@@ -517,6 +525,10 @@ test("failed workflow request announces a fixed status without committing artifa
   await expect(page.locator(".error-panel")).toContainText(
     "The workflow stream ended unexpectedly.",
   );
+  await expect(page.locator(".error-panel")).toContainText(START_NEW_ANALYSIS_GUIDANCE);
+  await expect(page.locator(".error-panel")).not.toContainText(
+    "Retry generation from the preserved analysis",
+  );
   await expect(page.getByRole("tab")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Copy" })).toHaveCount(0);
   await expect(page.getByText("Validated artifacts will appear here.")).toBeVisible();
@@ -537,6 +549,10 @@ test("invalid NDJSON announces a fixed status without committing artifacts", asy
   await page.getByRole("button", { name: "Analyze change" }).click();
   await expect(page.locator(".error-panel")).toContainText(
     "The workflow stream ended unexpectedly.",
+  );
+  await expect(page.locator(".error-panel")).toContainText(START_NEW_ANALYSIS_GUIDANCE);
+  await expect(page.locator(".error-panel")).not.toContainText(
+    "Retry generation from the preserved analysis",
   );
   await expect(page.getByRole("tab")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Copy" })).toHaveCount(0);
@@ -618,10 +634,43 @@ test("keeps the request controls usable on a phone viewport", async ({ page }) =
 });
 
 test("keeps the golden decision usable on a phone viewport", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
+  const viewport = { width: 390, height: 844 };
+  await page.setViewportSize(viewport);
   await page.goto("/");
   await page.getByRole("button", { name: "Analyze change" }).click();
-  await expect(page.getByText("BLOCK DIRECT RENAME", { exact: true })).toBeVisible();
-  await page.getByRole("tab", { name: "rollout-plan.md" }).focus();
-  await expect(page.getByRole("tab", { name: "rollout-plan.md" })).toBeFocused();
+  const decision = page.getByText("BLOCK DIRECT RENAME", { exact: true });
+  const workspace = page.locator(".artifact-panel");
+  const rollout = page.getByRole("tab", { name: "rollout-plan.md" });
+  await expect(decision).toBeVisible();
+  await expect(workspace).toBeVisible();
+  expect(
+    await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+    })),
+  ).toEqual({ clientWidth: viewport.width, scrollWidth: viewport.width });
+  for (const locator of [decision, workspace]) {
+    const box = await locator.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+  }
+  await rollout.click();
+  await expect(rollout).toHaveAttribute("aria-selected", "true");
+  const rolloutBox = await rollout.boundingBox();
+  expect(rolloutBox).not.toBeNull();
+  expect(rolloutBox!.x).toBeGreaterThanOrEqual(0);
+  expect(rolloutBox!.x + rolloutBox!.width).toBeLessThanOrEqual(viewport.width);
+  await rollout.press("Home");
+  const firstTab = page.getByRole("tab", { name: "migration-down.sql" });
+  await expect(firstTab).toBeFocused();
+  await firstTab.press("End");
+  const lastTab = page.getByRole("tab", { name: "validation.sql" });
+  await expect(lastTab).toBeFocused();
+  for (const locator of [lastTab, page.getByRole("link", { name: "Download" })]) {
+    const box = await locator.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+  }
 });

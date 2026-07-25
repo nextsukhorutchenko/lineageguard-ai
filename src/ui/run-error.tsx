@@ -16,9 +16,13 @@ export function RunError(props: {
       : props.failure.code === "DATAHUB_UNAVAILABLE"
         ? "Verify the local DataHub service and GMS endpoint before starting a new analysis."
         : props.failure.code === "GENERATION_FAILED"
-          ? "Retry generation from the preserved analysis without another DataHub read."
+          ? props.canRetryGeneration
+            ? "Retry generation from the preserved analysis without another DataHub read."
+            : "No preserved analysis is available. Start a new analysis to continue."
           : props.failure.code === "VALIDATION_FAILED"
-            ? "Review the bounded validation findings before retrying generation from the preserved analysis."
+            ? props.canRetryGeneration
+              ? "Review the bounded validation findings before retrying generation from the preserved analysis."
+              : "No preserved analysis is available. Start a new analysis to continue."
             : undefined;
   return (
     <section className="error-panel" role="alert">

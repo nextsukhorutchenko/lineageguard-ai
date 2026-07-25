@@ -3,6 +3,7 @@ import {
   type WorkflowFailure,
   type WorkflowSnapshot,
 } from "../../../src/workflow/contracts.js";
+import { sanitizeBoundaryText } from "../../../src/security/sanitize-output.js";
 
 type FailureStatus = WorkflowFailure["code"];
 
@@ -28,6 +29,12 @@ export const failedSnapshot = (status: FailureStatus, message: string): Workflow
 
 export const ndjson = (snapshot: WorkflowSnapshot): string =>
   `${JSON.stringify({ type: "snapshot", snapshot })}\n`;
+
+export const sanitizedFailedSnapshot = (
+  status: FailureStatus,
+  unsafeMessage: string,
+  secrets: readonly string[],
+): WorkflowSnapshot => failedSnapshot(status, sanitizeBoundaryText(unsafeMessage, secrets, 500));
 
 export const incompleteEvidenceSnapshot = (): WorkflowSnapshot => ({
   runId: "fixture-incomplete-evidence",
