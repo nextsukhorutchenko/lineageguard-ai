@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { CLIENT_MAX_VIRTUAL_ARTIFACT_BYTES } from "./artifact-limits.js";
 import type { DemoMode, WorkflowSnapshot } from "../workflow/contracts.js";
 import { readNdjson } from "./read-ndjson.js";
 import { ActivityTimeline } from "./activity-timeline.js";
@@ -8,6 +9,7 @@ import { ArtifactWorkspace, type ArtifactContent } from "./artifact-workspace.js
 import { ChangeRequestForm, type ChangeFormValue } from "./change-request-form.js";
 import { EvidencePanel } from "./evidence-panel.js";
 import { ImpactPanel } from "./impact-panel.js";
+import { createRequestOwner } from "./request-owner.js";
 import { RunError } from "./run-error.js";
 
 const initialValue: ChangeFormValue = {
@@ -19,36 +21,86 @@ const initialValue: ChangeFormValue = {
 const requestText = (value: ChangeFormValue): string =>
   `Rename column ${value.sourceColumn} to ${value.targetColumn} in dataset ${value.dataset}`;
 
+const artifactContentType = (filename: string): string =>
+  filename.endsWith(".sql") ? "text/sql; charset=utf-8" : "text/markdown; charset=utf-8";
+
+async function readArtifact(response: Response, filename: string): Promise<string> {
+  if (!response.ok || response.headers.get("content-type") !== artifactContentType(filename)) {
+    throw new Error("Artifact preview is unavailable.");
+  }
+  if (response.body === null) throw new Error("Artifact preview is unavailable.");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (
+        !(value instanceof Uint8Array) ||
+        value.byteLength > CLIENT_MAX_VIRTUAL_ARTIFACT_BYTES - length
+      ) {
+        throw new Error("Artifact preview is unavailable.");
+      }
+      chunks.push(value);
+      length += value.byteLength;
+    }
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    try {
+      await reader.cancel();
+    } catch {
+      // The fixed artifact error remains authoritative.
+    }
+    throw new Error("Artifact preview is unavailable.");
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) {
   const [value, setValue] = useState(initialValue);
   const [snapshot, setSnapshot] = useState<WorkflowSnapshot>();
   const [activity, setActivity] = useState<WorkflowSnapshot["activity"]>([]);
   const [content, setContent] = useState<ArtifactContent>({});
   const [busy, setBusy] = useState(false);
-  const controller = useRef<AbortController | null>(null);
+  const [operationStatus, setOperationStatus] = useState("");
+  const requestOwner = useRef(createRequestOwner());
 
   useEffect(() => {
     if (snapshot?.status !== "COMPLETED") return;
     let active = true;
-    void Promise.all(
-      snapshot.artifacts.map(
-        async ({ filename }) =>
-          [
-            filename,
-            await (await fetch(`/api/runs/${snapshot.runId}/artifacts/${filename}`)).text(),
-          ] as const,
-      ),
-    ).then((pairs) => {
-      if (active) setContent(Object.fromEntries(pairs));
-    });
+    void (async () => {
+      try {
+        const pairs = await Promise.all(
+          snapshot.artifacts.map(async ({ filename }) => {
+            const response = await fetch(`/api/runs/${snapshot.runId}/artifacts/${filename}`);
+            return [filename, await readArtifact(response, filename)] as const;
+          }),
+        );
+        if (active) setContent(Object.fromEntries(pairs));
+      } catch {
+        if (active) {
+          setContent({});
+          setOperationStatus("Artifact preview is unavailable.");
+        }
+      }
+    })();
     return () => {
       active = false;
     };
   }, [snapshot]);
 
   const consume = async (url: string, body?: unknown) => {
-    controller.current = new AbortController();
+    const lease = requestOwner.current.begin();
     setBusy(true);
+    setOperationStatus("");
     setSnapshot(undefined);
     setContent({});
     setActivity([]);
@@ -56,10 +108,11 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
       const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        signal: controller.current.signal,
+        signal: lease.controller.signal,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
       await readNdjson(response, (event) => {
+        if (!requestOwner.current.isCurrent(lease)) return;
         if (event.type === "activity") setActivity((current) => [...current, event.entry]);
         if (event.type === "snapshot") {
           setSnapshot(event.snapshot);
@@ -67,16 +120,24 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
         }
       });
     } catch {
-      // The server supplies sanitized terminal snapshots; cancelled streams leave no unsafe error detail.
+      if (requestOwner.current.isCurrent(lease) && !lease.controller.signal.aborted) {
+        setOperationStatus("The workflow request could not be completed.");
+      }
     } finally {
-      setBusy(false);
-      controller.current = null;
+      if (requestOwner.current.finish(lease)) {
+        setBusy(false);
+      }
     }
   };
 
-  const run = () => void consume("/api/runs", { mode: initialMode, request: requestText(value) });
+  const run = () => {
+    if (!requestOwner.current.isInFlight())
+      void consume("/api/runs", { mode: initialMode, request: requestText(value) });
+  };
   const regenerate = () => {
-    if (snapshot !== undefined) void consume(`/api/runs/${snapshot.runId}/regenerate`);
+    if (!requestOwner.current.isInFlight() && snapshot !== undefined) {
+      void consume(`/api/runs/${snapshot.runId}/regenerate`);
+    }
   };
 
   return (
@@ -103,7 +164,7 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
             busy={busy}
             onChange={setValue}
             onSubmit={run}
-            onCancel={() => controller.current?.abort()}
+            onCancel={() => requestOwner.current.cancel()}
           />
         </section>
         <ImpactPanel snapshot={snapshot} />
@@ -116,11 +177,21 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
           canRetryGeneration={
             snapshot?.parentRunId === undefined &&
             snapshot?.contextHash !== undefined &&
+            !busy &&
             (snapshot?.status === "GENERATION_FAILED" || snapshot?.status === "VALIDATION_FAILED")
           }
         />
       </div>
-      <ArtifactWorkspace snapshot={snapshot} content={content} onRegenerate={regenerate} />
+      <ArtifactWorkspace
+        snapshot={snapshot}
+        content={content}
+        onRegenerate={regenerate}
+        busy={busy}
+        onStatus={setOperationStatus}
+      />
+      <p aria-live="polite" role="status" className="operation-status">
+        {operationStatus}
+      </p>
       <EvidencePanel snapshot={snapshot} />
       <footer>Read-only DataHub · No SQL execution · Human approval required</footer>
     </main>
