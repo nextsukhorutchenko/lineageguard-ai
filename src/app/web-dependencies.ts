@@ -1,4 +1,5 @@
 import type { AgentProvider } from "../agent/provider.js";
+import { z } from "zod";
 import { FakeAgentProvider } from "../agent/fake-agent-provider.js";
 import { OpenAIAgentProvider } from "../agent/openai-agent-provider.js";
 import { assertTrustedRunsRoot } from "../artifacts/run-envelope-files.js";
@@ -12,7 +13,7 @@ import {
   readBoundedUtf8Body,
 } from "../http/bounded-body.js";
 import { createRunId } from "../runs/create-run-id.js";
-import { persistFailedRun } from "../runs/run-store.js";
+import { loadRunSnapshot, persistFailedRun, readCompletedPackageFile } from "../runs/run-store.js";
 import { DEADLINES_MS } from "../runtime/deadlines.js";
 import { encodeWorkflowEvent } from "../ui/read-ndjson.js";
 import {
@@ -224,19 +225,31 @@ export function createPostRunsHandler(overrides: PostRunsHandlerOverrides = {}) 
           if (!terminalSnapshotSent) safeEnqueue({ type: "snapshot", snapshot });
         } catch {
           if (!terminalSnapshotSent) {
-            const snapshot = abortController.signal.aborted
-              ? safeCancellationSnapshot(runId, config.mode)
-              : safeUnexpectedFailureSnapshot(runId, config.mode);
+            let snapshot: WorkflowSnapshot | undefined;
             try {
-              await persistFailure({
+              const persisted = await loadRunSnapshot({
                 runsRoot: trustedRunsRoot,
                 runId,
-                snapshot,
-                secrets:
-                  config.mode === "LIVE" ? [config.openaiApiKey, config.datahubGmsToken] : [],
               });
+              if (persisted.status === "COMPLETED") snapshot = persisted;
             } catch {
-              // The same closed fallback is safe to stream when persistence is unavailable.
+              // Only an already-published completion supersedes the closed fallback.
+            }
+            if (snapshot === undefined) {
+              snapshot = abortController.signal.aborted
+                ? safeCancellationSnapshot(runId, config.mode)
+                : safeUnexpectedFailureSnapshot(runId, config.mode);
+              try {
+                await persistFailure({
+                  runsRoot: trustedRunsRoot,
+                  runId,
+                  snapshot,
+                  secrets:
+                    config.mode === "LIVE" ? [config.openaiApiKey, config.datahubGmsToken] : [],
+                });
+              } catch {
+                // The same closed fallback is safe to stream when persistence is unavailable.
+              }
             }
             safeEnqueue({ type: "snapshot", snapshot });
           }
@@ -260,6 +273,88 @@ export function createPostRunsHandler(overrides: PostRunsHandlerOverrides = {}) 
         "X-Content-Type-Options": "nosniff",
       },
     });
+  };
+}
+
+type ReloadRunRouteContext = {
+  readonly params: Promise<{ readonly runId: string }>;
+};
+
+export interface ReloadRunHandlerOverrides {
+  readonly loadConfig?: typeof loadWebConfig;
+  readonly assertRunsRoot?: typeof assertTrustedRunsRoot;
+  readonly loadSnapshot?: typeof loadRunSnapshot;
+}
+
+export function createReloadRunHandler(overrides: ReloadRunHandlerOverrides = {}) {
+  const loadConfig = overrides.loadConfig ?? loadWebConfig;
+  const assertRunsRoot = overrides.assertRunsRoot ?? assertTrustedRunsRoot;
+  const loadSnapshot = overrides.loadSnapshot ?? loadRunSnapshot;
+
+  return async function reloadRun(
+    _request: Request,
+    context: ReloadRunRouteContext,
+  ): Promise<Response> {
+    try {
+      const { runId } = await context.params;
+      const config = loadConfig(process.env);
+      const runsRoot = await assertRunsRoot(config.runsRoot);
+      const snapshot = await loadSnapshot({ runsRoot, runId });
+      return Response.json(snapshot, { headers: { "Cache-Control": "no-store" } });
+    } catch {
+      return Response.json({ error: "Run not found." }, { status: 404 });
+    }
+  };
+}
+
+const PublicArtifactSchema = z.enum([
+  "migration-up.sql",
+  "migration-down.sql",
+  "validation.sql",
+  "rollout-plan.md",
+]);
+
+type DownloadArtifactRouteContext = {
+  readonly params: Promise<{
+    readonly runId: string;
+    readonly filename: string;
+  }>;
+};
+
+export interface DownloadArtifactHandlerOverrides {
+  readonly loadConfig?: typeof loadWebConfig;
+  readonly assertRunsRoot?: typeof assertTrustedRunsRoot;
+  readonly readArtifact?: typeof readCompletedPackageFile;
+}
+
+export function createDownloadArtifactHandler(overrides: DownloadArtifactHandlerOverrides = {}) {
+  const loadConfig = overrides.loadConfig ?? loadWebConfig;
+  const assertRunsRoot = overrides.assertRunsRoot ?? assertTrustedRunsRoot;
+  const readArtifact = overrides.readArtifact ?? readCompletedPackageFile;
+
+  return async function downloadArtifact(
+    _request: Request,
+    context: DownloadArtifactRouteContext,
+  ): Promise<Response> {
+    try {
+      const { runId, filename: untrustedFilename } = await context.params;
+      const filename = PublicArtifactSchema.parse(untrustedFilename);
+      const config = loadConfig(process.env);
+      const runsRoot = await assertRunsRoot(config.runsRoot);
+      const body = await readArtifact({ runsRoot, runId, filename });
+      return new Response(body, {
+        headers: {
+          "Cache-Control": "no-store",
+          "Content-Disposition": `attachment; filename="${filename}"`,
+          "Content-Type": filename.endsWith(".sql")
+            ? "text/sql; charset=utf-8"
+            : "text/markdown; charset=utf-8",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    } catch {
+      return Response.json({ error: "Artifact not found." }, { status: 404 });
+    }
   };
 }
 

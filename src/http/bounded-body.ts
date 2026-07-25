@@ -17,10 +17,11 @@ export async function readBoundedUtf8Body(request: Request, maximumBytes: number
     return "";
   }
 
-  const reader = request.body.getReader();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
   try {
+    reader = request.body.getReader();
     validateContentLength(request, maximumBytes);
     while (true) {
       const { value, done } = await reader.read();
@@ -40,14 +41,16 @@ export async function readBoundedUtf8Body(request: Request, maximumBytes: number
     }
     return new TextDecoder("utf-8", { fatal: true }).decode(joined);
   } catch {
-    try {
-      await reader.cancel();
-    } catch {
-      // The fixed primary boundary error remains authoritative.
+    if (reader !== undefined) {
+      try {
+        await reader.cancel();
+      } catch {
+        // The fixed primary boundary error remains authoritative.
+      }
     }
     throw invalidBody();
   } finally {
-    reader.releaseLock();
+    reader?.releaseLock();
   }
 }
 

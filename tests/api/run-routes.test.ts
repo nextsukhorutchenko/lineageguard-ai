@@ -1,4 +1,4 @@
-import { lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,13 +11,18 @@ import type { AgentProvider, AgentProviderResult } from "../../src/agent/provide
 import { runAgentWorkflow } from "../../src/app/run-agent-workflow.js";
 import { regeneratePackage } from "../../src/app/regenerate-package.js";
 import {
+  createDownloadArtifactHandler,
   createPostRunsHandler,
   createRegenerateRunHandler,
+  createReloadRunHandler,
   createWebRegenerationDependencies,
   createWebWorkflowDependencies,
   safeUnexpectedFailureSnapshot,
 } from "../../src/app/web-dependencies.js";
-import { readRunEnvelope } from "../../src/artifacts/run-envelope-files.js";
+import {
+  __testOnly as runEnvelopeFilesTestOnly,
+  readRunEnvelope,
+} from "../../src/artifacts/run-envelope-files.js";
 import type { WebConfig } from "../../src/config/web-config.js";
 import type { CollectionResult } from "../../src/datahub/catalog.js";
 import { FixtureCatalog } from "../../src/demo/fixture-catalog.js";
@@ -25,6 +30,8 @@ import type {
   EntityContext,
   EntityContextIncompleteReasonCode,
 } from "../../src/domain/evidence.js";
+import type { VirtualArtifactFilename } from "../../src/runs/run-envelope.js";
+import { persistCompletedRun } from "../../src/runs/run-store.js";
 import { readNdjson } from "../../src/ui/read-ndjson.js";
 import {
   WorkflowEventSchema,
@@ -383,29 +390,59 @@ it("streams only the closed fallback when failure persistence is unavailable", a
 
 it("reloads authoritative COMPLETED after abort races with final hard-link publication", async () => {
   const runId = "completed-before-abort";
+  const sourceRoot = await mkdtemp(join(tmpdir(), "lineageguard-completed-source-"));
   const requestController = new AbortController();
-  const handler = createPostRunsHandler({
-    createId: () => runId,
-    runWorkflow: async (dependencies) => {
-      await runAgentWorkflow(dependencies);
-      requestController.abort();
-      throw new Error("late abort after publication");
-    },
-  });
+  try {
+    await runAgentWorkflow({
+      ...createWebWorkflowDependencies({
+        config: replayConfig(sourceRoot),
+        runsRoot: sourceRoot,
+        request: REQUEST,
+        runId,
+        signal: new AbortController().signal,
+        onEvent: () => {},
+      }),
+      provider: new FakeAgentProvider(),
+      createCatalog: async () => new FixtureCatalog(),
+    });
+    const sourceEnvelope = await readRunEnvelope({ runsRoot: sourceRoot, runId });
+    if (sourceEnvelope.kind !== "completed") {
+      throw new Error("Expected a completed source envelope.");
+    }
 
-  const events = await collectEvents(
-    await handler(runRequest({ mode: "REPLAY", request: REQUEST }, requestController.signal)),
-  );
-  expect(terminalSnapshots(events)).toEqual([
-    expect.objectContaining({ runId, status: "COMPLETED" }),
-  ]);
-  const reload = await reloadRun(new Request(`http://localhost/api/runs/${runId}`), {
-    params: Promise.resolve({ runId }),
-  });
-  expect(WorkflowSnapshotSchema.parse(await reload.json())).toMatchObject({
-    runId,
-    status: "COMPLETED",
-  });
+    const handler = createPostRunsHandler({
+      createId: () => runId,
+      runWorkflow: async (dependencies) => {
+        await persistCompletedRun({
+          runsRoot: dependencies.runsRoot,
+          runId,
+          context: sourceEnvelope.context,
+          draft: sourceEnvelope.draft,
+          rendered: sourceEnvelope.package,
+          snapshot: sourceEnvelope.snapshot,
+          signal: dependencies.signal,
+          hooks: { afterPublish: () => requestController.abort() },
+        });
+        throw new Error("publication completed before terminal delivery");
+      },
+    });
+
+    const events = await collectEvents(
+      await handler(runRequest({ mode: "REPLAY", request: REQUEST }, requestController.signal)),
+    );
+    expect(terminalSnapshots(events)).toEqual([
+      expect.objectContaining({ runId, status: "COMPLETED" }),
+    ]);
+    const reload = await reloadRun(new Request(`http://localhost/api/runs/${runId}`), {
+      params: Promise.resolve({ runId }),
+    });
+    expect(WorkflowSnapshotSchema.parse(await reload.json())).toMatchObject({
+      runId,
+      status: "COMPLETED",
+    });
+  } finally {
+    await rm(sourceRoot, { recursive: true, force: true });
+  }
 });
 
 it("reloads sanitized snapshots, regenerates without DataHub, and downloads only public artifacts", async () => {
@@ -503,13 +540,83 @@ it("rejects invariant-tampered, malformed, linked, and traversal final entries",
 
   const outside = await mkdtemp(join(tmpdir(), "lineageguard-outside-"));
   try {
-    await symlink(
-      outside,
-      join(runsRoot, "run-linked.json"),
-      process.platform === "win32" ? "junction" : "dir",
+    const linkedRunId = "linked";
+    await runAgentWorkflow({
+      ...createWebWorkflowDependencies({
+        config: replayConfig(outside),
+        runsRoot: outside,
+        request: REQUEST,
+        runId: linkedRunId,
+        signal: new AbortController().signal,
+        onEvent: () => {},
+      }),
+      provider: new FakeAgentProvider(),
+      createCatalog: async () => new FixtureCatalog(),
+    });
+    const outsideEnvelopePath = join(outside, `run-${linkedRunId}.json`);
+    const linkedFinalPath = join(runsRoot, `run-${linkedRunId}.json`);
+    await link(outsideEnvelopePath, linkedFinalPath);
+    await expect(readRunEnvelope({ runsRoot, runId: linkedRunId })).resolves.toMatchObject({
+      kind: "completed",
+      runId: linkedRunId,
+    });
+
+    const strictLinkedBoundary = runEnvelopeFilesTestOnly.createRunEnvelopeFileBoundary({
+      operations: {
+        lstat: async (path) => {
+          const stats = await lstat(path);
+          if (resolve(path) !== resolve(linkedFinalPath)) return stats;
+          return {
+            dev: stats.dev,
+            ino: stats.ino,
+            size: stats.size,
+            isDirectory: () => false,
+            isFile: () => true,
+            isSymbolicLink: () => true,
+          };
+        },
+      },
+    });
+
+    const linkedReload = createReloadRunHandler({
+      loadSnapshot: async (input: { readonly runsRoot: string; readonly runId: string }) => {
+        const envelope = await strictLinkedBoundary.readRunEnvelope(input);
+        if (envelope.kind === "impact-report") throw new Error("Workflow run unavailable.");
+        return envelope.snapshot;
+      },
+    });
+    const linkedDownload = createDownloadArtifactHandler({
+      readArtifact: async (input: {
+        readonly runsRoot: string;
+        readonly runId: string;
+        readonly filename: VirtualArtifactFilename;
+      }) => {
+        const envelope = await strictLinkedBoundary.readRunEnvelope(input);
+        if (envelope.kind !== "completed") throw new Error("Package unavailable.");
+        return envelope.package.files[input.filename];
+      },
+    });
+    const linkedReloadResponse = await linkedReload(
+      new Request(`http://localhost/api/runs/${linkedRunId}`),
+      { params: Promise.resolve({ runId: linkedRunId }) },
     );
-    expect((await lstat(join(runsRoot, "run-linked.json"))).isSymbolicLink()).toBe(true);
-    for (const runId of [invariantRunId, "malformed", "linked", "../outside"]) {
+    const linkedDownloadResponse = await linkedDownload(
+      new Request(`http://localhost/api/runs/${linkedRunId}/artifacts/migration-up.sql`),
+      {
+        params: Promise.resolve({
+          runId: linkedRunId,
+          filename: "migration-up.sql",
+        }),
+      },
+    );
+    expect(linkedReloadResponse.status).toBe(404);
+    expect(await linkedReloadResponse.json()).toEqual({ error: "Run not found." });
+    expect(linkedDownloadResponse.status).toBe(404);
+    expect(await linkedDownloadResponse.json()).toEqual({
+      error: "Artifact not found.",
+    });
+
+    for (const runId of [invariantRunId, "malformed", "../outside"]) {
       const reload = await reloadRun(new Request("http://localhost/api/runs"), {
         params: Promise.resolve({ runId }),
       });
@@ -528,7 +635,7 @@ it("rejects invariant-tampered, malformed, linked, and traversal final entries",
 });
 
 describe("trusted-root preflight", () => {
-  it.each(["missing", "relative", "nonexistent", "file", "junction"])(
+  it.each(["missing", "relative", "nonexistent", "file"])(
     "fails closed for a %s runs root before workflow construction",
     async (kind) => {
       const target = await mkdtemp(join(tmpdir(), "lineageguard-root-target-"));
@@ -539,10 +646,6 @@ describe("trusted-root preflight", () => {
         if (kind === "nonexistent") process.env.LINEAGEGUARD_RUNS_DIR = candidate;
         if (kind === "file") {
           await writeFile(candidate, "not a directory");
-          process.env.LINEAGEGUARD_RUNS_DIR = candidate;
-        }
-        if (kind === "junction") {
-          await symlink(target, candidate, "junction");
           process.env.LINEAGEGUARD_RUNS_DIR = candidate;
         }
         const createDependencies = vi.fn(() => {
@@ -561,29 +664,42 @@ describe("trusted-root preflight", () => {
     },
   );
 
-  it.runIf(process.platform !== "win32")(
-    "rejects a directory-symlink runs root before workflow construction",
-    async () => {
-      const target = await mkdtemp(join(tmpdir(), "lineageguard-symlink-target-"));
-      const candidate = `${target}-link`;
-      try {
-        await symlink(target, candidate, "dir");
-        process.env.LINEAGEGUARD_RUNS_DIR = candidate;
-        const createDependencies = vi.fn();
-        const response = await createPostRunsHandler({ createDependencies })(
-          runRequest({ mode: "REPLAY", request: REQUEST }),
-        );
-        expect(response.status).toBe(503);
-        expect(await response.json()).toEqual({
-          error: "Demo service storage is unavailable.",
-        });
-        expect(createDependencies).not.toHaveBeenCalled();
-      } finally {
-        await rm(candidate, { recursive: true, force: true });
-        await rm(target, { recursive: true, force: true });
-      }
-    },
-  );
+  it("rejects a directory-symlink runs root before workflow construction", async () => {
+    const target = await mkdtemp(join(tmpdir(), "lineageguard-symlink-target-"));
+    const candidate = `${target}-link`;
+    try {
+      process.env.LINEAGEGUARD_RUNS_DIR = candidate;
+      const createDependencies = vi.fn();
+      const symlinkBoundary = runEnvelopeFilesTestOnly.createRunEnvelopeFileBoundary({
+        operations: {
+          lstat: async (path) => {
+            if (resolve(path) !== resolve(candidate)) return lstat(path);
+            const stats = await lstat(target);
+            return {
+              dev: stats.dev,
+              ino: stats.ino,
+              size: stats.size,
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => true,
+            };
+          },
+        },
+      });
+      const response = await createPostRunsHandler({
+        assertRunsRoot: symlinkBoundary.assertTrustedRunsRoot,
+        createDependencies,
+      })(runRequest({ mode: "REPLAY", request: REQUEST }));
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({
+        error: "Demo service storage is unavailable.",
+      });
+      expect(createDependencies).not.toHaveBeenCalled();
+    } finally {
+      await rm(candidate, { recursive: true, force: true });
+      await rm(target, { recursive: true, force: true });
+    }
+  });
 
   it.runIf(process.platform === "win32")(
     "rejects a Windows-junction runs root before workflow construction",
@@ -592,6 +708,7 @@ describe("trusted-root preflight", () => {
       const candidate = `${target}-junction`;
       try {
         await symlink(target, candidate, "junction");
+        expect((await lstat(candidate)).isSymbolicLink()).toBe(true);
         process.env.LINEAGEGUARD_RUNS_DIR = candidate;
         const createDependencies = vi.fn();
         const response = await createPostRunsHandler({ createDependencies })(

@@ -22,7 +22,7 @@ export async function readNdjson(
   onEvent: (event: WorkflowEvent) => void,
 ): Promise<void> {
   if (!response.ok || response.body === null) throw new Error("Workflow stream is unavailable.");
-  const reader = response.body.getReader();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let responseBytes = 0;
   let lineBytes = 0;
   let eventCount = 0;
@@ -42,6 +42,7 @@ export async function readNdjson(
   };
 
   try {
+    reader = response.body.getReader();
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -75,13 +76,15 @@ export async function readNdjson(
     }
     if (lineBytes > 0) consumeLine();
   } catch {
-    try {
-      await reader.cancel();
-    } catch {
-      // The fixed primary stream error remains authoritative.
+    if (reader !== undefined) {
+      try {
+        await reader.cancel();
+      } catch {
+        // The fixed primary stream error remains authoritative.
+      }
     }
     throw new Error("Workflow stream is invalid.");
   } finally {
-    reader.releaseLock();
+    reader?.releaseLock();
   }
 }

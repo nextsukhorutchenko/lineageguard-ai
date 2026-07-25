@@ -100,6 +100,18 @@ describe("readBoundedUtf8Body", () => {
       "Request body is invalid.",
     );
   });
+
+  it("maps pre-locked request streams to the fixed body error", async () => {
+    const request = streamedRequest(["{}"]);
+    const heldReader = request.body!.getReader();
+    try {
+      await expect(readBoundedUtf8Body(request, MAX_RUN_REQUEST_BYTES)).rejects.toEqual(
+        new Error("Request body is invalid."),
+      );
+    } finally {
+      heldReader.releaseLock();
+    }
+  });
 });
 
 describe("assertEmptyRequestBody", () => {

@@ -178,6 +178,18 @@ it("maps callback failures to the fixed stream error and cancels and unlocks the
   expect(response.body?.locked).toBe(false);
 });
 
+it("maps pre-locked response streams to the fixed stream error", async () => {
+  const response = responseFromChunks([`${JSON.stringify(events[0])}\n`]);
+  const heldReader = response.body!.getReader();
+  try {
+    await expect(readNdjson(response, () => {})).rejects.toEqual(
+      new Error("Workflow stream is invalid."),
+    );
+  } finally {
+    heldReader.releaseLock();
+  }
+});
+
 it("releases the reader lock after clean completion", async () => {
   const response = responseFromChunks([`${JSON.stringify(events[0])}\n`]);
   await readNdjson(response, () => {});
