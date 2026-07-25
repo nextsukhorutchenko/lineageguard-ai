@@ -22,6 +22,7 @@
     "test:e2e": "playwright test",
     "test:integration": "vitest run tests/integration/datahub-mcp.integration.test.ts",
     "test:openai": "vitest run tests/integration/openai-agent.integration.test.ts",
+    "test:runtime-mode": "vitest run tests/integration/runtime-mode-page.integration.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

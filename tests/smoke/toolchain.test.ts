@@ -37,6 +37,7 @@ describe("toolchain", () => {
       dev: "next dev --webpack",
       "start:web": "next start",
       "test:e2e": "playwright test",
+      "test:runtime-mode": "vitest run tests/integration/runtime-mode-page.integration.test.ts",
     });
   });
 });
