@@ -128,6 +128,12 @@ it("keeps complete evidence and metadata context coverage as separate states", (
   expect(renderedComplete).toContain("2 of 2 assets inspected");
   expect(renderedComplete).toContain("100% retrieval coverage");
   expect(renderedComplete).toContain("Entity context retrieval complete");
+  expect(renderedComplete).toContain("search");
+  expect(renderedComplete).toContain("list_schema_fields");
+  expect(renderedComplete).toContain("get_lineage · table");
+  expect(renderedComplete).toContain("get_lineage · column");
+  expect(renderedComplete).toContain("get_entities");
+  expect((renderedComplete.match(/get_entities/gu) ?? []).length).toBe(1);
   expect(renderedComplete).toContain("Quality indicators");
   expect(renderedComplete).toContain("Usage indicators not collected");
   expect(renderedComplete).toContain("urn:li:dataset:(missing-context)");

@@ -12,6 +12,7 @@ import { EvidencePanel } from "./evidence-panel.js";
 import { ImpactPanel } from "./impact-panel.js";
 import { createRequestOwner } from "./request-owner.js";
 import { RunError } from "./run-error.js";
+import { RuntimeProofPanel } from "./runtime-proof-panel.js";
 
 const initialValue: ChangeFormValue = {
   dataset: "snowflake:b2fd91.order_entry_db.analytics.order_details",
@@ -168,8 +169,9 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
             onCancel={() => requestOwner.current.cancel()}
           />
         </section>
-        <ImpactPanel snapshot={snapshot} />
         <ActivityTimeline entries={activity} />
+        <RuntimeProofPanel snapshot={snapshot} />
+        <ImpactPanel snapshot={snapshot} />
         <RunError
           failure={snapshot?.failure}
           validation={snapshot?.validation}

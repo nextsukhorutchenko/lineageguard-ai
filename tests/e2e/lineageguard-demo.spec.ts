@@ -32,7 +32,7 @@ test("completes the golden grounded replay flow", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "Know the blast radius before you ship." }),
   ).toBeVisible();
-  await expect(page.getByText("Fixture replay", { exact: true })).toBeVisible();
+  await expect(page.locator(".mode-badge")).toHaveText("Fixture replay");
   await page.getByRole("button", { name: "Analyze change" }).click();
   await expect(page.getByText("Critical risk", { exact: true })).toBeVisible();
   await expect(page.getByText("90", { exact: true })).toBeVisible();
@@ -47,6 +47,16 @@ test("completes the golden grounded replay flow", async ({ page }) => {
   await expect(
     page.getByText("Usage indicators not collected in the four-tool read-only slice."),
   ).toBeVisible();
+  const runtimeProof = page.getByRole("region", { name: "Runtime proof" });
+  await expect(runtimeProof).toBeVisible();
+  await expect(runtimeProof.getByText("Fixture replay", { exact: true })).toBeVisible();
+  await expect(runtimeProof.getByText("mcp-server-datahub@0.6.0", { exact: true })).toBeVisible();
+  await expect(runtimeProof.getByText("analyze_rename_change", { exact: true })).toBeVisible();
+  await expect(runtimeProof.getByText("generate_migration_package", { exact: true })).toBeVisible();
+  await expect(
+    runtimeProof.getByText("Replay has no mutation capability.", { exact: true }),
+  ).toBeVisible();
+  await expect(runtimeProof.getByText("save_document", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Evidence ID: datahub:source-column:customer_id")).toBeVisible();
   await expect(page.getByText("Field: customer_id")).toBeVisible();
   await expect(page.getByRole("tab", { name: "migration-up.sql" })).toBeVisible();

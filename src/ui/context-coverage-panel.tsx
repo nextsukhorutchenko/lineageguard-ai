@@ -15,10 +15,10 @@ export function ContextCoveragePanel({
     completeness === undefined
       ? []
       : ([
-          ["Search", completeness.search],
-          ["Schema", completeness.schema],
-          ["Table lineage", completeness.tableLineage],
-          ["Column lineage", completeness.columnLineage],
+          ["search", completeness.search],
+          ["list_schema_fields", completeness.schema],
+          ["get_lineage · table", completeness.tableLineage],
+          ["get_lineage · column", completeness.columnLineage],
         ] as const);
 
   return (
@@ -76,7 +76,8 @@ export function ContextCoveragePanel({
                     Entity context retrieval {retrieval.complete ? "complete" : "incomplete"}
                   </strong>
                   <p>
-                    {retrieval.itemCount} entities · {retrieval.pages} batches
+                    <code>get_entities</code> · {retrieval.itemCount} entities · {retrieval.pages}{" "}
+                    batches
                   </p>
                   {retrieval.reasonCodes.map((reason) => (
                     <small className="unknown" key={reason}>
