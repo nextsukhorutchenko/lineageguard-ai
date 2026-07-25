@@ -1,4 +1,5 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
@@ -6,7 +7,7 @@ import { calculateContextCoverage } from "../../domain/context-coverage.js";
 import { loadRuntimeConfig } from "../../config/runtime-config.js";
 import type { RequiredIncompleteReasonCode } from "../../domain/evidence.js";
 import { AppError } from "../../errors/app-error.js";
-import { createRequestAbortScope } from "../../runtime/deadlines.js";
+import { createDeadline, createRequestAbortScope } from "../../runtime/deadlines.js";
 import {
   DataHubMcpCatalog,
   type McpToolClient,
@@ -2345,6 +2346,68 @@ describe("DataHubMcpCatalog", () => {
 });
 
 describe("dataHubMcpServerParameters", () => {
+  it("classifies an already-cancelled request without exposing its reason or activating the SDK", async () => {
+    const secret = "secret-bearing-browser-abort";
+    const browser = new AbortController();
+    const scope = createRequestAbortScope(browser.signal);
+    const config = loadRuntimeConfig({
+      DATAHUB_GMS_URL: "http://localhost:8080",
+      DATAHUB_GMS_TOKEN: "local-test-token",
+      DATAHUB_MCP_UVX_PATH: "custom-uvx",
+      LINEAGEGUARD_RUNS_DIR: resolve("runs"),
+    });
+    const connect = vi.spyOn(Client.prototype, "connect");
+    const close = vi.spyOn(Client.prototype, "close");
+    const recordDeadlineEvent = vi.fn();
+    browser.abort(new Error(secret));
+
+    const error = await connectDataHubMcp(config, scope, recordDeadlineEvent).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(AppError);
+    expect(error).toMatchObject({
+      code: "CANCELLED",
+      message: "The workflow was cancelled.",
+      details: {},
+    });
+    expect(JSON.stringify(error)).not.toContain(secret);
+    expect(connect).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    expect(recordDeadlineEvent).not.toHaveBeenCalled();
+  });
+
+  it("preserves an already-expired classified deadline before SDK activation", async () => {
+    vi.useFakeTimers();
+    const request = createRequestAbortScope(new AbortController().signal);
+    const deadline = createDeadline(request, 1, "MCP_CONNECT_TIMEOUT");
+    const config = loadRuntimeConfig({
+      DATAHUB_GMS_URL: "http://localhost:8080",
+      DATAHUB_GMS_TOKEN: "local-test-token",
+      DATAHUB_MCP_UVX_PATH: "custom-uvx",
+      LINEAGEGUARD_RUNS_DIR: resolve("runs"),
+    });
+    const connect = vi.spyOn(Client.prototype, "connect");
+    const close = vi.spyOn(Client.prototype, "close");
+    const recordDeadlineEvent = vi.fn();
+    await vi.advanceTimersByTimeAsync(1);
+
+    const error = await connectDataHubMcp(config, deadline, recordDeadlineEvent).catch(
+      (caught: unknown) => caught,
+    );
+    deadline.dispose();
+
+    expect(error).toBeInstanceOf(AppError);
+    expect(error).toMatchObject({
+      code: "MCP_UNAVAILABLE",
+      message: "The DataHub MCP connection exceeded its deadline.",
+      details: {},
+    });
+    expect(connect).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    expect(recordDeadlineEvent).not.toHaveBeenCalled();
+  });
+
   it("pins DataHub MCP 0.6.0 to stdio with only the required read-only environment", () => {
     const config = loadRuntimeConfig({
       DATAHUB_GMS_URL: "http://localhost:8080",

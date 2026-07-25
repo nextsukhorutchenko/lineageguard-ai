@@ -246,7 +246,7 @@ export async function connectDataHubMcp(
   scope: ClassifiedAbortScope,
   recordDeadlineEvent: RecordDeadlineEvent,
 ): Promise<McpToolClient> {
-  scope.signal.throwIfAborted();
+  if (scope.signal.aborted) throw scope.classifyAbort().error;
   const client = new Client({ name: "lineageguard-ai", version: "0.1.0" });
   const transport = new StdioClientTransport(dataHubMcpServerParameters(config));
   transport.stderr?.on("data", boundedStderrCollector([config.datahubGmsToken]));
