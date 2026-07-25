@@ -36,8 +36,8 @@ test("regenerates the completed package through its bounded route", async ({ pag
   await page.goto("/");
   await page.getByRole("button", { name: "Analyze change" }).click();
   await expect(page.getByRole("tab", { name: "migration-up.sql" })).toBeVisible();
-  const regeneration = page.waitForRequest((request) =>
-    request.url().includes("/regenerate") && request.method() === "POST",
+  const regeneration = page.waitForRequest(
+    (request) => request.url().includes("/regenerate") && request.method() === "POST",
   );
   await page.getByRole("button", { name: "Regenerate" }).click();
   await regeneration;

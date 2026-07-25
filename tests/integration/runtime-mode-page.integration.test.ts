@@ -14,13 +14,16 @@ async function reservePort(): Promise<number> {
   await once(server, "listening");
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("Port reservation failed.");
-  await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  await new Promise<void>((resolve, reject) =>
+    server.close((error) => (error ? reject(error) : resolve())),
+  );
   return address.port;
 }
 
 async function waitForServer(url: string, process: ChildProcess): Promise<void> {
   for (let attempt = 0; attempt < 80; attempt += 1) {
-    if (process.exitCode !== null) throw new Error("The built web server stopped before becoming ready.");
+    if (process.exitCode !== null)
+      throw new Error("The built web server stopped before becoming ready.");
     try {
       await fetch(url);
       return;
@@ -39,11 +42,15 @@ async function stopServer(process: ChildProcess): Promise<void> {
 
 async function renderMode(environment: Record<string, string>): Promise<string> {
   const port = await reservePort();
-  const child = spawn(process.execPath, [nextBin, "start", "--hostname", "127.0.0.1", "--port", `${port}`], {
-    cwd: process.cwd(),
-    env: { ...process.env, ...environment },
-    stdio: "ignore",
-  });
+  const child = spawn(
+    process.execPath,
+    [nextBin, "start", "--hostname", "127.0.0.1", "--port", `${port}`],
+    {
+      cwd: process.cwd(),
+      env: { ...process.env, ...environment },
+      stdio: "ignore",
+    },
+  );
   const url = `http://127.0.0.1:${port}/`;
   try {
     await waitForServer(url, child);
