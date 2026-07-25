@@ -5969,10 +5969,9 @@ describe("readBoundedUtf8Body", () => {
   it("rejects byte 8193, cancels the stream, and exposes no body text", async () => {
     const cancelled = vi.fn();
     const sentinel = "ACTIVE_SECRET_SENTINEL";
-    const request = streamedRequest(
-      ["x".repeat(MAX_RUN_REQUEST_BYTES), sentinel],
-      { cancel: cancelled },
-    );
+    const request = streamedRequest(["x".repeat(MAX_RUN_REQUEST_BYTES), sentinel], {
+      cancel: cancelled,
+    });
 
     const error = await readBoundedUtf8Body(request, MAX_RUN_REQUEST_BYTES).catch(
       (caught: unknown) => caught,
@@ -6040,10 +6039,7 @@ Create `src/http/bounded-body.ts` with these public interfaces:
 ```ts
 export const MAX_RUN_REQUEST_BYTES = 8_192;
 
-export async function readBoundedUtf8Body(
-  request: Request,
-  maximumBytes: number,
-): Promise<string>;
+export async function readBoundedUtf8Body(request: Request, maximumBytes: number): Promise<string>;
 
 export async function assertEmptyRequestBody(request: Request): Promise<void>;
 ```
@@ -6092,8 +6088,9 @@ it("accepts exactly 16 MiB total and rejects the next byte", async () => {
 it("accepts 128 events and rejects event 129", async () => {
   const line = `${JSON.stringify(events[0])}\n`;
   const received: WorkflowEvent[] = [];
-  await readNdjson(responseFromChunks(Array.from({ length: MAX_NDJSON_EVENTS }, () => line)), (event) =>
-    received.push(event),
+  await readNdjson(
+    responseFromChunks(Array.from({ length: MAX_NDJSON_EVENTS }, () => line)),
+    (event) => received.push(event),
   );
   expect(received).toHaveLength(MAX_NDJSON_EVENTS);
   await expect(
