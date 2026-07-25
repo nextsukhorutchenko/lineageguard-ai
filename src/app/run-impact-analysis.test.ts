@@ -1,4 +1,4 @@
-import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
@@ -15,7 +15,7 @@ import type { DatasetCandidate } from "../domain/resolve-dataset.js";
 import { AppError } from "../errors/app-error.js";
 import { readImpactReport } from "../artifacts/write-run-artifacts.js";
 import * as impactAnalysisModule from "./run-impact-analysis.js";
-import { runImpactAnalysis } from "./run-impact-analysis.js";
+import { analyzeImpact, runImpactAnalysis } from "./run-impact-analysis.js";
 
 const RUN_ID = "20260722T120000Z-0123abcd";
 const REQUEST = "Rename column customer_id to customer_key in dataset snowflake:orders";
@@ -231,6 +231,68 @@ afterEach(async () => {
 });
 
 describe("runImpactAnalysis", () => {
+  it("analyzes deterministically, closes once, and publishes no filesystem entry", async () => {
+    const catalog = new FakeCatalog();
+    const runsRoot = await createRunsRoot();
+
+    const report = await analyzeImpact({
+      request: REQUEST,
+      catalog,
+      clock: () => new Date("2026-07-22T12:00:00.000Z"),
+      runId: RUN_ID,
+      runsRoot,
+      signal: new AbortController().signal,
+      secrets: [],
+    });
+
+    expect(report).toMatchObject({
+      runId: RUN_ID,
+      createdAt: "2026-07-22T12:00:00.000Z",
+      request: REQUEST,
+      status: "COMPLETED",
+      evidence: {
+        evidenceLevel: "column",
+        downstreamAssets: [DOWNSTREAM],
+        columnAffectedAssets: [COLUMN_DOWNSTREAM],
+      },
+    });
+    expect(catalog.operations).toEqual([
+      "searchDatasets",
+      "listSchemaFields",
+      "getDownstreamLineage:table",
+      "getDownstreamLineage:customer_id",
+      "getEntityContext",
+      "close",
+    ]);
+    expect(catalog.closeCount).toBe(1);
+    await expect(readdir(runsRoot)).resolves.toEqual([]);
+  });
+
+  it("keeps analyzeImpact cancellation and exactly-once close semantics without publication", async () => {
+    const controller = new AbortController();
+    const catalog = new FakeCatalog({
+      onEntityContext: () => controller.abort(new Error("private abort reason")),
+    });
+    const runsRoot = await createRunsRoot();
+
+    await expect(
+      analyzeImpact({
+        request: REQUEST,
+        catalog,
+        clock: () => new Date("2026-07-22T12:00:00.000Z"),
+        runId: RUN_ID,
+        runsRoot,
+        signal: controller.signal,
+        secrets: [],
+      }),
+    ).rejects.toMatchObject({
+      code: "CANCELLED",
+      message: "The run was cancelled.",
+    });
+    expect(catalog.closeCount).toBe(1);
+    await expect(readdir(runsRoot)).resolves.toEqual([]);
+  });
+
   it("completes grounded column impact in the required catalog call order", async () => {
     const catalog = new FakeCatalog();
     const runsRoot = await createRunsRoot();

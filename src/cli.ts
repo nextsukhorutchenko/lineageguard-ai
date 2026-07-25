@@ -12,8 +12,7 @@ import {
   type RuntimeConfig,
 } from "./config/runtime-config.js";
 import type { DataHubCatalog } from "./datahub/catalog.js";
-import { DataHubMcpCatalog } from "./datahub/mcp/datahub-mcp-catalog.js";
-import { connectDataHubMcp } from "./datahub/mcp/mcp-client.js";
+import { createDataHubCatalog } from "./datahub/create-catalog.js";
 import { parseChangeIntent } from "./domain/change-intent.js";
 import type { RunStatus } from "./domain/run-result.js";
 import { AppError, type AppErrorCode } from "./errors/app-error.js";
@@ -171,14 +170,6 @@ function writeAppError(
   return exitCodes[error.code];
 }
 
-async function defaultCreateCatalog(
-  config: RuntimeConfig,
-  signal: AbortSignal,
-): Promise<DataHubCatalog> {
-  const client = await connectDataHubMcp(config, signal);
-  return new DataHubMcpCatalog(client, [config.datahubGmsToken]);
-}
-
 async function waitForSettlementWithin(work: Promise<unknown>, timeoutMs: number): Promise<void> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const bounded = new Promise<void>((resolve) => {
@@ -201,7 +192,7 @@ const defaultDependencies: CliDependencies = {
   stderr: process.stderr,
   signal: process,
   shutdownTimeoutMs: 5_000,
-  createCatalog: defaultCreateCatalog,
+  createCatalog: createDataHubCatalog,
   runImpactAnalysis,
 };
 

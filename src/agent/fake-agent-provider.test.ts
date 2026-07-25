@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { makeChangeContext } from "../../tests/helpers/factories.js";
 import type { PackageFinding } from "../migrations/validate-sql.js";
 import type { ChangeContext } from "../workflow/change-context.js";
+import { MigrationPackageDraftSchema } from "../workflow/migration-draft.js";
 import { FakeAgentProvider, createGoldenDraft } from "./fake-agent-provider.js";
 import type { AnalyzeRenameResult } from "./provider.js";
 
@@ -255,7 +256,12 @@ describe("FakeAgentProvider", () => {
   it.each(["tableLineage", "columnLineage"] as const)(
     "uses a staged advisory package when %s evidence is incomplete",
     (dimension) => {
-      const draft = createGoldenDraft(withIncompleteEvidence(makeChangeContext(), dimension));
+      const draft = createGoldenDraft(
+        withIncompleteEvidence(
+          makeChangeContext({ datasetName: "ORDER_ENTRY_DB.ANALYTICS.ORDER_DETAILS" }),
+          dimension,
+        ),
+      );
 
       expect(draft).toMatchObject({
         strategy: "STAGED_COMPATIBILITY",
@@ -267,7 +273,9 @@ describe("FakeAgentProvider", () => {
   );
 
   it("permits executable-with-review only for complete evidence and proceed-with-review", () => {
-    const draft = createGoldenDraft(makeChangeContext({ score: 10 }));
+    const draft = createGoldenDraft(
+      makeChangeContext({ datasetName: "ORDER_ENTRY_DB.ANALYTICS.ORDER_DETAILS", score: 10 }),
+    );
 
     expect(draft).toMatchObject({
       strategy: "STAGED_COMPATIBILITY",
@@ -277,7 +285,9 @@ describe("FakeAgentProvider", () => {
   });
 
   it("keeps complete critical evidence advisory", () => {
-    const draft = createGoldenDraft(makeChangeContext());
+    const draft = createGoldenDraft(
+      makeChangeContext({ datasetName: "ORDER_ENTRY_DB.ANALYTICS.ORDER_DETAILS" }),
+    );
 
     expect(draft).toMatchObject({
       strategy: "STAGED_COMPATIBILITY",
@@ -285,5 +295,21 @@ describe("FakeAgentProvider", () => {
       rationale: "CRITICAL_DOWNSTREAM_IMPACT",
     });
     expect(draft.warnings).toContain("DIRECT_RENAME_BLOCKED");
+  });
+
+  it("uses a non-executable template when the physical Snowflake object name is unconfirmed", () => {
+    const context = makeChangeContext();
+    const draft = createGoldenDraft(context);
+
+    expect(draft).toMatchObject({
+      strategy: "NON_EXECUTABLE_TEMPLATE",
+      executionClassification: "NON_EXECUTABLE_TEMPLATE",
+      rationale: "PLATFORM_OR_OBJECT_NAME_UNCONFIRMED",
+      stages: ["PREPARE"],
+      rollback: "MANUAL_ROLLBACK_REQUIRED",
+      warnings: ["PHYSICAL_OBJECT_NAME_UNCONFIRMED", "HUMAN_APPROVAL_REQUIRED"],
+    });
+    expect(draft.evidenceIds).toEqual(context.evidence.map(({ id }) => id));
+    expect(MigrationPackageDraftSchema.parse(draft)).toEqual(draft);
   });
 });

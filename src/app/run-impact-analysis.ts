@@ -64,9 +64,8 @@ interface BuildImpactReportDraftInput {
 
 type AnalysisOutcome =
   | {
-      readonly kind: "readyToPublish";
+      readonly kind: "ready";
       readonly report: ImpactReportDraft;
-      readonly markdown: string;
     }
   | {
       readonly kind: "failed";
@@ -224,7 +223,9 @@ function buildImpactReportDraft(input: BuildImpactReportDraftInput): ImpactRepor
   };
 }
 
-export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Promise<AnalysisRun> {
+export async function analyzeImpact(
+  deps: RunImpactAnalysisDependencies,
+): Promise<ImpactReportDraft> {
   let outcome: AnalysisOutcome;
 
   try {
@@ -311,12 +312,9 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
       assessment,
     });
     throwIfCancelled(deps.signal);
-    const markdown = renderImpactReport(report, deps.secrets);
-    throwIfCancelled(deps.signal);
     outcome = {
-      kind: "readyToPublish",
+      kind: "ready",
       report,
-      markdown,
     };
   } catch (error) {
     outcome = {
@@ -328,7 +326,7 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
   try {
     await deps.catalog.close();
   } catch (closeError) {
-    if (outcome.kind === "readyToPublish") throw closeError;
+    if (outcome.kind === "ready") throw closeError;
 
     const failure: SuppressedFailure = {
       code: "MCP_UNAVAILABLE",
@@ -340,23 +338,30 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
   if (outcome.kind === "failed") throw outcome.error;
 
   throwIfCancelled(deps.signal);
+  return outcome.report;
+}
+
+export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Promise<AnalysisRun> {
+  const report = await analyzeImpact(deps);
+  const markdown = renderImpactReport(report, deps.secrets);
+  throwIfCancelled(deps.signal);
 
   let artifactFilename: "impact-report.md";
   try {
     artifactFilename = await writeRunArtifact({
       runsRoot: deps.runsRoot,
-      runId: outcome.report.runId,
+      runId: report.runId,
       filename: "impact-report.md",
-      content: outcome.markdown,
-      status: outcome.report.status,
+      content: markdown,
+      status: report.status,
       signal: deps.signal,
     });
   } catch (error) {
     if (error instanceof AppError && error.code === "ARTIFACT_WRITE_FAILED") {
-      throw new ImpactReportPersistenceError(outcome.report);
+      throw new ImpactReportPersistenceError(report);
     }
     throw error;
   }
 
-  return { ...outcome.report, artifactFilename };
+  return { ...report, artifactFilename };
 }
