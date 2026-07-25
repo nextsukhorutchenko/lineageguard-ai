@@ -7716,7 +7716,7 @@ const DIAGNOSTIC_TAIL_BYTES = 16_384;
 3. resolve `next/dist/bin/next` from the installed lockfile-pinned package using
    `createRequire(import.meta.url).resolve`;
 4. spawn `process.execPath` with
-   `["<resolved-next-cli>", "dev", "--hostname", HOST, "--port", String(PORT)]`,
+   `["<resolved-next-cli>", "dev", "--webpack", "--hostname", HOST, "--port", String(PORT)]`,
    `shell: false`, `windowsHide: true`, ignored stdin, and piped stdout/stderr;
 5. pass the inherited environment plus only
    `LINEAGEGUARD_DEMO_MODE: "REPLAY"` and `LINEAGEGUARD_RUNS_DIR: runsRoot`;

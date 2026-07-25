@@ -61,7 +61,9 @@ Startup:
 2. Create an absolute runs root with `mkdtemp` directly beneath the operating-system temporary
    directory using the `lineageguard-playwright-runs-` prefix.
 3. Resolve the installed, lockfile-pinned Next.js CLI from the current package and spawn it through
-   `process.execPath` with `shell: false`.
+   `process.execPath` with `shell: false` and the explicit `--webpack` flag. This preserves the
+   repository toolchain's established `.js`-to-TypeScript extension alias behavior and prevents
+   the direct CLI invocation from silently selecting incompatible Turbopack defaults.
 4. Pass only the inherited non-secret environment plus:
    `LINEAGEGUARD_DEMO_MODE=REPLAY` and the owned `LINEAGEGUARD_RUNS_DIR`.
 5. Drain stdout and stderr while retaining only a bounded diagnostic tail.
