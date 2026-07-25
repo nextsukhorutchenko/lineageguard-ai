@@ -13,6 +13,7 @@
     "build:web": "next build --webpack",
     "demo": "tsx src/cli.ts --request \"Rename column customer_id to customer_key in dataset snowflake:b2fd91.order_entry_db.analytics.order_details\"",
     "dev": "next dev --webpack",
+    "example:agent": "tsx scripts/generate-agent-example.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",

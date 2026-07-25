@@ -200,3 +200,96 @@ if ($leaks) { $leaks; throw "The active DataHub token appears in tracked files."
 - Lineage analysis is bounded to two downstream hops and depends on the metadata DataHub returns.
 - The deterministic score is an explainable heuristic, not a substitute for owner review or runtime testing.
 - This slice contains no LLM, mutation tool, SQL generation, UI, or GitHub automation.
+
+## Browser Demo — Fixture Replay
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm exec playwright install chromium
+$runsRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "LineageGuard\replay-runs"
+New-Item -ItemType Directory -Path $runsRoot -Force | Out-Null
+$env:LINEAGEGUARD_RUNS_DIR = (Resolve-Path -LiteralPath $runsRoot).Path
+$env:LINEAGEGUARD_DEMO_MODE = "REPLAY"
+pnpm dev
+```
+
+Open <http://localhost:3000>. The operator-created runs root is absolute, pre-created, owned by the
+application account, and retained across restarts; application runtime code never creates or
+removes it. Replay is deterministic, offline, and explicitly labeled; it does not call DataHub or
+OpenAI.
+
+## Browser Demo — Live DataHub + OpenAI
+
+Start the pinned DataHub stack and load the documented showcase datapack first.
+
+### Live Operator Preflight
+
+1. Verify Python `3.11.x`, `acryl-datahub==1.6.0.15`, the pinned DataHub Core `v1.6.0` services, MCP Server `0.6.0`, and the tested Docker baseline of 2 CPU / 8 GB RAM / 2 GB swap / 13 GB disk.
+2. Check ports `3306`, `8080`, `8081`, `9002`, `9092`, `9200`, and `2181`; each must be available before startup or owned by the expected pinned DataHub service.
+3. Run `.\.venv\Scripts\datahub.exe docker check` and require success.
+4. Run `Invoke-RestMethod http://localhost:8080/health` and require a healthy GMS response.
+5. Open <http://localhost:9002>, use `datahub/datahub` only on an isolated localhost Quickstart, and verify `b2fd91.order_entry_db.analytics.order_details`, `customer_id`, lineage, ownership, the intended account, and available search-visibility scope. Never expose the default credentials or ports publicly.
+6. Resolve and prewarm the pinned MCP executable before requesting a PAT. Then configure shell-local `DATAHUB_GMS_URL` and `DATAHUB_GMS_TOKEN` without printing or persisting the PAT and run the four-operation integration contract. Every path after token entry must remove the token:
+
+   ```powershell
+   $uvxPath = (Get-Command uvx -ErrorAction Stop).Source
+   if (-not [System.IO.Path]::IsPathFullyQualified($uvxPath)) {
+     throw "uvx did not resolve to an absolute path."
+   }
+   $env:DATAHUB_MCP_UVX_PATH = $uvxPath
+   & $uvxPath mcp-server-datahub@0.6.0 --version
+   if ($LASTEXITCODE -ne 0) { throw "Pinned MCP prewarm failed." }
+
+   $env:DATAHUB_GMS_URL = "http://localhost:8080"
+   $secureDataHubToken = Read-Host "DataHub PAT (input hidden)" -AsSecureString
+   try {
+     $env:DATAHUB_GMS_TOKEN = & {
+       param([Security.SecureString]$secureToken)
+       [Net.NetworkCredential]::new("", $secureToken).Password
+     } $secureDataHubToken
+     Remove-Variable secureDataHubToken
+     pnpm test:integration
+     if ($LASTEXITCODE -ne 0) { throw "Pinned MCP integration contract failed." }
+   } finally {
+     Remove-Variable secureDataHubToken -ErrorAction SilentlyContinue
+     Remove-Item Env:DATAHUB_GMS_TOKEN -ErrorAction SilentlyContinue
+   }
+   ```
+
+7. Only after Steps 1–6 pass, configure OpenAI and start the live browser workflow with a fresh hidden PAT. Keep the long-running process inside the same cleanup boundary:
+
+   ```powershell
+   if (-not $env:OPENAI_API_KEY) { throw "OPENAI_API_KEY is not configured in this shell." }
+   $runsRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "LineageGuard\live-runs"
+   New-Item -ItemType Directory -Path $runsRoot -Force | Out-Null
+   $env:LINEAGEGUARD_RUNS_DIR = (Resolve-Path -LiteralPath $runsRoot).Path
+   $env:OPENAI_MODEL = "gpt-5.6-sol"
+   $env:OPENAI_AGENTS_DISABLE_TRACING = "1"
+   $env:LINEAGEGUARD_DEMO_MODE = "LIVE"
+
+   $secureDataHubToken = Read-Host "DataHub PAT for live demo (input hidden)" -AsSecureString
+   try {
+     $env:DATAHUB_GMS_TOKEN = & {
+       param([Security.SecureString]$secureToken)
+       [Net.NetworkCredential]::new("", $secureToken).Password
+     } $secureDataHubToken
+     Remove-Variable secureDataHubToken
+     pnpm dev
+     if ($LASTEXITCODE -ne 0) { throw "Live browser workflow failed." }
+   } finally {
+     Remove-Variable secureDataHubToken -ErrorAction SilentlyContinue
+     Remove-Item Env:DATAHUB_GMS_TOKEN -ErrorAction SilentlyContinue
+     Remove-Item Env:LINEAGEGUARD_RUNS_DIR -ErrorAction SilentlyContinue
+   }
+   ```
+
+   The operator-owned live runs root remains in place after the shell variable is cleared. Do not
+   recursively remove it as part of application shutdown.
+
+The UI endpoint is `http://localhost:9002`; the MCP subprocess connects to the GMS endpoint at `http://localhost:8080`. If personal-access-token controls are unavailable, verify that Metadata Authentication is enabled and that the local user has `Generate Personal Access Tokens` or `Manage All Access Tokens`; do not enable mutations as a workaround.
+
+`Get-Command uvx` is LineageGuard's Windows adaptation of the official guide's absolute-path remedy for `spawn uvx ENOENT`; `DATAHUB_MCP_UVX_PATH` is LineageGuard configuration, not an upstream MCP contract. Never use `@latest`, put a PAT in a URL, or persist either token. Set `OPENAI_API_KEY`, `OPENAI_MODEL=gpt-5.6-sol`, `OPENAI_AGENTS_DISABLE_TRACING=1`, `LINEAGEGUARD_DEMO_MODE=LIVE`, and `LINEAGEGUARD_RUNS_DIR` pointing to an absolute, pre-created, application-account-owned directory in the same shell before running `pnpm dev`.
+
+The application reads DataHub through the official read-only MCP server. It does not execute SQL, mutate DataHub, or perform GitHub operations.
+
+Expected: every check passes against the pinned local profile; `DATAHUB_MCP_UVX_PATH` is absolute; no token is printed or persisted; the four-operation integration contract passes before OpenAI is called. Any failure stops live mode and preserves replay.

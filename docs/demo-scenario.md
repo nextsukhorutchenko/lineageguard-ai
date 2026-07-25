@@ -111,3 +111,15 @@ These counts and mappings are verified fixture facts for the pinned datapack ver
 The certified golden replay has complete search, schema, table-lineage, and column-lineage collections for the stated 24/11 facts. If any required collection is incomplete, LineageGuard uses `INCOMPLETE_EVIDENCE`: collected counts are lower bounds, incomplete search/schema cannot prove absence, and incomplete lineage cannot justify direct-rename guidance. Entity-context gaps are reported separately as Context Coverage and do not alone select that status.
 
 Official datapack index: <https://github.com/datahub-project/static-assets/blob/main/datapacks/showcase-ecommerce/index.json>
+
+## Three-Minute Video Script
+
+1. 0:00–0:20 — Frame the Metadata-Aware Code Generation & Development problem and trigger.
+2. 0:20–0:35 — Show the LIVE/REPLAY badge and state which evidence source is active.
+3. 0:35–1:05 — Verify the DataHub dataset, schema, table lineage, column lineage, and ownership.
+4. 1:05–1:30 — Show Evidence Completeness, Context Coverage, and Runtime Proof as separate panels.
+5. 1:30–1:50 — Show 24 downstream, 11 column-confirmed, risk score 90, and BLOCK_DIRECT_RENAME.
+6. 1:50–2:35 — Run analyze_rename_change and generate_migration_package; inspect four artifacts and the non-executable physical-name gate.
+7. 2:35–2:55 — Close on mutations disabled, read-only/no-SQL behavior, human approval, and practical team value.
+
+If DataHub or OpenAI is unavailable, restart in `REPLAY` mode. Replay is recorded fixture execution.
