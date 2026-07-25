@@ -4614,6 +4614,8 @@ git commit -m "feat: add the bounded OpenAI migration agent"
 - Create: `src/app/run-agent-workflow.test.ts`
 - Create: `src/app/regenerate-package.ts`
 - Create: `src/app/regenerate-package.test.ts`
+- Modify: `src/agent/fake-agent-provider.ts`
+- Modify: `src/agent/fake-agent-provider.test.ts`
 - Create: `tests/helpers/workflow-dependencies.ts`
 - Create: `tests/fixture-agent-workflow.test.ts`
 
@@ -4625,6 +4627,8 @@ git commit -m "feat: add the bounded OpenAI migration agent"
 - [ ] **Step 1: Write failing application tests for the complete lifecycle**
 
 Create `tests/helpers/workflow-dependencies.ts` with an async `makeWorkflowDependencies(overrides = {})` factory. It must create a unique temporary `runsRoot`, use the fixed golden request, `REPLAY`, `FakeAgentProvider`, `FixtureCatalog`, `runId: "run-test"`, `clock: () => new Date("2026-07-22T12:00:00.000Z")`, an un-aborted signal, no secrets, and accept typed `Partial<RunAgentWorkflowDependencies>` overrides. Export `cleanupWorkflowRoots()` and call it from `afterEach`; this removes only roots returned by `mkdtemp(join(tmpdir(), "lineageguard-workflow-test-"))`.
+
+Before treating the golden replay as a workflow regression, add a focused failing test in `src/agent/fake-agent-provider.test.ts` for a context whose physical Snowflake object identity cannot be confirmed or rendered, including the golden four-part DataHub name. `createGoldenDraft` must emit the existing Task 5-compatible template draft with `strategy` and `executionClassification` both `NON_EXECUTABLE_TEMPLATE`, rationale `PLATFORM_OR_OBJECT_NAME_UNCONFIRMED`, stages exactly `["PREPARE"]`, rollback `MANUAL_ROLLBACK_REQUIRED`, and warnings exactly `["PHYSICAL_OBJECT_NAME_UNCONFIRMED", "HUMAN_APPROVAL_REQUIRED"]`. It must retain applicable `evidenceIds` and schema-valid validation checks without inventing executable SQL. Capture the RED result before changing `src/agent/fake-agent-provider.ts`.
 
 Create `src/app/run-agent-workflow.test.ts` with this complete setup, then use these exact assertions:
 
@@ -5464,17 +5468,17 @@ Extend `src/app/regenerate-package.test.ts` with an ineligible failure status, e
 Run:
 
 ```powershell
-pnpm vitest run src/app/run-impact-analysis.test.ts src/app/run-agent-workflow.test.ts src/app/regenerate-package.test.ts tests/fixture-agent-workflow.test.ts src/cli.test.ts
+pnpm vitest run src/agent/fake-agent-provider.test.ts src/app/run-impact-analysis.test.ts src/app/run-agent-workflow.test.ts src/app/regenerate-package.test.ts tests/fixture-agent-workflow.test.ts src/cli.test.ts
 pnpm test
 pnpm typecheck
 ```
 
-Expected: lifecycle, clarification, 24/11/90 replay, validation failure, generation failure preservation, cancellation, cached regeneration, and existing CLI behavior pass.
+Expected: the focused replay-draft regression, lifecycle, clarification, 24/11/90 replay, validation failure, generation failure preservation, cancellation, cached regeneration, and existing CLI behavior pass.
 
 - [ ] **Step 7: Commit the complete application workflow**
 
 ```powershell
-git add src/datahub/create-catalog.ts src/cli.ts src/app/run-impact-analysis.ts src/app/run-impact-analysis.test.ts src/app/run-agent-workflow.ts src/app/run-agent-workflow.test.ts src/app/regenerate-package.ts src/app/regenerate-package.test.ts tests/helpers/workflow-dependencies.ts tests/fixture-agent-workflow.test.ts
+git add src/datahub/create-catalog.ts src/cli.ts src/app/run-impact-analysis.ts src/app/run-impact-analysis.test.ts src/app/run-agent-workflow.ts src/app/run-agent-workflow.test.ts src/app/regenerate-package.ts src/app/regenerate-package.test.ts src/agent/fake-agent-provider.ts src/agent/fake-agent-provider.test.ts tests/helpers/workflow-dependencies.ts tests/fixture-agent-workflow.test.ts
 git commit -m "feat: orchestrate grounded agent migration runs"
 ```
 
