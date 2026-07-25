@@ -55,6 +55,25 @@ describe.sequential("Playwright server lifecycle", () => {
     expect(created).toBe(false);
   });
 
+  it("replaces a runs-root creation failure with the fixed startup error", async () => {
+    const nativePath = "D:\\private\\lineageguard-playwright-runs-secret";
+    let caught: unknown;
+    try {
+      await __testOnly.startE2eServer({
+        probe: async () => undefined,
+        createRunsRoot: async () => {
+          throw Object.assign(new Error(`EACCES: mkdir '${nativePath}'`), { code: "EACCES" });
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe("The Playwright test server failed to start.");
+    expect((caught as Error).message).not.toContain(nativePath);
+  });
+
   it("removes the owned root when Next CLI resolution fails", async () => {
     let root = "";
     await expect(

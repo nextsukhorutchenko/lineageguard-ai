@@ -161,7 +161,12 @@ async function startWithDependencies(
     throw new Error("The Playwright test endpoint is already in use.");
   }
 
-  const runsRoot = await dependencies.createRunsRoot();
+  let runsRoot: string;
+  try {
+    runsRoot = await dependencies.createRunsRoot();
+  } catch {
+    throw new Error("The Playwright test server failed to start.");
+  }
   let observed: ObservedChild | undefined;
   let stop: (() => Promise<void>) | undefined;
   try {

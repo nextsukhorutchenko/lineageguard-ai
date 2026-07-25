@@ -96,14 +96,18 @@ export function ArtifactWorkspace(props: {
           Download
         </a>
       </div>
-      <pre
-        role="tabpanel"
-        id={`${id}-${names.indexOf(selected)}-panel`}
-        aria-labelledby={`${id}-${names.indexOf(selected)}-tab`}
-        tabIndex={0}
-      >
-        <code>{props.content[selected] ?? "Loading artifact…"}</code>
-      </pre>
+      {names.map((name, index) => (
+        <pre
+          key={name}
+          role="tabpanel"
+          id={`${id}-${index}-panel`}
+          aria-labelledby={`${id}-${index}-tab`}
+          hidden={name !== selected}
+          tabIndex={name === selected ? 0 : -1}
+        >
+          <code>{props.content[name] ?? "Loading artifact…"}</code>
+        </pre>
+      ))}
     </section>
   );
 }
