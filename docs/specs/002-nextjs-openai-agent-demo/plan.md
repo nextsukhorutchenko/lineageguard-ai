@@ -5509,6 +5509,7 @@ git commit -m "feat: orchestrate grounded agent migration runs"
 - Modify: `src/errors/app-error.ts`
 - Modify: `src/cli.ts`
 - Modify: `src/cli.test.ts`
+- Modify: `scripts/capture-datahub-fixtures.ts`
 - Modify: `tests/helpers/workflow-dependencies.ts`
 - Modify: `tests/fixture-agent-workflow.test.ts`
 - Modify: `tests/integration/datahub-mcp.integration.test.ts`
@@ -5597,7 +5598,7 @@ Add a connection test whose fake SDK client never completes `connect`; abort the
 Run:
 
 ```powershell
-pnpm vitest run src/runtime/deadlines.test.ts src/runtime/deadline-events.test.ts src/app/run-agent-workflow.test.ts src/agent/openai-agent-provider.test.ts src/agent/fake-agent-provider.test.ts src/datahub/mcp/datahub-mcp-catalog.test.ts src/workflow/state-machine.test.ts src/cli.test.ts
+pnpm vitest run src/runtime/deadlines.test.ts src/runtime/deadline-events.test.ts src/app/run-agent-workflow.test.ts src/agent/openai-agent-provider.test.ts src/agent/fake-agent-provider.test.ts src/datahub/mcp/datahub-mcp-catalog.test.ts src/workflow/state-machine.test.ts src/cli.test.ts scripts/capture-datahub-fixtures.test.ts
 ```
 
 Expected: FAIL because deadline classification and the application-owned analysis signal do not exist.
@@ -5741,6 +5742,15 @@ path as production. `pnpm typecheck` is the mandatory offline proof that these e
 callers stay type-complete. Run `pnpm test:integration` only as an explicit credentialed live check
 and report it separately; it is not part of the deterministic offline gate.
 
+Update the sole fixture-capture caller in `scripts/capture-datahub-fixtures.ts` to construct and
+dispose a classified request scope around `connectDataHubMcp` and pass a narrow
+`RecordDeadlineEvent` callback that does not fabricate persisted events. Preserve fixture-capture
+behavior and the adapter's existing per-call and close bounds. A repository-wide caller search
+found no other unclassified `connectDataHubMcp` or `createDataHubCatalog` callers. Do not add a
+raw-signal compatibility overload. Include `scripts/capture-datahub-fixtures.test.ts` in focused
+coverage and keep `pnpm typecheck` as the offline proof that the script uses the production
+classified-only path.
+
 Extend the internal `AgentProvider.run` input in `src/agent/provider.ts` with `abortScope: ClassifiedAbortScope` and `recordDeadlineEvent: RecordDeadlineEvent` while retaining `signal: abortScope.signal` for SDK and fake-provider compatibility. Update `FakeAgentProvider` and provider tests mechanically. `runAgentWorkflow` creates the request, workflow, and agent scopes; the OpenAI provider creates each generation-attempt child scope. This gives MCP and OpenAI code a typed parent classification instead of reconstructing provenance from a raw signal.
 
 Task 9A must remove Task 8's internal `AbortSignal.timeout(90_000)` and `AbortSignal.any(...)` entirely. Pass only `input.abortScope.signal` to `Runner.run`; there is exactly one 90-second agent owner and it is workflow-created and classified. In `createTools`, create one 30-second classified child for each generation attempt, pass only that child signal to `tools.generateMigrationPackage`, record its terminal event, dispose it in `finally`, and suppress any result that resolves after its signal aborts.
@@ -5841,7 +5851,7 @@ the route handler.
 Run:
 
 ```powershell
-pnpm vitest run src/runtime/deadlines.test.ts src/runtime/deadline-events.test.ts src/app/run-agent-workflow.test.ts src/agent/openai-agent-provider.test.ts src/agent/fake-agent-provider.test.ts src/datahub/mcp/datahub-mcp-catalog.test.ts src/workflow/state-machine.test.ts src/cli.test.ts
+pnpm vitest run src/runtime/deadlines.test.ts src/runtime/deadline-events.test.ts src/app/run-agent-workflow.test.ts src/agent/openai-agent-provider.test.ts src/agent/fake-agent-provider.test.ts src/datahub/mcp/datahub-mcp-catalog.test.ts src/workflow/state-machine.test.ts src/cli.test.ts scripts/capture-datahub-fixtures.test.ts
 pnpm typecheck
 pnpm test
 ```
@@ -5858,7 +5868,7 @@ available.
 - [ ] **Step 6: Commit the deadline and cleanup boundary**
 
 ```powershell
-git add src/runtime/deadlines.ts src/runtime/deadlines.test.ts src/runtime/deadline-events.ts src/runtime/deadline-events.test.ts src/app/run-agent-workflow.ts src/app/run-agent-workflow.test.ts src/app/regenerate-package.ts src/app/regenerate-package.test.ts src/datahub/create-catalog.ts src/datahub/mcp/mcp-client.ts src/datahub/mcp/datahub-mcp-catalog.test.ts src/agent/provider.ts src/agent/fake-agent-provider.ts src/agent/fake-agent-provider.test.ts src/agent/openai-agent-provider.ts src/agent/openai-agent-provider.test.ts src/workflow/state-machine.ts src/workflow/state-machine.test.ts src/errors/app-error.ts src/cli.ts src/cli.test.ts tests/helpers/workflow-dependencies.ts tests/fixture-agent-workflow.test.ts tests/integration/datahub-mcp.integration.test.ts
+git add src/runtime/deadlines.ts src/runtime/deadlines.test.ts src/runtime/deadline-events.ts src/runtime/deadline-events.test.ts src/app/run-agent-workflow.ts src/app/run-agent-workflow.test.ts src/app/regenerate-package.ts src/app/regenerate-package.test.ts src/datahub/create-catalog.ts src/datahub/mcp/mcp-client.ts src/datahub/mcp/datahub-mcp-catalog.test.ts src/agent/provider.ts src/agent/fake-agent-provider.ts src/agent/fake-agent-provider.test.ts src/agent/openai-agent-provider.ts src/agent/openai-agent-provider.test.ts src/workflow/state-machine.ts src/workflow/state-machine.test.ts src/errors/app-error.ts src/cli.ts src/cli.test.ts scripts/capture-datahub-fixtures.ts tests/helpers/workflow-dependencies.ts tests/fixture-agent-workflow.test.ts tests/integration/datahub-mcp.integration.test.ts
 git commit -m "feat: enforce agent workflow deadlines"
 ```
 
