@@ -39,6 +39,16 @@ test("completes the golden grounded replay flow", async ({ page }) => {
   await expect(page.getByText("24 downstream", { exact: true })).toBeVisible();
   await expect(page.getByText("11 column-confirmed", { exact: true })).toBeVisible();
   await expect(page.getByText("BLOCK DIRECT RENAME", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Evidence completeness" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Context coverage" })).toBeVisible();
+  await expect(page.getByText("Evidence complete", { exact: true })).toBeVisible();
+  await expect(page.getByText(/assets inspected/u)).toBeVisible();
+  await expect(page.getByText(/Quality indicators:/u)).toBeVisible();
+  await expect(
+    page.getByText("Usage indicators not collected in the four-tool read-only slice."),
+  ).toBeVisible();
+  await expect(page.getByText("Evidence ID: datahub:source-column:customer_id")).toBeVisible();
+  await expect(page.getByText("Field: customer_id")).toBeVisible();
   await expect(page.getByRole("tab", { name: "migration-up.sql" })).toBeVisible();
   await expect(page.getByRole("tabpanel")).toContainText("NON-EXECUTABLE TEMPLATE");
 });

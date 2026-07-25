@@ -12,7 +12,7 @@ export function EvidencePanel({ snapshot }: { readonly snapshot: WorkflowSnapsho
           <li key={item.id}>
             <span className={`evidence-level ${item.level}`}>{item.level}</span>
             <span>
-              <code>{item.urn}</code>
+              <code className="urn">{item.urn}</code>
               <small>Evidence ID: {item.id}</small>
               {item.fieldPath === undefined ? null : <small>Field: {item.fieldPath}</small>}
             </span>

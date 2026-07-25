@@ -7,6 +7,7 @@ import { readNdjson } from "./read-ndjson.js";
 import { ActivityTimeline } from "./activity-timeline.js";
 import { ArtifactWorkspace, type ArtifactContent } from "./artifact-workspace.js";
 import { ChangeRequestForm, type ChangeFormValue } from "./change-request-form.js";
+import { ContextCoveragePanel } from "./context-coverage-panel.js";
 import { EvidencePanel } from "./evidence-panel.js";
 import { ImpactPanel } from "./impact-panel.js";
 import { createRequestOwner } from "./request-owner.js";
@@ -192,6 +193,7 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
       <p aria-live="polite" role="status" className="operation-status">
         {operationStatus}
       </p>
+      <ContextCoveragePanel snapshot={snapshot} />
       <EvidencePanel snapshot={snapshot} />
       <footer>Read-only DataHub · No SQL execution · Human approval required</footer>
     </main>

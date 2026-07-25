@@ -283,7 +283,8 @@ input {
 }
 
 .artifact-panel,
-.evidence-panel {
+.evidence-panel,
+.context-panel {
   margin-top: 16px;
 }
 
@@ -329,10 +330,60 @@ pre {
   border-bottom: 1px solid var(--line);
 }
 
-.evidence-list code {
-  overflow: hidden;
+.evidence-list .urn {
   color: var(--muted);
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
+}
+
+.coverage-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+}
+
+.coverage-list,
+.coverage-counts,
+.urn-list {
+  padding-left: 20px;
+}
+
+.coverage-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.coverage-list small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+}
+
+.coverage-score {
+  display: inline-block;
+  margin-top: 14px;
+  color: var(--mint);
+  font-size: 2rem;
+}
+
+.coverage-counts,
+.urn-list {
+  color: var(--muted);
+}
+
+.retrieval-state,
+.indicator-summary,
+.context-panel details {
+  margin-top: 14px;
+}
+
+.urn-list code {
+  overflow-wrap: anywhere;
+}
+
+.complete {
+  color: var(--mint);
 }
 
 .evidence-level {
@@ -370,7 +421,8 @@ footer {
   }
 
   .dashboard-grid,
-  .field-grid {
+  .field-grid,
+  .coverage-grid {
     grid-template-columns: 1fr;
   }
 
