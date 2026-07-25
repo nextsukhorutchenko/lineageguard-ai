@@ -10,7 +10,12 @@ export function ArtifactWorkspace(props: {
   readonly busy?: boolean;
   readonly onStatus?: (message: string) => void;
 }) {
-  const names = props.snapshot?.artifacts.map(({ filename }) => filename) ?? [];
+  const names =
+    props.snapshot?.status === "COMPLETED"
+      ? props.snapshot.artifacts
+          .filter(({ validated }) => validated)
+          .map(({ filename }) => filename)
+      : [];
   const [active, setActive] = useState<string>("migration-up.sql");
   const id = useId();
   if (names.length === 0) {
@@ -36,7 +41,11 @@ export function ArtifactWorkspace(props: {
           className="quiet-button"
           type="button"
           onClick={props.onRegenerate}
-          disabled={props.busy}
+          disabled={
+            props.busy ||
+            props.snapshot?.status !== "COMPLETED" ||
+            props.snapshot.parentRunId !== undefined
+          }
         >
           Regenerate
         </button>

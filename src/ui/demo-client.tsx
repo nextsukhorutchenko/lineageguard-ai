@@ -81,10 +81,12 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
     void (async () => {
       try {
         const pairs = await Promise.all(
-          snapshot.artifacts.map(async ({ filename }) => {
-            const response = await fetch(`/api/runs/${snapshot.runId}/artifacts/${filename}`);
-            return [filename, await readArtifact(response, filename)] as const;
-          }),
+          snapshot.artifacts
+            .filter(({ validated }) => validated)
+            .map(async ({ filename }) => {
+              const response = await fetch(`/api/runs/${snapshot.runId}/artifacts/${filename}`);
+              return [filename, await readArtifact(response, filename)] as const;
+            }),
         );
         if (active) setContent(Object.fromEntries(pairs));
       } catch {
@@ -121,9 +123,27 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
           setActivity(event.snapshot.activity);
         }
       });
-    } catch {
-      if (requestOwner.current.isCurrent(lease) && !lease.controller.signal.aborted) {
-        setOperationStatus("The workflow request could not be completed.");
+    } catch (error) {
+      if (
+        requestOwner.current.isCurrent(lease) &&
+        !(error instanceof DOMException && error.name === "AbortError")
+      ) {
+        setSnapshot({
+          runId: "client-failure",
+          mode: initialMode,
+          status: "GENERATION_FAILED",
+          activity: [],
+          artifacts: [],
+          evidence: [],
+          facts: [],
+          assumptions: [],
+          unknowns: [],
+          validation: { outcome: "NOT_RUN", findingCount: 0, findingCodes: [] },
+          failure: {
+            code: "GENERATION_FAILED",
+            message: "The workflow stream ended unexpectedly.",
+          },
+        });
       }
     } finally {
       if (requestOwner.current.finish(lease)) {
@@ -177,6 +197,7 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
           validation={snapshot?.validation}
           onSelectCandidate={(dataset) => setValue({ ...value, dataset })}
           onRetryGeneration={regenerate}
+          isChildRun={snapshot?.parentRunId !== undefined}
           canRetryGeneration={
             snapshot?.parentRunId === undefined &&
             snapshot?.contextHash !== undefined &&
