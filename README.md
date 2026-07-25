@@ -199,7 +199,8 @@ if ($leaks) { $leaks; throw "The active DataHub token appears in tracked files."
 - Only the constrained `rename_column` request grammar is supported.
 - Lineage analysis is bounded to two downstream hops and depends on the metadata DataHub returns.
 - The deterministic score is an explainable heuristic, not a substitute for owner review or runtime testing.
-- This slice contains no LLM, mutation tool, SQL generation, UI, or GitHub automation.
+- The browser and optional live OpenAI flows generate virtual SQL and Markdown artifacts only;
+  they do not execute SQL, mutate DataHub, perform GitHub operations, or bypass human approval.
 
 ## Browser Demo — Fixture Replay
 

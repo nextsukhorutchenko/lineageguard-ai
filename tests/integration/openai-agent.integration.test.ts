@@ -7,8 +7,10 @@ import { runAgentWorkflow } from "../../src/app/run-agent-workflow.js";
 import { loadRuntimeConfig } from "../../src/config/runtime-config.js";
 import { createDataHubCatalog } from "../../src/datahub/create-catalog.js";
 import { loadRunSnapshot } from "../../src/runs/run-store.js";
+import { readPersistedRunEnvelopeBytes } from "../helpers/read-persisted-run-envelope.js";
 
 const enabled = process.env.RUN_LIVE_OPENAI_TEST === "1";
+const liveRunId = "live-openai-smoke";
 const roots: string[] = [];
 
 afterAll(async () => {
@@ -38,7 +40,7 @@ afterAll(async () => {
       createCatalog: (scope, recordDeadlineEvent) =>
         createDataHubCatalog(config, scope, recordDeadlineEvent),
       runsRoot,
-      runId: "live-openai-smoke",
+      runId: liveRunId,
       clock: () => new Date(),
       signal: new AbortController().signal,
       secrets: [apiKey, config.datahubGmsToken],
@@ -46,6 +48,7 @@ afterAll(async () => {
     expect(result).toMatchObject({
       mode: "LIVE",
       status: "COMPLETED",
+      runId: liveRunId,
       impact: { score: 90, downstreamAssets: 24, columnAffectedAssets: 11 },
     });
     expect(result.artifacts).toHaveLength(4);
@@ -53,8 +56,18 @@ afterAll(async () => {
       runsRoot,
       runId: result.runId,
     });
-    expect(JSON.stringify(snapshot)).not.toContain(apiKey);
-    expect(JSON.stringify(snapshot)).not.toContain(config.datahubGmsToken);
+    const serializedPublicSnapshot = JSON.stringify(snapshot);
+    expect(serializedPublicSnapshot.includes(apiKey)).toBe(false);
+    expect(serializedPublicSnapshot.includes(config.datahubGmsToken)).toBe(false);
+
+    const persistedEnvelopeBytes = await readPersistedRunEnvelopeBytes({
+      runsRoot,
+      runId: result.runId,
+    });
+    expect(persistedEnvelopeBytes.includes(Buffer.from(apiKey, "utf8"))).toBe(false);
+    expect(persistedEnvelopeBytes.includes(Buffer.from(config.datahubGmsToken, "utf8"))).toBe(
+      false,
+    );
   },
   120_000,
 );
