@@ -5882,6 +5882,8 @@ git commit -m "feat: enforce agent workflow deadlines"
 - Create: `src/config/web-config.test.ts`
 - Create: `src/ui/read-ndjson.ts`
 - Create: `src/ui/read-ndjson.test.ts`
+- Create: `src/http/bounded-body.ts`
+- Create: `src/http/bounded-body.test.ts`
 - Create: `src/runs/create-run-id.ts`
 - Create: `src/runs/create-run-id.test.ts`
 - Create: `src/app/web-dependencies.ts`
@@ -5919,6 +5921,355 @@ Change the `build:web` and `dev` package scripts to `next build --webpack` and
 contracts. Do not rewrite the existing source graph to extensionless or `.ts` relative imports.
 The production build is the executable positive proof that Webpack resolves the established
 NodeNext specifiers.
+
+**Owner-approved bounded-transport and review-remediation amendment:** the approved design is
+`docs/superpowers/specs/2026-07-25-task-10-bounded-transport-remediation-design.md`. This amendment
+governs where the earlier Task 10 snippets call `request.json()`, `request.text()`, or grow an
+unbounded NDJSON buffer. Preserve every other Task 10 contract.
+
+The balanced transport policy is exact:
+
+```ts
+export const MAX_RUN_REQUEST_BYTES = 8_192;
+export const MAX_NDJSON_EVENT_BYTES = 4_194_304;
+export const MAX_NDJSON_RESPONSE_BYTES = 16_777_216;
+export const MAX_NDJSON_EVENTS = 128;
+```
+
+The run route returns only `{ error: "Invalid rename request." }` with HTTP 400 for an oversized,
+malformed, non-UTF-8, non-JSON, or schema-invalid body. The regeneration route accepts exactly zero
+body bytes and returns only `{ error: "Invalid regeneration request." }` with HTTP 400 for any
+body byte, including whitespace. The NDJSON consumer throws only
+`new Error("Workflow stream is invalid.")` for a byte, UTF-8, JSON, schema, event-count, or callback
+failure. Keep `new Error("Workflow stream is unavailable.")` for a non-success response or missing
+response body.
+
+- [ ] **Step 0A: Write the failing bounded HTTP-body tests**
+
+Create `src/http/bounded-body.test.ts`. Use a real `Request` and controlled
+`ReadableStream<Uint8Array>` bodies. The tests must name the production break they catch and cover:
+
+```ts
+import { describe, expect, it, vi } from "vitest";
+import {
+  MAX_RUN_REQUEST_BYTES,
+  assertEmptyRequestBody,
+  readBoundedUtf8Body,
+} from "./bounded-body.js";
+
+describe("readBoundedUtf8Body", () => {
+  it("accepts exactly 8192 streamed bytes and releases the reader", async () => {
+    const body = "x".repeat(MAX_RUN_REQUEST_BYTES);
+    const request = streamedRequest([body.slice(0, 4_000), body.slice(4_000)]);
+
+    await expect(readBoundedUtf8Body(request, MAX_RUN_REQUEST_BYTES)).resolves.toBe(body);
+    expect(request.body?.locked).toBe(false);
+  });
+
+  it("rejects byte 8193, cancels the stream, and exposes no body text", async () => {
+    const cancelled = vi.fn();
+    const sentinel = "ACTIVE_SECRET_SENTINEL";
+    const request = streamedRequest(
+      ["x".repeat(MAX_RUN_REQUEST_BYTES), sentinel],
+      { cancel: cancelled },
+    );
+
+    const error = await readBoundedUtf8Body(request, MAX_RUN_REQUEST_BYTES).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toEqual(new Error("Request body is invalid."));
+    expect(String(error)).not.toContain(sentinel);
+    expect(cancelled).toHaveBeenCalledOnce();
+    expect(request.body?.locked).toBe(false);
+  });
+
+  it("rejects an understated content length from the streamed byte count", async () => {
+    const request = streamedRequest(["x".repeat(MAX_RUN_REQUEST_BYTES + 1)], {
+      contentLength: "1",
+    });
+    await expect(readBoundedUtf8Body(request, MAX_RUN_REQUEST_BYTES)).rejects.toThrow(
+      "Request body is invalid.",
+    );
+  });
+
+  it("rejects malformed, negative, and over-limit content lengths before reading", async () => {
+    for (const value of ["invalid", "-1", String(MAX_RUN_REQUEST_BYTES + 1)]) {
+      await expect(
+        readBoundedUtf8Body(streamedRequest([], { contentLength: value }), 8_192),
+      ).rejects.toThrow("Request body is invalid.");
+    }
+  });
+
+  it("decodes a split multibyte UTF-8 sequence and rejects malformed UTF-8", async () => {
+    const encoded = new TextEncoder().encode("rename café");
+    await expect(
+      readBoundedUtf8Body(byteRequest([encoded.slice(0, 9), encoded.slice(9)]), 8_192),
+    ).resolves.toBe("rename café");
+    await expect(readBoundedUtf8Body(byteRequest([Uint8Array.of(0xc3)]), 8_192)).rejects.toThrow(
+      "Request body is invalid.",
+    );
+  });
+});
+
+describe("assertEmptyRequestBody", () => {
+  it("accepts zero bytes and rejects the first byte without reading the remainder", async () => {
+    await expect(assertEmptyRequestBody(streamedRequest([]))).resolves.toBeUndefined();
+    await expect(assertEmptyRequestBody(streamedRequest([" "]))).rejects.toThrow(
+      "Request body is invalid.",
+    );
+  });
+});
+```
+
+`streamedRequest` and `byteRequest` are test-only helpers in this test file. They must create a
+POST `Request` with `duplex: "half"` when the Node runtime requires it, mirror real stream
+side-effects, and never add methods to production code only for tests.
+
+Run:
+
+```powershell
+.\node_modules\.bin\vitest.CMD run src/http/bounded-body.test.ts
+```
+
+Expected: FAIL because `src/http/bounded-body.ts` does not exist.
+
+- [ ] **Step 0B: Implement the bounded HTTP-body boundary**
+
+Create `src/http/bounded-body.ts` with these public interfaces:
+
+```ts
+export const MAX_RUN_REQUEST_BYTES = 8_192;
+
+export async function readBoundedUtf8Body(
+  request: Request,
+  maximumBytes: number,
+): Promise<string>;
+
+export async function assertEmptyRequestBody(request: Request): Promise<void>;
+```
+
+Use this closed algorithm:
+
+1. Reject a present `Content-Length` unless it matches `/^(0|[1-9]\d*)$/u`, is a safe integer, and
+   is no greater than `maximumBytes`.
+2. Treat `request.body === null` as zero bytes.
+3. Read raw chunks while maintaining an authoritative byte total; reject before retaining a chunk
+   that would cross `maximumBytes`.
+4. On rejection, attempt `reader.cancel()` without replacing the primary fixed error.
+5. Always release the reader lock.
+6. Concatenate only the accepted bounded chunks.
+7. Decode with `new TextDecoder("utf-8", { fatal: true })`.
+8. Replace every length, stream, and decoder failure with `new Error("Request body is invalid.")`.
+9. Implement `assertEmptyRequestBody` by calling the same reader with a zero-byte maximum; do not
+   create a second body-reading implementation.
+
+Run the focused test again. Expected: PASS.
+
+- [ ] **Step 0C: Write the failing bounded NDJSON tests**
+
+Extend `src/ui/read-ndjson.test.ts` and use the exported constants rather than duplicated numbers.
+Add these exact boundary behaviors:
+
+```ts
+it("accepts a workflow event line at 4 MiB and rejects one byte more", async () => {
+  const json = JSON.stringify(events[0]);
+  const exact = `${json}${" ".repeat(MAX_NDJSON_EVENT_BYTES - Buffer.byteLength(json, "utf8"))}\n`;
+  await expect(readNdjson(responseFromChunks([exact]), () => {})).resolves.toBeUndefined();
+  await expect(readNdjson(responseFromChunks([` ${exact}`]), () => {})).rejects.toThrow(
+    "Workflow stream is invalid.",
+  );
+});
+
+it("accepts exactly 16 MiB total and rejects the next byte", async () => {
+  const block = `${" ".repeat(MAX_NDJSON_EVENT_BYTES - 1)}\n`;
+  const exact = [block, block, block, block];
+  await expect(readNdjson(responseFromChunks(exact), () => {})).resolves.toBeUndefined();
+  await expect(readNdjson(responseFromChunks(exact.concat(" ")), () => {})).rejects.toThrow(
+    "Workflow stream is invalid.",
+  );
+});
+
+it("accepts 128 events and rejects event 129", async () => {
+  const line = `${JSON.stringify(events[0])}\n`;
+  const received: WorkflowEvent[] = [];
+  await readNdjson(responseFromChunks(Array.from({ length: MAX_NDJSON_EVENTS }, () => line)), (event) =>
+    received.push(event),
+  );
+  expect(received).toHaveLength(MAX_NDJSON_EVENTS);
+  await expect(
+    readNdjson(
+      responseFromChunks(Array.from({ length: MAX_NDJSON_EVENTS + 1 }, () => line)),
+      () => {},
+    ),
+  ).rejects.toThrow("Workflow stream is invalid.");
+});
+```
+
+Also add separate tests for an oversized unterminated line, a multi-byte character split between
+raw chunks, malformed UTF-8, malformed JSON, an unknown event shape, callback failure, and unlocked
+or cancelled reader cleanup. Derive each expected value independently of the implementation.
+
+Run:
+
+```powershell
+.\node_modules\.bin\vitest.CMD run src/ui/read-ndjson.test.ts
+```
+
+Expected: FAIL because the current decoder has no byte or event caps.
+
+- [ ] **Step 0D: Implement raw-byte NDJSON accounting**
+
+Update `src/ui/read-ndjson.ts` to export:
+
+```ts
+export const MAX_NDJSON_EVENT_BYTES = 4_194_304;
+export const MAX_NDJSON_RESPONSE_BYTES = 16_777_216;
+export const MAX_NDJSON_EVENTS = 128;
+```
+
+Read `response.body` as raw byte chunks. Count every raw response byte before processing it. Scan
+each chunk for byte `0x0a`, retain only bounded `subarray` segments for the current line, and track
+the current line's raw byte count independently of JavaScript string length. Concatenate and
+decode a line only after a newline or clean EOF. Use a fatal UTF-8 decoder, ignore whitespace-only
+lines, count non-empty events before parsing, parse JSON, validate `WorkflowEventSchema`, and only
+then invoke `onEvent`.
+
+On a byte, UTF-8, JSON, schema, event-count, or callback failure, cancel the reader, release its
+lock, and throw only `new Error("Workflow stream is invalid.")`. On clean completion, release the
+lock. Preserve `new Error("Workflow stream is unavailable.")` for `!response.ok` or a null body.
+
+Run the focused NDJSON test. Expected: PASS.
+
+- [ ] **Step 0E: Add the complete route safety regression matrix**
+
+Extend `tests/api/run-routes.test.ts`. Keep external or slow boundaries injected, but assert real
+route responses, persisted run-store state, and downloaded bytes rather than asserting that a mock
+exists. Add one distinct `it` case for every contract below:
+
+- `"rejects an initial request above 8192 bytes before dependencies are constructed"`: send a
+  split-chunk 8,193-byte body with understated `Content-Length`, expect the fixed HTTP 400 body,
+  and assert zero dependency-factory, workflow, provider, catalog, and persistence invocations.
+- `"rejects any regeneration body byte before configuration or storage access"`: send one
+  whitespace byte, expect the fixed HTTP 400 body, and assert zero configuration, root-preflight,
+  run-ID, provider, regeneration, and DataHub invocations.
+- `"maps pre-abort and post-stream abort to one terminal cancellation snapshot"`: run both abort
+  timings through the injected workflow boundary, parse the real NDJSON response, and assert
+  exactly one terminal `CANCELLED` snapshot in each connected response.
+- `"persists cancellation when the response reader disconnects"`: cancel the response reader
+  after stream creation, make the workflow observe the same signal, and reopen the persisted
+  `CANCELLED` snapshot through the real reload handler.
+- `"persists and reloads the same closed fallback for an unclassified workflow error"`: throw a
+  secret-bearing ordinary error from the workflow seam, compare the streamed and reloaded
+  `GENERATION_FAILED` snapshots, and assert the secret is absent.
+- `"streams only the closed fallback when failure persistence is unavailable"`: throw from both
+  workflow and persistence seams and assert one schema-valid `GENERATION_FAILED` snapshot with no
+  raw exception.
+- `"reloads authoritative COMPLETED after abort races with final hard-link publication"`: publish
+  the completed envelope through the real run-store boundary, abort immediately after the hard
+  link, and assert reload returns `COMPLETED` rather than a fallback.
+- `"regenerates in server-owned REPLAY mode without DataHub"` and
+  `"regenerates in server-owned LIVE mode without DataHub"`: use server configuration for each
+  mode, send an empty body, assert a fresh run ID and retained parent context hash, and assert zero
+  catalog/DataHub invocations.
+- `"rejects regeneration configuration and storage preflight failures before application work"`:
+  cover the two failures separately and assert the fixed response plus zero run-ID, provider,
+  regeneration, and DataHub invocations.
+- `"rejects regeneration when persisted parent mode differs from server mode"`: persist the parent
+  in the opposite mode, invoke the real regeneration boundary, and assert no child run or DataHub
+  call.
+- `"passes live secrets only to the sanitizer boundary and performs zero DataHub calls"`: inject
+  live server configuration, capture the regeneration dependency object, assert the active secrets
+  are present only in its sanitizer list, and assert the route response and logs do not contain
+  them.
+- `"contains the Task 9 adversarial sentinel across every browser and storage boundary"`: exercise
+  the complete adversarial flow specified below.
+- `"rejects invariant-tampered, malformed, linked, and traversal final entries"`: create each entry
+  independently, invoke reload and download as applicable, and assert the exact fixed 404 body
+  contains no native path.
+- `"rejects directory-symlink and Windows-junction runs roots before external work"`: create and
+  clean up each supported linked-root type independently, expect storage-unavailable behavior, and
+  assert zero downstream work.
+- `"returns exact SQL and Markdown download security headers"`: reopen one SQL and the Markdown
+  artifact through the real strict reader and assert the exact content type, attachment filename,
+  `Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`.
+
+The adversarial test must run the real `POST /api/runs` workflow using the Task 9 hostile fixture
+and a provider spy at the approved provider boundary. After the terminal response it must inspect
+the provider request/context, every NDJSON event, the strict internal envelope, reload JSON, all
+four virtual downloads, captured logs, and public error text. Assert that the raw sentinel is
+absent from all of them and that the expected sanitized markers and bounded diagnostics remain.
+
+For cancellation, deadline, fallback, and hard-link cases, assert the number and status of terminal
+snapshot events, then reopen the run through the real reload handler. For regeneration, assert a
+fresh run ID, retained parent context hash, an empty POST body, and an explicit zero count on the
+DataHub/catalog boundary.
+
+Run:
+
+```powershell
+.\node_modules\.bin\vitest.CMD run tests/api/run-routes.test.ts
+```
+
+Expected: FAIL until the run and regeneration handler dependency seams, bounded-body calls, and
+any behavior exposed by the new regressions are complete.
+
+- [ ] **Step 0F: Complete the route seams and bounded-body integration**
+
+Update the existing `createPostRunsHandler` dependency seam in `src/app/web-dependencies.ts` and
+add a parallel `createRegenerateRunHandler` seam there. The Next route files must continue to
+export only supported route/config symbols. Both factories accept typed optional overrides for the
+external application boundaries they actually call; production defaults remain the real
+configuration, trusted-root, workflow or regeneration, persistence, and run-ID functions.
+
+The run factory must call:
+
+```ts
+const rawBody = await readBoundedUtf8Body(request, MAX_RUN_REQUEST_BYTES);
+input = RunRequestSchema.parse(JSON.parse(rawBody));
+```
+
+inside the existing fixed 400 boundary and before configuration or trusted-root preflight.
+
+The regeneration factory must call:
+
+```ts
+await assertEmptyRequestBody(request);
+```
+
+inside the existing fixed 400 boundary and before configuration, trusted-root preflight, run-ID
+allocation, provider construction, or regeneration work.
+
+Make only behavior changes proven necessary by the Step 0E RED cases. Preserve the workflow-owned
+deadline chain, strict run-store readers, immutable hard-link linearization, fixed public errors,
+and zero-DataHub regeneration design.
+
+- [ ] **Step 0G: Verify and commit the complete remediation**
+
+Run:
+
+```powershell
+.\node_modules\.bin\vitest.CMD run src/http/bounded-body.test.ts src/ui/read-ndjson.test.ts tests/api/run-routes.test.ts
+.\node_modules\.bin\vitest.CMD run src/config/web-config.test.ts src/ui/read-ndjson.test.ts src/http/bounded-body.test.ts src/runs/create-run-id.test.ts tests/api/run-routes.test.ts src/runs/run-store.test.ts src/artifacts/run-envelope-files.test.ts src/cli.test.ts tests/smoke/toolchain.test.ts
+pnpm test
+pnpm typecheck
+pnpm format:check
+pnpm lint
+pnpm build
+git diff --check
+```
+
+Prove that `pnpm test` excludes only `tests/integration/**` and `tests/e2e/**`. Inspect the focused
+diff and status, and run the repository secret scanner when available or a targeted changed-file
+credential-pattern scan otherwise. Live DataHub, OpenAI, and browser E2E checks remain explicitly
+skipped for this remediation.
+
+Append the RED/GREEN commands, counts, exit outcomes, self-review, scope, warnings, and commit SHA
+to the Task 10 SDD report. Commit only the amendment implementation:
+
+```powershell
+git add src/http/bounded-body.ts src/http/bounded-body.test.ts src/ui/read-ndjson.ts src/ui/read-ndjson.test.ts src/app/web-dependencies.ts app/api/runs/route.ts app/api/runs/[runId]/regenerate/route.ts tests/api/run-routes.test.ts
+git commit -m "fix: bound streamed run transports"
+```
 
 - [ ] **Step 1: Write failing configuration, NDJSON, and route tests**
 
