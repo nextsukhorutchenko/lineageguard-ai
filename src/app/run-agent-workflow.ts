@@ -37,7 +37,10 @@ import {
   type WorkflowSnapshot,
   type WorkflowStatus,
 } from "../workflow/contracts.js";
-import type { MigrationPackageDraft } from "../workflow/migration-draft.js";
+import {
+  MigrationPackageDraftSchema,
+  type MigrationPackageDraft,
+} from "../workflow/migration-draft.js";
 import { isTerminalWorkflowStatus, transitionWorkflow } from "../workflow/state-machine.js";
 import { validateMigrationDraft } from "../workflow/validate-migration-draft.js";
 
@@ -171,6 +174,48 @@ function summarizeValidation(
       .sort(compareCanonicalText)
       .slice(0, 20),
   });
+}
+
+const invalidDraftFindings = [
+  {
+    code: "INVALID_DRAFT",
+    message: "Migration draft did not match the required schema.",
+  },
+] as const satisfies readonly PackageFinding[];
+
+function normalizeMigrationDraft(
+  context: ChangeContext,
+  value: unknown,
+):
+  | { readonly kind: "valid"; readonly draft: MigrationPackageDraft }
+  | { readonly kind: "invalid"; readonly findings: readonly PackageFinding[] } {
+  const parsed = MigrationPackageDraftSchema.safeParse(value);
+  if (!parsed.success) return { kind: "invalid", findings: invalidDraftFindings };
+
+  const knownEvidenceIds = new Set(context.evidence.map(({ id }) => id));
+  const normalizedEvidenceIds = new Set<string>();
+  let placeholderIndex = 0;
+  const evidenceIds = parsed.data.evidenceIds.map((id) => {
+    if (knownEvidenceIds.has(id)) {
+      normalizedEvidenceIds.add(id);
+      return id;
+    }
+
+    let placeholder: string;
+    do {
+      placeholderIndex += 1;
+      placeholder = `datahub:untrusted-evidence:[REDACTED]:${placeholderIndex}`;
+    } while (knownEvidenceIds.has(placeholder) || normalizedEvidenceIds.has(placeholder));
+    normalizedEvidenceIds.add(placeholder);
+    return placeholder;
+  });
+  const normalized = MigrationPackageDraftSchema.safeParse({
+    ...parsed.data,
+    evidenceIds,
+  });
+  return normalized.success
+    ? { kind: "valid", draft: normalized.data }
+    : { kind: "invalid", findings: invalidDraftFindings };
 }
 
 function previewCompletion(input: {
@@ -369,7 +414,8 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
   let applicationGenerationAttempts = 0;
   let accepted: { draft: MigrationPackageDraft; rendered: RenderedMigrationPackage } | undefined;
   let lastRejected:
-    { draft: MigrationPackageDraft; findings: readonly PackageFinding[] } | undefined;
+    | { readonly draft?: MigrationPackageDraft; readonly findings: readonly PackageFinding[] }
+    | undefined;
 
   const move = (next: WorkflowStatus, label: string, outcome: ActivityEntry["outcome"]): void => {
     const now = deps.clock();
@@ -534,20 +580,27 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
         }
         applicationGenerationAttempts += 1;
         move("VALIDATING_ARTIFACTS", "Validate grounding, SQL, rollback, and paths", "started");
-        const draftFindings = validateMigrationDraft(context, draft);
-        const rendered = renderMigrationPackage(context, draft);
+        const normalized = normalizeMigrationDraft(context, draft);
+        if (normalized.kind === "invalid") {
+          lastRejected = { findings: normalized.findings };
+          move("GENERATING_ARTIFACTS", "Repair the rejected structured draft", "started");
+          return { kind: "rejected", findings: normalized.findings };
+        }
+        const safeDraft = normalized.draft;
+        const draftFindings = validateMigrationDraft(context, safeDraft);
+        const rendered = renderMigrationPackage(context, safeDraft);
         const findings = sanitizeValidationFindings(
-          [...draftFindings, ...validatePackage(context, draft, rendered)],
+          [...draftFindings, ...validatePackage(context, safeDraft, rendered)],
           deps.secrets,
         ).slice(0, 200);
         if (findings.length > 0) {
-          lastRejected = { draft, findings };
+          lastRejected = { draft: safeDraft, findings };
           move("GENERATING_ARTIFACTS", "Repair the rejected structured draft", "started");
           return { kind: "rejected", findings };
         }
         signal.throwIfAborted();
         lastRejected = undefined;
-        accepted = { draft, rendered };
+        accepted = { draft: safeDraft, rendered };
         return { kind: "accepted", classification: rendered.classification };
       },
     };
@@ -663,7 +716,10 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
         ...(context === undefined ? {} : { context }),
         ...(lastRejected === undefined
           ? {}
-          : { draft: lastRejected.draft, findings: lastRejected.findings }),
+          : {
+              ...(lastRejected.draft === undefined ? {} : { draft: lastRejected.draft }),
+              findings: lastRejected.findings,
+            }),
         ...(deps.reservedChild === undefined ? {} : { reservedChild: deps.reservedChild }),
       });
       emit(deps, { type: "snapshot", snapshot });
@@ -769,7 +825,10 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
           ? { draft: accepted.draft, findings: [] }
           : lastRejected === undefined
             ? {}
-            : { draft: lastRejected.draft, findings: lastRejected.findings }),
+            : {
+                ...(lastRejected.draft === undefined ? {} : { draft: lastRejected.draft }),
+                findings: lastRejected.findings,
+              }),
         ...(deps.reservedChild === undefined ? {} : { reservedChild: deps.reservedChild }),
       });
       emit(deps, { type: "snapshot", snapshot });

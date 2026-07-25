@@ -13,6 +13,7 @@ import type { DatasetCandidate } from "../domain/resolve-dataset.js";
 import { createGoldenDraft } from "../agent/fake-agent-provider.js";
 import { migrationAgentInstructions } from "../agent/prompt.js";
 import type { AgentProvider } from "../agent/provider.js";
+import type { PackageFinding } from "../migrations/validate-sql.js";
 import { readCompletedPackageFile } from "../runs/run-store.js";
 import type { MigrationPackageDraft } from "../workflow/migration-draft.js";
 import { WorkflowSnapshotSchema, type WorkflowEvent } from "../workflow/contracts.js";
@@ -346,6 +347,160 @@ it("enforces two application-owned rejected attempts and persists only the last 
     ]),
   });
   expect(envelope).not.toHaveProperty("package");
+  for (const filename of [
+    "migration-up.sql",
+    "migration-down.sql",
+    "validation.sql",
+    "rollout-plan.md",
+  ] as const) {
+    await expect(
+      readCompletedPackageFile({
+        runsRoot: dependencies.runsRoot,
+        runId: result.runId,
+        filename,
+      }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_WRITE_FAILED" });
+  }
+});
+
+it("rejects a malformed runtime draft without persisting provider data", async () => {
+  const secret = "malformed-draft-secret";
+  const dependencies = await makeWorkflowDependencies({
+    secrets: [secret],
+    provider: {
+      async run({ tools, request, signal }) {
+        const analysis = await tools.analyzeRenameChange({ request }, signal);
+        expect(analysis.kind).toBe("ready");
+        const rejection = await tools.generateMigrationPackage(
+          {
+            schemaVersion: "1",
+            evidenceIds: null,
+            privateTrace: secret,
+          } as unknown as MigrationPackageDraft,
+          signal,
+        );
+        expect(rejection).toEqual({
+          kind: "rejected",
+          findings: [
+            {
+              code: "INVALID_DRAFT",
+              message: "Migration draft did not match the required schema.",
+            },
+          ],
+        });
+        return {
+          status: "failed",
+          provider: "fixture",
+          model: "malformed-draft-test",
+          reasoningEffort: "none",
+          analysisCalls: 88,
+          generationAttempts: 88,
+          message: "Generation stopped after malformed draft rejection.",
+        };
+      },
+    },
+  });
+
+  const result = await runAgentWorkflow(dependencies);
+  const envelope = await readRunEnvelope({
+    runsRoot: dependencies.runsRoot,
+    runId: result.runId,
+  });
+
+  expect(result).toMatchObject({
+    status: "GENERATION_FAILED",
+    validation: {
+      outcome: "REJECTED",
+      findingCount: 1,
+      findingCodes: ["INVALID_DRAFT"],
+    },
+    agent: { generationAttempts: 1 },
+  });
+  expect(envelope).toMatchObject({
+    kind: "failed",
+    findings: [
+      {
+        code: "INVALID_DRAFT",
+        message: "Migration draft did not match the required schema.",
+      },
+    ],
+  });
+  expect(envelope).not.toHaveProperty("draft");
+  expect(JSON.stringify({ result, envelope })).not.toContain(secret);
+});
+
+it("normalizes ungrounded evidence IDs before validation and failed-envelope persistence", async () => {
+  const secret = "active-draft-secret";
+  const nativePathEvidence = "datahub:C:\\Users\\owner\\private-key.pem";
+  const events: WorkflowEvent[] = [];
+  const logs: unknown[] = [];
+  for (const method of ["log", "warn", "error"] as const) {
+    vi.spyOn(console, method).mockImplementation((...values: unknown[]) => {
+      logs.push(...values);
+    });
+  }
+  let rejectionFindings: readonly PackageFinding[] = [];
+  const dependencies = await makeWorkflowDependencies({
+    secrets: [secret],
+    onEvent: (event) => events.push(event),
+    provider: {
+      async run({ tools, request, signal }) {
+        const analysis = await tools.analyzeRenameChange({ request }, signal);
+        if (analysis.kind !== "ready") throw new Error("Expected ready analysis.");
+        const invalid = invalidDirectRenameDraft(analysis.context);
+        const rejection = await tools.generateMigrationPackage(
+          {
+            ...invalid,
+            evidenceIds: [...invalid.evidenceIds, `datahub:provider:${secret}`, nativePathEvidence],
+          },
+          signal,
+        );
+        if (rejection.kind !== "rejected") throw new Error("Expected rejected draft.");
+        rejectionFindings = rejection.findings;
+        return {
+          status: "failed",
+          provider: "fixture",
+          model: "hostile-evidence-test",
+          reasoningEffort: "none",
+          analysisCalls: 1,
+          generationAttempts: 1,
+          message: "Generation intentionally stopped.",
+        };
+      },
+    },
+  });
+
+  const result = await runAgentWorkflow(dependencies);
+  const envelope = await readRunEnvelope({
+    runsRoot: dependencies.runsRoot,
+    runId: result.runId,
+  });
+  const serialized = JSON.stringify({ result, envelope, events, logs, rejectionFindings });
+
+  expect(envelope).toMatchObject({
+    kind: "failed",
+    draft: {
+      evidenceIds: expect.arrayContaining([
+        "datahub:untrusted-evidence:[REDACTED]:1",
+        "datahub:untrusted-evidence:[REDACTED]:2",
+      ]),
+    },
+    findings: expect.arrayContaining([
+      {
+        code: "UNKNOWN_EVIDENCE_REFERENCE",
+        message:
+          "Evidence reference datahub:untrusted-evidence:[REDACTED]:1 is not present in ChangeContext.",
+      },
+      {
+        code: "UNKNOWN_EVIDENCE_REFERENCE",
+        message:
+          "Evidence reference datahub:untrusted-evidence:[REDACTED]:2 is not present in ChangeContext.",
+      },
+    ]),
+  });
+  expect(serialized).toContain("[REDACTED]");
+  expect(serialized).not.toContain(secret);
+  expect(serialized).not.toContain("private-key.pem");
   for (const filename of [
     "migration-up.sql",
     "migration-down.sql",
