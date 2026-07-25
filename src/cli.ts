@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import {
@@ -19,6 +18,7 @@ import { AppError, type AppErrorCode } from "./errors/app-error.js";
 import type { RecordDeadlineEvent } from "./runtime/deadline-events.js";
 import { createRequestAbortScope, type ClassifiedAbortScope } from "./runtime/deadlines.js";
 import { sanitizeTerminalText } from "./security/sanitize-output.js";
+import { createRunId } from "./runs/create-run-id.js";
 
 const help = [
   "Usage: lineageguard --request <text> [--runs-dir <path>]",
@@ -90,12 +90,6 @@ export interface CliDependencies {
   ) => Promise<DataHubCatalog>;
   readonly runImpactAnalysis: (input: RunImpactAnalysisDependencies) => Promise<CliAnalysisResult>;
 }
-
-export const createRunId = (now: Date): string =>
-  `${now
-    .toISOString()
-    .replace(/[-:]/g, "")
-    .replace(/\.\d{3}Z$/, "Z")}-${randomBytes(4).toString("hex")}`;
 
 function parseCliArguments(argv: readonly string[]): {
   readonly help: boolean;

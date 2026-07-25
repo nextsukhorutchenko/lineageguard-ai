@@ -33,8 +33,8 @@ describe("toolchain", () => {
     });
     expect(packageJson.scripts).toMatchObject({
       "build:cli": "tsc -p tsconfig.build.json",
-      "build:web": "next build",
-      dev: "next dev",
+      "build:web": "next build --webpack",
+      dev: "next dev --webpack",
       "start:web": "next start",
       "test:e2e": "playwright test",
     });

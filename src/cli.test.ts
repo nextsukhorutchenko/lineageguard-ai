@@ -18,7 +18,7 @@ import type {
 import type { DatasetCandidate } from "./domain/resolve-dataset.js";
 import { AppError, type AppErrorCode } from "./errors/app-error.js";
 import type { ClassifiedAbortScope } from "./runtime/deadlines.js";
-import { createRunId, runCli, type CliDependencies } from "./cli.js";
+import { runCli, type CliDependencies } from "./cli.js";
 
 const REQUEST = "Rename column customer_id to customer_key in dataset snowflake:orders";
 const ENVIRONMENT = {
@@ -655,13 +655,5 @@ describe("runCli", () => {
     expect(test.catalog.closeCount).toBe(1);
     expect(test.stderr.join("")).toBe("Interrupted by the user.\n");
     expect(test.signal.listenerCount("SIGINT")).toBe(0);
-  });
-});
-
-describe("createRunId", () => {
-  it("uses compact UTC time and exactly four cryptographic random bytes", () => {
-    expect(createRunId(new Date("2026-07-22T12:34:56.789Z"))).toMatch(
-      /^20260722T123456Z-[0-9a-f]{8}$/,
-    );
   });
 });
