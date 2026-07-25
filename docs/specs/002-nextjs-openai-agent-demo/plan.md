@@ -5885,6 +5885,9 @@ git commit -m "feat: enforce agent workflow deadlines"
 - Create: `src/runs/create-run-id.ts`
 - Create: `src/runs/create-run-id.test.ts`
 - Create: `src/app/web-dependencies.ts`
+- Modify: `package.json`
+- Modify: `next.config.ts`
+- Modify: `tests/smoke/toolchain.test.ts`
 - Modify: `src/cli.ts`
 - Modify: `src/cli.test.ts`
 - Create: `app/api/runs/route.ts`
@@ -5897,6 +5900,25 @@ git commit -m "feat: enforce agent workflow deadlines"
 
 - Consumes: workflow application services, runtime configuration, safe run reads, and `WorkflowEventSchema`.
 - Produces: `POST /api/runs`, `GET /api/runs/:runId`, `POST /api/runs/:runId/regenerate`, `GET /api/runs/:runId/artifacts/:filename`, and `readNdjson(response, onEvent)`.
+
+**Owner-approved Next.js 16 build compatibility amendment:** preserve the repository-wide NodeNext
+`.js` relative-import convention. Next.js 16 uses Turbopack by default, while the required
+fully-specified `.js` to TypeScript source mapping is provided by Webpack's extension aliases.
+Configure `next.config.ts` with:
+
+```ts
+experimental: {
+  extensionAlias: {
+    ".js": [".ts", ".tsx", ".js"],
+  },
+},
+```
+
+Change the `build:web` and `dev` package scripts to `next build --webpack` and
+`next dev --webpack`. Update `tests/smoke/toolchain.test.ts` to enforce those two approved script
+contracts. Do not rewrite the existing source graph to extensionless or `.ts` relative imports.
+The production build is the executable positive proof that Webpack resolves the established
+NodeNext specifiers.
 
 - [ ] **Step 1: Write failing configuration, NDJSON, and route tests**
 
