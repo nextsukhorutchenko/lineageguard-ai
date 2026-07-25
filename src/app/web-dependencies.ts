@@ -6,6 +6,11 @@ import { loadRuntimeConfig } from "../config/runtime-config.js";
 import { loadWebConfig, type WebConfig } from "../config/web-config.js";
 import { createDataHubCatalog } from "../datahub/create-catalog.js";
 import { FixtureCatalog } from "../demo/fixture-catalog.js";
+import {
+  assertEmptyRequestBody,
+  MAX_RUN_REQUEST_BYTES,
+  readBoundedUtf8Body,
+} from "../http/bounded-body.js";
 import { createRunId } from "../runs/create-run-id.js";
 import { persistFailedRun } from "../runs/run-store.js";
 import { DEADLINES_MS } from "../runtime/deadlines.js";
@@ -18,6 +23,7 @@ import {
   type WorkflowSnapshot,
 } from "../workflow/contracts.js";
 import { isTerminalWorkflowStatus } from "../workflow/state-machine.js";
+import { regeneratePackage } from "./regenerate-package.js";
 import { runAgentWorkflow, type RunAgentWorkflowDependencies } from "./run-agent-workflow.js";
 
 export interface WebWorkflowDependencyInput {
@@ -160,7 +166,8 @@ export function createPostRunsHandler(overrides: PostRunsHandlerOverrides = {}) 
   return async function postRuns(request: Request): Promise<Response> {
     let input: RunRequest;
     try {
-      input = RunRequestSchema.parse(await request.json());
+      const rawBody = await readBoundedUtf8Body(request, MAX_RUN_REQUEST_BYTES);
+      input = RunRequestSchema.parse(JSON.parse(rawBody));
     } catch {
       return Response.json({ error: "Invalid rename request." }, { status: 400 });
     }
@@ -246,6 +253,110 @@ export function createPostRunsHandler(overrides: PostRunsHandlerOverrides = {}) 
         abortController.abort();
       },
     });
+    return new Response(stream, {
+      headers: {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/x-ndjson; charset=utf-8",
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
+  };
+}
+
+type RegenerateRouteContext = { readonly params: Promise<{ readonly runId: string }> };
+
+export interface RegenerateRunHandlerOverrides {
+  readonly loadConfig?: typeof loadWebConfig;
+  readonly assertRunsRoot?: typeof assertTrustedRunsRoot;
+  readonly createDependencies?: typeof createWebRegenerationDependencies;
+  readonly regenerate?: typeof regeneratePackage;
+  readonly createId?: typeof createRunId;
+}
+
+export function createRegenerateRunHandler(overrides: RegenerateRunHandlerOverrides = {}) {
+  const loadConfig = overrides.loadConfig ?? loadWebConfig;
+  const assertRunsRoot = overrides.assertRunsRoot ?? assertTrustedRunsRoot;
+  const createDependencies = overrides.createDependencies ?? createWebRegenerationDependencies;
+  const regenerate = overrides.regenerate ?? regeneratePackage;
+  const createId = overrides.createId ?? createRunId;
+
+  return async function regenerateRun(
+    request: Request,
+    context: RegenerateRouteContext,
+  ): Promise<Response> {
+    try {
+      await assertEmptyRequestBody(request);
+    } catch {
+      return Response.json({ error: "Invalid regeneration request." }, { status: 400 });
+    }
+
+    let config: WebConfig;
+    try {
+      config = loadConfig(process.env);
+    } catch {
+      return Response.json({ error: "Demo service is not configured." }, { status: 503 });
+    }
+    let runsRoot: string;
+    try {
+      runsRoot = await assertRunsRoot(config.runsRoot);
+    } catch {
+      return Response.json({ error: "Demo service storage is unavailable." }, { status: 503 });
+    }
+
+    const { runId: parentRunId } = await context.params;
+    const runId = createId(new Date());
+    const abortController = new AbortController();
+    const abort = () => abortController.abort();
+    if (request.signal.aborted) abort();
+    else request.signal.addEventListener("abort", abort, { once: true });
+
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        let terminalSnapshotSent = false;
+        const safeEnqueue = (event: WorkflowEvent): boolean => {
+          try {
+            controller.enqueue(encodeWorkflowEvent(event));
+            if (event.type === "snapshot" && isTerminalWorkflowStatus(event.snapshot.status)) {
+              terminalSnapshotSent = true;
+            }
+            return true;
+          } catch {
+            return false;
+          }
+        };
+        try {
+          const snapshot = await regenerate(
+            createDependencies({
+              config,
+              runsRoot,
+              parentRunId,
+              runId,
+              signal: abortController.signal,
+              onEvent: (event) => void safeEnqueue(event),
+            }),
+          );
+          if (!terminalSnapshotSent) safeEnqueue({ type: "snapshot", snapshot });
+        } catch {
+          if (!terminalSnapshotSent) {
+            const snapshot = abortController.signal.aborted
+              ? safeCancellationSnapshot(runId, config.mode)
+              : safeUnexpectedFailureSnapshot(runId, config.mode);
+            safeEnqueue({ type: "snapshot", snapshot });
+          }
+        } finally {
+          request.signal.removeEventListener("abort", abort);
+          try {
+            controller.close();
+          } catch {
+            // A disconnected client is expected to have cancelled the stream.
+          }
+        }
+      },
+      cancel() {
+        abortController.abort();
+      },
+    });
+
     return new Response(stream, {
       headers: {
         "Cache-Control": "no-store",
