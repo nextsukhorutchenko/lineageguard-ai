@@ -38,6 +38,7 @@ describe("toolchain", () => {
       "build:web": "next build --webpack",
       dev: "next dev --webpack",
       "prepare:pr-impact": "tsx scripts/prepare-pr-impact.ts",
+      "render:check": "tsx scripts/validate-render-blueprint.ts",
       "start:public-replay": "node dist/hosting/start-public-replay.js",
       "start:web": "next start",
       "summary:pr-impact": "tsx scripts/append-pr-impact-summary.ts",
@@ -47,7 +48,7 @@ describe("toolchain", () => {
       "test:runtime-mode": "vitest run tests/integration/runtime-mode-page.integration.test.ts",
     });
     expect(packageJson.scripts["verify:offline"]).toBe(
-      "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm test:runtime-mode && pnpm test:e2e --project=chromium",
+      "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm render:check && pnpm build && pnpm test:runtime-mode && pnpm test:e2e --project=chromium",
     );
     expect(packageJson.scripts["verify:offline"]).not.toContain("exploratory");
   });
