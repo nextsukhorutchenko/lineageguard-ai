@@ -1,59 +1,67 @@
-import { lstat, mkdir, realpath, writeFile } from "node:fs/promises";
-import { isAbsolute, join, parse, posix, relative, resolve, sep, win32 } from "node:path";
+import { createHash } from "node:crypto";
 import { AppError } from "../errors/app-error.js";
+import {
+  MAX_VIRTUAL_ARTIFACT_BYTES,
+  SafeRunIdSchema,
+  serializeRunEnvelope,
+  type RunEnvelope,
+} from "../runs/run-envelope.js";
+import { sanitizeBoundaryText } from "../security/sanitize-output.js";
+import { publishRunEnvelope, readRunEnvelope } from "./run-envelope-files.js";
 
-function assertSafeRunId(runId: string): void {
+export { assertSafeRunId } from "../runs/run-envelope.js";
+
+type ImpactReportStatus =
+  "COMPLETED" | "COMPLETED_WITH_LIMITATIONS" | "INSUFFICIENT_METADATA" | "INCOMPLETE_EVIDENCE";
+
+const impactReportStatuses = new Set<ImpactReportStatus>([
+  "COMPLETED",
+  "COMPLETED_WITH_LIMITATIONS",
+  "INSUFFICIENT_METADATA",
+  "INCOMPLETE_EVIDENCE",
+]);
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function writerInputError(): AppError {
+  return new AppError("ARTIFACT_WRITE_FAILED", "Unable to persist the run.");
+}
+
+function unavailableImpactReport(): AppError {
+  return new AppError("ARTIFACT_WRITE_FAILED", "The stored impact report is unavailable.");
+}
+
+function assertBoundarySafeReport(content: string): void {
+  const sanitized = sanitizeBoundaryText(content, [], Number.MAX_SAFE_INTEGER);
+  const expectedWithVisibleLineFeeds = content.replaceAll("\n", "\\n");
+  if (sanitized !== expectedWithVisibleLineFeeds) throw writerInputError();
+}
+
+function assertValidWriterInput(options: {
+  readonly runId: unknown;
+  readonly filename: unknown;
+  readonly content: unknown;
+  readonly status: unknown;
+}): asserts options is {
+  readonly runId: string;
+  readonly filename: "impact-report.md";
+  readonly content: string;
+  readonly status: ImpactReportStatus;
+} {
   if (
-    runId.length === 0 ||
-    runId === "." ||
-    runId === ".." ||
-    runId.includes("/") ||
-    runId.includes("\\") ||
-    posix.isAbsolute(runId) ||
-    win32.isAbsolute(runId) ||
-    /^[A-Za-z]:/.test(runId)
+    options.filename !== "impact-report.md" ||
+    typeof options.runId !== "string" ||
+    !SafeRunIdSchema.safeParse(options.runId).success ||
+    typeof options.status !== "string" ||
+    !impactReportStatuses.has(options.status as ImpactReportStatus) ||
+    typeof options.content !== "string" ||
+    Buffer.byteLength(options.content, "utf8") > MAX_VIRTUAL_ARTIFACT_BYTES
   ) {
-    throw new AppError("ARTIFACT_WRITE_FAILED", "The run ID must be a single path segment.");
+    throw writerInputError();
   }
-}
-
-function assertWithinRunsRoot(root: string, target: string): void {
-  const fromRoot = relative(root, target);
-  if (isAbsolute(fromRoot) || fromRoot === ".." || fromRoot.startsWith(`..${sep}`)) {
-    throw new AppError("ARTIFACT_WRITE_FAILED", "The artifact path escapes the runs directory.");
-  }
-}
-
-function isMissingPathError(error: unknown): boolean {
-  return (
-    error !== null &&
-    typeof error === "object" &&
-    "code" in error &&
-    (error as { readonly code?: unknown }).code === "ENOENT"
-  );
-}
-
-async function assertNoLinkedExistingPathComponents(target: string): Promise<void> {
-  const absoluteTarget = resolve(target);
-  const pathRoot = parse(absoluteTarget).root;
-  const components = relative(pathRoot, absoluteTarget).split(sep).filter(Boolean);
-  let current = pathRoot;
-
-  for (const component of components) {
-    current = join(current, component);
-    try {
-      const stats = await lstat(current);
-      if (stats.isSymbolicLink()) {
-        throw new AppError(
-          "ARTIFACT_WRITE_FAILED",
-          "The runs directory and its ancestors must not be symbolic links or junctions.",
-        );
-      }
-    } catch (error) {
-      if (isMissingPathError(error)) return;
-      throw error;
-    }
-  }
+  assertBoundarySafeReport(options.content);
 }
 
 export async function writeRunArtifact(options: {
@@ -61,48 +69,43 @@ export async function writeRunArtifact(options: {
   readonly runId: string;
   readonly filename: "impact-report.md";
   readonly content: string;
+  readonly status: ImpactReportStatus;
   readonly signal?: AbortSignal;
-}): Promise<string> {
-  options.signal?.throwIfAborted();
-  assertSafeRunId(options.runId);
-
-  const root = resolve(options.runsRoot);
-  const runDirectory = resolve(root, options.runId);
-  const intendedOutput = resolve(runDirectory, options.filename);
-
+}): Promise<"impact-report.md"> {
+  let serialized: string;
   try {
-    await assertNoLinkedExistingPathComponents(root);
-    options.signal?.throwIfAborted();
-    await mkdir(root, { recursive: true });
-    await assertNoLinkedExistingPathComponents(root);
-    const realRoot = await realpath(root);
+    assertValidWriterInput(options);
+    const envelope: RunEnvelope = {
+      schemaVersion: "1",
+      kind: "impact-report",
+      runId: options.runId,
+      status: options.status,
+      report: options.content,
+      hashes: { report: sha256(options.content) },
+    };
+    serialized = serializeRunEnvelope(envelope);
+  } catch {
+    throw writerInputError();
+  }
 
-    await assertNoLinkedExistingPathComponents(runDirectory);
-    options.signal?.throwIfAborted();
-    await mkdir(runDirectory, { recursive: true });
-    await assertNoLinkedExistingPathComponents(runDirectory);
-    const runDirectoryStats = await lstat(runDirectory);
-    if (runDirectoryStats.isSymbolicLink()) {
-      throw new AppError("ARTIFACT_WRITE_FAILED", "The run directory must not be a symbolic link.");
-    }
+  await publishRunEnvelope({
+    runsRoot: options.runsRoot,
+    runId: options.runId,
+    serialized,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  });
+  return "impact-report.md";
+}
 
-    const realRunDirectory = await realpath(runDirectory);
-    assertWithinRunsRoot(realRoot, realRunDirectory);
-    const output = resolve(realRunDirectory, options.filename);
-    assertWithinRunsRoot(realRoot, output);
-
-    options.signal?.throwIfAborted();
-    await writeFile(output, options.content, {
-      encoding: "utf8",
-      flag: "wx",
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-    });
-    return output;
-  } catch (error) {
-    if (options.signal?.aborted) options.signal.throwIfAborted();
-    if (error instanceof AppError) throw error;
-    throw new AppError("ARTIFACT_WRITE_FAILED", `Unable to write ${intendedOutput}.`, {
-      cause: error instanceof Error ? error.message : String(error),
-    });
+export async function readImpactReport(options: {
+  readonly runsRoot: string;
+  readonly runId: string;
+}): Promise<string> {
+  try {
+    const envelope = await readRunEnvelope(options);
+    if (envelope.kind !== "impact-report") throw unavailableImpactReport();
+    return envelope.report;
+  } catch {
+    throw unavailableImpactReport();
   }
 }

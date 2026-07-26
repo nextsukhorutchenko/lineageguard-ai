@@ -5,7 +5,9 @@ export type AppErrorCode =
   | "COLUMN_NOT_FOUND"
   | "DATAHUB_UNAVAILABLE"
   | "MCP_UNAVAILABLE"
-  | "ARTIFACT_WRITE_FAILED";
+  | "ARTIFACT_WRITE_FAILED"
+  | "GENERATION_FAILED"
+  | "CANCELLED";
 
 export interface SuppressedFailure {
   readonly code: AppErrorCode;

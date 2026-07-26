@@ -14,12 +14,18 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { format } from "prettier";
 import { z } from "zod";
-import { loadRuntimeConfig, type RuntimeConfig } from "../src/config/runtime-config.js";
+import {
+  loadRuntimeConfig,
+  type EnvironmentMap,
+  type RuntimeConfig,
+} from "../src/config/runtime-config.js";
 import type { CollectionResult } from "../src/datahub/catalog.js";
 import { DataHubMcpCatalog } from "../src/datahub/mcp/datahub-mcp-catalog.js";
 import { connectDataHubMcp } from "../src/datahub/mcp/mcp-client.js";
 import type { EntityContext, LineageAsset, SchemaField } from "../src/domain/evidence.js";
 import type { DatasetCandidate } from "../src/domain/resolve-dataset.js";
+import type { RecordDeadlineEvent } from "../src/runtime/deadline-events.js";
+import { createRequestAbortScope } from "../src/runtime/deadlines.js";
 import { redact } from "../src/security/redact.js";
 
 const DATASET_URN =
@@ -49,7 +55,7 @@ export interface FixtureCaptureTextWriter {
 
 export interface FixtureCaptureCliDependencies {
   readonly repositoryRoot: string;
-  readonly environment: NodeJS.ProcessEnv;
+  readonly environment: EnvironmentMap;
   readonly stdout: FixtureCaptureTextWriter;
   readonly createDirectory: (path: string) => Promise<void>;
   readonly createCandidateDirectory: (prefix: string) => Promise<string>;
@@ -510,7 +516,16 @@ export async function captureDataHubFixtures(
   destination: string,
 ): Promise<readonly CapturedFixture[]> {
   await validateCommittedFixtures();
-  const catalog = new DataHubMcpCatalog(await connectDataHubMcp(config), [config.datahubGmsToken]);
+  const requestScope = createRequestAbortScope(new AbortController().signal);
+  const ignoreDeadlineEvent: RecordDeadlineEvent = () => undefined;
+  const connectedClient = await (async () => {
+    try {
+      return await connectDataHubMcp(config, requestScope, ignoreDeadlineEvent);
+    } finally {
+      requestScope.dispose();
+    }
+  })();
+  const catalog = new DataHubMcpCatalog(connectedClient, [config.datahubGmsToken]);
 
   try {
     const candidates = await catalog.searchDatasets(DATASET_HINT);

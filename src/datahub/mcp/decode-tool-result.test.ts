@@ -29,6 +29,33 @@ describe("decodeJsonToolResult", () => {
     expect(decodeJsonToolResult(result)).toEqual({ source: "structured" });
   });
 
+  it("unwraps an official FastMCP array result only when the wrapper marker is present", () => {
+    const result: CallToolResult = {
+      content: [{ type: "text", text: '[{"urn":"urn:li:dataset:(target)"}]' }],
+      structuredContent: {
+        result: [{ urn: "urn:li:dataset:(target)" }],
+      },
+      _meta: {
+        fastmcp: {
+          wrap_result: true,
+        },
+      },
+    };
+
+    expect(decodeJsonToolResult(result)).toEqual([{ urn: "urn:li:dataset:(target)" }]);
+  });
+
+  it("does not unwrap an unmarked structured result property", () => {
+    const result: CallToolResult = {
+      content: [{ type: "text", text: '["ignored"]' }],
+      structuredContent: {
+        result: ["kept-wrapped"],
+      },
+    };
+
+    expect(decodeJsonToolResult(result)).toEqual({ result: ["kept-wrapped"] });
+  });
+
   it("decodes a single JSON text block", () => {
     const result: CallToolResult = {
       content: [{ type: "text", text: '{"searchResults":[]}' }],

@@ -8,6 +8,12 @@ import type { RuntimeConfig } from "../../config/runtime-config.js";
 import { AppError } from "../../errors/app-error.js";
 import { redact } from "../../security/redact.js";
 import { sanitizeBoundaryText } from "../../security/sanitize-output.js";
+import type { RecordDeadlineEvent } from "../../runtime/deadline-events.js";
+import {
+  createDeadline,
+  DEADLINES_MS,
+  type ClassifiedAbortScope,
+} from "../../runtime/deadlines.js";
 import type { McpToolClient, ToolCallRequest } from "./datahub-mcp-catalog.js";
 import { createBoundedMcpClose, type OwnedMcpToolCallOptions } from "./mcp-boundary-policy.js";
 
@@ -184,29 +190,45 @@ export async function connectOwnedDataHubMcpClient(
   client: OwnedSdkToolClient,
   transport: Parameters<Client["connect"]>[0],
   secrets: readonly string[],
-  signal?: AbortSignal,
+  scope: ClassifiedAbortScope,
+  recordDeadlineEvent: RecordDeadlineEvent,
 ): Promise<McpToolClient> {
-  signal?.throwIfAborted();
   const closeOwnedClient = createBoundedMcpClose(() => client.close());
-  const deadline = AbortSignal.timeout(15_000);
-  const connectionSignal = signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+  const connectionScope = createDeadline(scope, DEADLINES_MS.mcpConnect, "MCP_CONNECT_TIMEOUT");
+  let eventRecorded = false;
+  const record = (outcome: "completed" | "expired" | "cancelled"): void => {
+    if (eventRecorded) return;
+    eventRecorded = true;
+    recordDeadlineEvent({
+      kind: "MCP_CONNECT_TIMEOUT",
+      durationMs: DEADLINES_MS.mcpConnect,
+      attempt: 1,
+      outcome,
+    });
+  };
 
   try {
-    await client.connect(transport, { signal: connectionSignal });
-    await listAndAssertRequiredReadOnlyTools(client, connectionSignal);
+    connectionScope.signal.throwIfAborted();
+    await client.connect(transport, { signal: connectionScope.signal });
+    connectionScope.signal.throwIfAborted();
+    await listAndAssertRequiredReadOnlyTools(client, connectionScope.signal);
+    connectionScope.signal.throwIfAborted();
+    record("completed");
     return toDataHubMcpToolClient(client, secrets);
   } catch {
-    let primary: unknown = new AppError(
-      "MCP_UNAVAILABLE",
-      "The DataHub MCP subprocess could not be started.",
-    );
-    if (signal?.aborted) {
-      try {
-        signal.throwIfAborted();
-      } catch (error) {
-        primary = error;
-      }
-    }
+    const primary = connectionScope.signal.aborted
+      ? (() => {
+          const classification = connectionScope.classifyAbort();
+          record(classification.owner === "MCP_CONNECT_TIMEOUT" ? "expired" : "cancelled");
+          return classification.error;
+        })()
+      : (() => {
+          record("completed");
+          return new AppError(
+            "MCP_UNAVAILABLE",
+            "The DataHub MCP subprocess could not be started.",
+          );
+        })();
 
     try {
       await closeOwnedClient();
@@ -214,16 +236,25 @@ export async function connectOwnedDataHubMcpClient(
       // Startup cleanup is bounded and secondary to the classified startup failure.
     }
     throw primary;
+  } finally {
+    connectionScope.dispose();
   }
 }
 
 export async function connectDataHubMcp(
   config: RuntimeConfig,
-  signal?: AbortSignal,
+  scope: ClassifiedAbortScope,
+  recordDeadlineEvent: RecordDeadlineEvent,
 ): Promise<McpToolClient> {
-  signal?.throwIfAborted();
+  if (scope.signal.aborted) throw scope.classifyAbort().error;
   const client = new Client({ name: "lineageguard-ai", version: "0.1.0" });
   const transport = new StdioClientTransport(dataHubMcpServerParameters(config));
   transport.stderr?.on("data", boundedStderrCollector([config.datahubGmsToken]));
-  return connectOwnedDataHubMcpClient(client, transport, [config.datahubGmsToken], signal);
+  return connectOwnedDataHubMcpClient(
+    client,
+    transport,
+    [config.datahubGmsToken],
+    scope,
+    recordDeadlineEvent,
+  );
 }

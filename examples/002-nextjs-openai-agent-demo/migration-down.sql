@@ -1,0 +1,4 @@
+-- LineageGuard AI — NON-EXECUTABLE TEMPLATE
+-- Evidence: datahub:target-dataset, datahub:source-column:customer_id, datahub:downstream:001, datahub:downstream:002, datahub:downstream:003, datahub:downstream:004, datahub:downstream:005, datahub:downstream:006, datahub:downstream:007, datahub:downstream:008, datahub:downstream:009, datahub:downstream:010, datahub:downstream:011, datahub:downstream:012, datahub:downstream:013, datahub:downstream:014, datahub:downstream:015, datahub:downstream:016, datahub:downstream:017, datahub:downstream:018, datahub:downstream:019, datahub:downstream:020, datahub:downstream:021, datahub:downstream:022, datahub:downstream:023, datahub:downstream:024
+-- Keep customer_id available during rollback.
+-- Remove customer_key only after a human confirms that no writes would be lost.

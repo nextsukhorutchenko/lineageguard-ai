@@ -1,18 +1,24 @@
-import { randomBytes } from "node:crypto";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import {
   runImpactAnalysis,
   type RunImpactAnalysisDependencies,
 } from "./app/run-impact-analysis.js";
-import { loadRuntimeConfig, type RuntimeConfig } from "./config/runtime-config.js";
+import { assertTrustedRunsRoot } from "./artifacts/run-envelope-files.js";
+import {
+  loadRuntimeConfig,
+  type EnvironmentMap,
+  type RuntimeConfig,
+} from "./config/runtime-config.js";
 import type { DataHubCatalog } from "./datahub/catalog.js";
-import { DataHubMcpCatalog } from "./datahub/mcp/datahub-mcp-catalog.js";
-import { connectDataHubMcp } from "./datahub/mcp/mcp-client.js";
+import { createDataHubCatalog } from "./datahub/create-catalog.js";
 import { parseChangeIntent } from "./domain/change-intent.js";
 import type { RunStatus } from "./domain/run-result.js";
 import { AppError, type AppErrorCode } from "./errors/app-error.js";
+import type { RecordDeadlineEvent } from "./runtime/deadline-events.js";
+import { createRequestAbortScope, type ClassifiedAbortScope } from "./runtime/deadlines.js";
 import { sanitizeTerminalText } from "./security/sanitize-output.js";
+import { createRunId } from "./runs/create-run-id.js";
 
 const help = [
   "Usage: lineageguard --request <text> [--runs-dir <path>]",
@@ -33,8 +39,10 @@ const guidance = {
   NEEDS_USER_CLARIFICATION: "Choose one of the listed dataset URNs and retry with that exact URN.",
   COLUMN_NOT_FOUND: "Choose one of the actual schema fields listed above.",
   ARTIFACT_WRITE_FAILED:
-    "Verify that the configured runs directory is writable and has no symbolic-link or junction ancestors.",
-} as const;
+    "Verify that the configured runs root is a pre-created writable real directory with no symbolic-link or junction path components.",
+  GENERATION_FAILED: "Retry migration generation without changing the validated DataHub context.",
+  CANCELLED: "The operation was cancelled. Retry when ready.",
+} as const satisfies Readonly<Record<Exclude<AppErrorCode, "INVALID_REQUEST">, string>>;
 
 const exitCodes = {
   INVALID_REQUEST: 2,
@@ -44,6 +52,8 @@ const exitCodes = {
   DATAHUB_UNAVAILABLE: 3,
   MCP_UNAVAILABLE: 3,
   ARTIFACT_WRITE_FAILED: 4,
+  GENERATION_FAILED: 5,
+  CANCELLED: 130,
 } as const satisfies Readonly<Record<AppErrorCode, number>>;
 
 type SuccessfulStatus = Extract<
@@ -54,7 +64,7 @@ type SuccessfulStatus = Extract<
 interface CliAnalysisResult {
   readonly status: SuccessfulStatus;
   readonly runId: string;
-  readonly artifactPath: string;
+  readonly artifactFilename: "impact-report.md";
 }
 
 interface TextWriter {
@@ -68,20 +78,18 @@ interface InterruptSignal {
 
 export interface CliDependencies {
   readonly clock: () => Date;
-  readonly environment: NodeJS.ProcessEnv;
+  readonly environment: EnvironmentMap;
   readonly stdout: TextWriter;
   readonly stderr: TextWriter;
   readonly signal: InterruptSignal;
   readonly shutdownTimeoutMs: number;
-  readonly createCatalog: (config: RuntimeConfig, signal: AbortSignal) => Promise<DataHubCatalog>;
+  readonly createCatalog: (
+    config: RuntimeConfig,
+    scope: ClassifiedAbortScope,
+    recordDeadlineEvent: RecordDeadlineEvent,
+  ) => Promise<DataHubCatalog>;
   readonly runImpactAnalysis: (input: RunImpactAnalysisDependencies) => Promise<CliAnalysisResult>;
 }
-
-export const createRunId = (now: Date): string =>
-  `${now
-    .toISOString()
-    .replace(/[-:]/g, "")
-    .replace(/\.\d{3}Z$/, "Z")}-${randomBytes(4).toString("hex")}`;
 
 function parseCliArguments(argv: readonly string[]): {
   readonly help: boolean;
@@ -145,10 +153,6 @@ function diagnosticDetails(error: AppError, secrets: readonly string[]): string 
       .join("")}`;
   }
 
-  if (error.code === "ARTIFACT_WRITE_FAILED" && typeof error.details.attemptedPath === "string") {
-    return `Attempted report path: ${sanitizeTerminalText(error.details.attemptedPath, secrets)}\n`;
-  }
-
   return "";
 }
 
@@ -158,20 +162,14 @@ function writeAppError(
   secrets: readonly string[] = [],
 ): number {
   const recovery = error.code === "INVALID_REQUEST" ? undefined : guidance[error.code];
+  const message =
+    error.code === "ARTIFACT_WRITE_FAILED" ? "The artifact operation failed." : error.message;
   stderr.write(
-    `Status: ${error.code}\n${sanitizeTerminalText(error.message, secrets)}\n${diagnosticDetails(error, secrets)}${
+    `Status: ${error.code}\n${sanitizeTerminalText(message, secrets)}\n${diagnosticDetails(error, secrets)}${
       recovery === undefined ? "" : `Recovery: ${recovery}\n`
     }`,
   );
   return exitCodes[error.code];
-}
-
-async function defaultCreateCatalog(
-  config: RuntimeConfig,
-  signal: AbortSignal,
-): Promise<DataHubCatalog> {
-  const client = await connectDataHubMcp(config, signal);
-  return new DataHubMcpCatalog(client, [config.datahubGmsToken]);
 }
 
 async function waitForSettlementWithin(work: Promise<unknown>, timeoutMs: number): Promise<void> {
@@ -196,7 +194,7 @@ const defaultDependencies: CliDependencies = {
   stderr: process.stderr,
   signal: process,
   shutdownTimeoutMs: 5_000,
-  createCatalog: defaultCreateCatalog,
+  createCatalog: createDataHubCatalog,
   runImpactAnalysis,
 };
 
@@ -237,17 +235,30 @@ export async function runCli(
 
   let config: RuntimeConfig;
   try {
-    config = loadRuntimeConfig(dependencies.environment);
-  } catch {
+    config = loadRuntimeConfig(dependencies.environment, arguments_.runsRoot);
+  } catch (error) {
+    if (error instanceof AppError) return writeAppError(error, dependencies.stderr);
     dependencies.stderr.write(
       "Status: MCP_UNAVAILABLE\nConfiguration is invalid. Verify DATAHUB_GMS_URL and DATAHUB_GMS_TOKEN.\n",
     );
     return 3;
   }
   const outputSecrets = [config.datahubGmsToken];
+  let trustedRunsRoot: string;
+  try {
+    trustedRunsRoot = await assertTrustedRunsRoot(config.runsRoot);
+  } catch (error) {
+    const storageError =
+      error instanceof AppError
+        ? error
+        : new AppError("ARTIFACT_WRITE_FAILED", "Unable to persist the run.");
+    return writeAppError(storageError, dependencies.stderr, outputSecrets);
+  }
 
   try {
     const abortController = new AbortController();
+    const requestScope = createRequestAbortScope(abortController.signal);
+    const ignoreDeadlineEvent: RecordDeadlineEvent = () => undefined;
     let catalog: DataHubCatalog | undefined;
     let interruptedByUser = false;
     let resolveInterrupted!: (outcome: { readonly kind: "interrupted" }) => void;
@@ -264,16 +275,18 @@ export async function runCli(
     dependencies.signal.once("SIGINT", onInterrupt);
 
     try {
-      const catalogCreation = dependencies.createCatalog(config, abortController.signal).then(
-        async (created) => {
-          const ownedCatalog = closeOnce(created);
-          if (abortController.signal.aborted) {
-            await ownedCatalog.close().catch(() => undefined);
-          }
-          return { kind: "created" as const, catalog: ownedCatalog };
-        },
-        (error: unknown) => ({ kind: "failed" as const, error }),
-      );
+      const catalogCreation = dependencies
+        .createCatalog(config, requestScope, ignoreDeadlineEvent)
+        .then(
+          async (created) => {
+            const ownedCatalog = closeOnce(created);
+            if (abortController.signal.aborted) {
+              await ownedCatalog.close().catch(() => undefined);
+            }
+            return { kind: "created" as const, catalog: ownedCatalog };
+          },
+          (error: unknown) => ({ kind: "failed" as const, error }),
+        );
       const creationOutcome = await Promise.race([catalogCreation, interrupted]);
 
       if (interruptedByUser || creationOutcome.kind === "interrupted") {
@@ -295,7 +308,7 @@ export async function runCli(
           catalog,
           clock: dependencies.clock,
           runId: createRunId(dependencies.clock()),
-          runsRoot: arguments_.runsRoot ?? config.runsRoot,
+          runsRoot: trustedRunsRoot,
           signal: abortController.signal,
           secrets: outputSecrets,
         })
@@ -324,10 +337,11 @@ export async function runCli(
       }
 
       dependencies.stdout.write(
-        `Status: ${outcome.run.status}\nRun ID: ${sanitizeTerminalText(outcome.run.runId, outputSecrets)}\nReport: ${sanitizeTerminalText(outcome.run.artifactPath, outputSecrets)}\n`,
+        `Status: ${outcome.run.status}\nRun ID: ${sanitizeTerminalText(outcome.run.runId, outputSecrets)}\nReport: ${outcome.run.artifactFilename}\n`,
       );
       return 0;
     } finally {
+      requestScope.dispose();
       dependencies.signal.off("SIGINT", onInterrupt);
       if (catalog !== undefined && !interruptedByUser) {
         await catalog.close().catch(() => undefined);

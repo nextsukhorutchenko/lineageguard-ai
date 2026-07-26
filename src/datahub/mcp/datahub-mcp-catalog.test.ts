@@ -1,10 +1,13 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { calculateContextCoverage } from "../../domain/context-coverage.js";
 import { loadRuntimeConfig } from "../../config/runtime-config.js";
 import type { RequiredIncompleteReasonCode } from "../../domain/evidence.js";
 import { AppError } from "../../errors/app-error.js";
+import { createDeadline, createRequestAbortScope } from "../../runtime/deadlines.js";
 import {
   DataHubMcpCatalog,
   type McpToolClient,
@@ -418,7 +421,13 @@ describe("DataHubMcpCatalog owned boundary", () => {
         return new Promise<never>(() => undefined);
       },
     };
-    const operation = connectOwnedDataHubMcpClient(client, {} as never, ["secret-token"]);
+    const operation = connectOwnedDataHubMcpClient(
+      client,
+      {} as never,
+      ["secret-token"],
+      createRequestAbortScope(new AbortController().signal),
+      () => undefined,
+    );
     const rejected = expect(operation).rejects.toMatchObject({
       code: "MCP_UNAVAILABLE",
       message: "The DataHub MCP subprocess could not be started.",
@@ -457,7 +466,13 @@ describe("DataHubMcpCatalog owned boundary", () => {
         return new Promise<never>(() => undefined);
       },
     };
-    const operation = connectOwnedDataHubMcpClient(client, {} as never, [], caller.signal);
+    const operation = connectOwnedDataHubMcpClient(
+      client,
+      {} as never,
+      [],
+      createRequestAbortScope(caller.signal),
+      () => undefined,
+    );
     const outcome = operation.then(
       (value) => ({ value }),
       (error: unknown) => ({ error }),
@@ -477,6 +492,56 @@ describe("DataHubMcpCatalog owned boundary", () => {
     });
     expect("error" in settled && settled.error).not.toBe(classified);
     expect(closeCount).toBe(1);
+  });
+
+  it("closes exactly once when its classified connection deadline expires", async () => {
+    vi.useFakeTimers();
+    const request = createRequestAbortScope(new AbortController().signal);
+    const recorded: unknown[] = [];
+    let closeCount = 0;
+    const client = {
+      async connect(_transport: never, options?: { signal?: AbortSignal }) {
+        return new Promise<never>((_resolve, reject) => {
+          options?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          });
+        });
+      },
+      async listTools() {
+        return { tools: [] };
+      },
+      async callTool() {
+        return jsonResult({});
+      },
+      getServerVersion() {
+        return undefined;
+      },
+      async close() {
+        closeCount += 1;
+      },
+    };
+
+    const operation = connectOwnedDataHubMcpClient(client, {} as never, [], request, (event) =>
+      recorded.push(event),
+    );
+    const rejected = expect(operation).rejects.toMatchObject({
+      code: "MCP_UNAVAILABLE",
+      message: "The DataHub MCP connection exceeded its deadline.",
+    });
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await rejected;
+
+    expect(closeCount).toBe(1);
+    expect(recorded).toEqual([
+      {
+        kind: "MCP_CONNECT_TIMEOUT",
+        durationMs: 15_000,
+        attempt: 1,
+        outcome: "expired",
+      },
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 
@@ -628,6 +693,35 @@ describe("Task 1A bounded evidence collection", () => {
     expect(result.completeness).toMatchObject({ complete: true, pages: 2, itemCount: 51 });
     expect(result.items.filter(({ name }) => name === "order_details")).toHaveLength(2);
     expect(client.calls.at(-1)?.arguments.offset).toBe(50);
+  });
+
+  it("accepts the official search page-size count when the final page returns fewer results", async () => {
+    const searchResults = Array.from({ length: 12 }, (_, index) => ({
+      entity: {
+        urn: `urn:li:dataset:(official-search-${index})`,
+        name: index === 0 ? "order_details" : `other_${index}`,
+      },
+    }));
+    const client = new RecordingMcpClient([
+      jsonResult({
+        start: 0,
+        count: 50,
+        total: 12,
+        searchResults,
+      }),
+    ]);
+
+    const result = await new DataHubMcpCatalog(client).searchDatasets("order_details");
+
+    expect(result.completeness).toEqual({
+      complete: true,
+      pages: 1,
+      itemCount: 12,
+      offsets: [0],
+      reasonCodes: [],
+    });
+    expect(result.items).toHaveLength(12);
+    expect(client.calls).toHaveLength(1);
   });
 
   it.each([
@@ -1507,11 +1601,17 @@ describe("Task 1A capability boundary", () => {
       },
     };
 
-    const operation = connectOwnedDataHubMcpClient(client, {} as never, [], controller.signal);
+    const operation = connectOwnedDataHubMcpClient(
+      client,
+      {} as never,
+      [],
+      createRequestAbortScope(controller.signal),
+      () => undefined,
+    );
     await secondPageStarted;
     controller.abort();
 
-    await expect(operation).rejects.toMatchObject({ name: "AbortError" });
+    await expect(operation).rejects.toMatchObject({ code: "CANCELLED" });
     expect(listCalls).toBe(2);
     expect(closeCount).toBe(1);
   });
@@ -2275,15 +2375,78 @@ describe("DataHubMcpCatalog", () => {
 });
 
 describe("dataHubMcpServerParameters", () => {
+  it("classifies an already-cancelled request without exposing its reason or activating the SDK", async () => {
+    const secret = "secret-bearing-browser-abort";
+    const browser = new AbortController();
+    const scope = createRequestAbortScope(browser.signal);
+    const config = loadRuntimeConfig({
+      DATAHUB_GMS_URL: "http://localhost:8080",
+      DATAHUB_GMS_TOKEN: "local-test-token",
+      DATAHUB_MCP_UVX_PATH: resolve("custom-uvx"),
+      LINEAGEGUARD_RUNS_DIR: resolve("runs"),
+    });
+    const connect = vi.spyOn(Client.prototype, "connect");
+    const close = vi.spyOn(Client.prototype, "close");
+    const recordDeadlineEvent = vi.fn();
+    browser.abort(new Error(secret));
+
+    const error = await connectDataHubMcp(config, scope, recordDeadlineEvent).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(AppError);
+    expect(error).toMatchObject({
+      code: "CANCELLED",
+      message: "The workflow was cancelled.",
+      details: {},
+    });
+    expect(JSON.stringify(error)).not.toContain(secret);
+    expect(connect).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    expect(recordDeadlineEvent).not.toHaveBeenCalled();
+  });
+
+  it("preserves an already-expired classified deadline before SDK activation", async () => {
+    vi.useFakeTimers();
+    const request = createRequestAbortScope(new AbortController().signal);
+    const deadline = createDeadline(request, 1, "MCP_CONNECT_TIMEOUT");
+    const config = loadRuntimeConfig({
+      DATAHUB_GMS_URL: "http://localhost:8080",
+      DATAHUB_GMS_TOKEN: "local-test-token",
+      DATAHUB_MCP_UVX_PATH: resolve("custom-uvx"),
+      LINEAGEGUARD_RUNS_DIR: resolve("runs"),
+    });
+    const connect = vi.spyOn(Client.prototype, "connect");
+    const close = vi.spyOn(Client.prototype, "close");
+    const recordDeadlineEvent = vi.fn();
+    await vi.advanceTimersByTimeAsync(1);
+
+    const error = await connectDataHubMcp(config, deadline, recordDeadlineEvent).catch(
+      (caught: unknown) => caught,
+    );
+    deadline.dispose();
+
+    expect(error).toBeInstanceOf(AppError);
+    expect(error).toMatchObject({
+      code: "MCP_UNAVAILABLE",
+      message: "The DataHub MCP connection exceeded its deadline.",
+      details: {},
+    });
+    expect(connect).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    expect(recordDeadlineEvent).not.toHaveBeenCalled();
+  });
+
   it("pins DataHub MCP 0.6.0 to stdio with only the required read-only environment", () => {
     const config = loadRuntimeConfig({
       DATAHUB_GMS_URL: "http://localhost:8080",
       DATAHUB_GMS_TOKEN: "local-test-token",
-      DATAHUB_MCP_UVX_PATH: "custom-uvx",
+      DATAHUB_MCP_UVX_PATH: resolve("custom-uvx"),
+      LINEAGEGUARD_RUNS_DIR: resolve("runs"),
     });
 
     expect(dataHubMcpServerParameters(config)).toEqual({
-      command: "custom-uvx",
+      command: resolve("custom-uvx"),
       args: ["mcp-server-datahub@0.6.0", "--transport", "stdio"],
       env: {
         DATAHUB_GMS_URL: "http://localhost:8080",
@@ -2322,8 +2485,11 @@ describe("dataHubMcpServerParameters", () => {
     await catalog.close();
 
     expect(closeCount).toBe(1);
-    const connect: (config: ReturnType<typeof loadRuntimeConfig>) => Promise<McpToolClient> =
-      connectDataHubMcp;
+    const connect: (
+      config: ReturnType<typeof loadRuntimeConfig>,
+      scope: ReturnType<typeof createRequestAbortScope>,
+      recordDeadlineEvent: () => void,
+    ) => Promise<McpToolClient> = connectDataHubMcp;
     expect(connect).toBe(connectDataHubMcp);
   });
 

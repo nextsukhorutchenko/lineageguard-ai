@@ -1,5 +1,8 @@
 import { EventEmitter } from "node:events";
-import { describe, expect, it } from "vitest";
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   runImpactAnalysis as runImpactAnalysisReal,
   type RunImpactAnalysisDependencies,
@@ -14,13 +17,27 @@ import type {
 } from "./domain/evidence.js";
 import type { DatasetCandidate } from "./domain/resolve-dataset.js";
 import { AppError, type AppErrorCode } from "./errors/app-error.js";
-import { createRunId, runCli, type CliDependencies } from "./cli.js";
+import type { ClassifiedAbortScope } from "./runtime/deadlines.js";
+import { runCli, type CliDependencies } from "./cli.js";
 
 const REQUEST = "Rename column customer_id to customer_key in dataset snowflake:orders";
 const ENVIRONMENT = {
   DATAHUB_GMS_URL: "http://localhost:8080",
   DATAHUB_GMS_TOKEN: "secret-test-token",
+  DATAHUB_MCP_UVX_PATH: resolve("test-uvx"),
 };
+const SYNTHETIC_REDACTION_PATH = "C:\\synthetic-redaction-fixture";
+let cliSandbox: string;
+let defaultRunsRoot: string;
+
+beforeAll(async () => {
+  cliSandbox = await mkdtemp(join(tmpdir(), "lineageguard-cli-root-"));
+  defaultRunsRoot = await mkdtemp(join(cliSandbox, "runs-"));
+});
+
+afterAll(async () => {
+  await rm(cliSandbox, { recursive: true, force: true });
+});
 
 class TestCatalog implements DataHubCatalog {
   closeCount = 0;
@@ -70,12 +87,14 @@ function emptyCollection<T, R extends string = never>(): CollectionResult<T, R> 
 interface CliHarness {
   readonly catalog: TestCatalog;
   readonly dependencies: CliDependencies;
+  readonly createCatalogCalls: number;
+  readonly analysisCalls: number;
   readonly signal: EventEmitter;
   readonly stdout: string[];
   readonly stderr: string[];
   readonly received: {
     config?: RuntimeConfig;
-    catalogSignal?: AbortSignal;
+    catalogScope?: ClassifiedAbortScope;
     analysis?: RunImpactAnalysisDependencies;
   };
 }
@@ -84,7 +103,7 @@ function harness(
   analyze: CliDependencies["runImpactAnalysis"] = async (input) => ({
     status: "COMPLETED",
     runId: input.runId,
-    artifactPath: `${input.runsRoot}/${input.runId}/impact-report.md`,
+    artifactFilename: "impact-report.md",
   }),
   catalog = new TestCatalog(),
 ): CliHarness {
@@ -92,6 +111,27 @@ function harness(
   const stdout: string[] = [];
   const stderr: string[] = [];
   const received: CliHarness["received"] = {};
+  let createCatalogCalls = 0;
+  let analysisCalls = 0;
+  const dependencies: CliDependencies = {
+    clock: () => new Date("2026-07-22T12:34:56.789Z"),
+    environment: { ...ENVIRONMENT, LINEAGEGUARD_RUNS_DIR: defaultRunsRoot },
+    signal,
+    stdout: { write: (text) => stdout.push(text) },
+    stderr: { write: (text) => stderr.push(text) },
+    shutdownTimeoutMs: 25,
+    createCatalog: async (config, scope) => {
+      createCatalogCalls += 1;
+      received.config = config;
+      received.catalogScope = scope;
+      return catalog;
+    },
+    runImpactAnalysis: async (input) => {
+      analysisCalls += 1;
+      received.analysis = input;
+      return analyze(input);
+    },
+  };
 
   return {
     catalog,
@@ -99,22 +139,12 @@ function harness(
     stdout,
     stderr,
     received,
-    dependencies: {
-      clock: () => new Date("2026-07-22T12:34:56.789Z"),
-      environment: ENVIRONMENT,
-      signal,
-      stdout: { write: (text) => stdout.push(text) },
-      stderr: { write: (text) => stderr.push(text) },
-      shutdownTimeoutMs: 25,
-      createCatalog: async (config, signal_) => {
-        received.config = config;
-        received.catalogSignal = signal_;
-        return catalog;
-      },
-      runImpactAnalysis: async (input) => {
-        received.analysis = input;
-        return analyze(input);
-      },
+    dependencies,
+    get createCatalogCalls() {
+      return createCatalogCalls;
+    },
+    get analysisCalls() {
+      return analysisCalls;
     },
   };
 }
@@ -175,33 +205,143 @@ describe("runCli", () => {
     const test = harness(async (input) => ({
       status,
       runId: input.runId,
-      artifactPath: `reports/${input.runId}/impact-report.md`,
+      artifactFilename: "impact-report.md",
     }));
 
-    const exitCode = await runCli(
-      ["--request", REQUEST, "--runs-dir", "reports"],
-      test.dependencies,
-    );
+    const exitCode = await runCli(["--request", REQUEST], test.dependencies);
 
     expect(exitCode).toBe(0);
     expect(test.stdout.join("")).toMatch(
       new RegExp(
-        `^Status: ${status}\\nRun ID: 20260722T123456Z-[0-9a-f]{8}\\nReport: reports/20260722T123456Z-[0-9a-f]{8}/impact-report\\.md\\n$`,
+        `^Status: ${status}\\nRun ID: 20260722T123456Z-[0-9a-f]{8}\\nReport: impact-report\\.md\\n$`,
       ),
     );
     expect(test.stderr).toEqual([]);
-    expect(test.received.analysis).toMatchObject({ request: REQUEST, runsRoot: "reports" });
+    expect(test.stdout.join("")).not.toContain(defaultRunsRoot);
+    expect(test.stderr.join("")).not.toContain(defaultRunsRoot);
+    expect(test.received.analysis).toMatchObject({
+      request: REQUEST,
+      runsRoot: defaultRunsRoot,
+    });
     expect(test.received.analysis?.secrets).toEqual([ENVIRONMENT.DATAHUB_GMS_TOKEN]);
-    expect(test.received.analysis?.signal).toBe(test.received.catalogSignal);
-    expect(test.received.config).toMatchObject({ runsRoot: "runs" });
+    expect(test.received.analysis?.signal).toBe(test.received.catalogScope?.signal);
+    expect(test.received.config).toMatchObject({ runsRoot: defaultRunsRoot });
   });
 
-  it("uses the validated runs-directory default when no override is supplied", async () => {
+  it("uses the validated environment runs root when no override is supplied", async () => {
     const test = harness();
 
     await runCli(["--request", REQUEST], test.dependencies);
 
-    expect(test.received.analysis?.runsRoot).toBe("runs");
+    expect(test.received.analysis?.runsRoot).toBe(defaultRunsRoot);
+  });
+
+  it("rejects a missing runs root before catalog creation", async () => {
+    const test = harness();
+    const dependencies = { ...test.dependencies, environment: ENVIRONMENT };
+
+    const exitCode = await runCli(["--request", REQUEST], dependencies);
+
+    expect(exitCode).toBe(4);
+    expect(test.createCatalogCalls).toBe(0);
+    expect(test.analysisCalls).toBe(0);
+    expect(test.stderr.join("")).toContain("Status: ARTIFACT_WRITE_FAILED");
+  });
+
+  it.each([
+    ["relative environment root", "relative-environment-root", false],
+    ["relative flag overriding a valid environment", "relative-flag-root", true],
+  ] as const)("rejects a %s before catalog creation", async (_name, candidate, useFlag) => {
+    const test = harness();
+    const dependencies = {
+      ...test.dependencies,
+      environment: {
+        ...ENVIRONMENT,
+        LINEAGEGUARD_RUNS_DIR: useFlag ? defaultRunsRoot : candidate,
+      },
+    };
+
+    const exitCode = await runCli(
+      useFlag ? ["--request", REQUEST, "--runs-dir", candidate] : ["--request", REQUEST],
+      dependencies,
+    );
+
+    expect(exitCode).toBe(4);
+    expect(test.createCatalogCalls).toBe(0);
+    expect(test.analysisCalls).toBe(0);
+    expect(test.stderr.join("")).toContain("Status: ARTIFACT_WRITE_FAILED");
+    expect(test.stderr.join("")).not.toContain(candidate);
+  });
+
+  it("rejects an absolute missing root before catalog creation", async () => {
+    const candidate = join(cliSandbox, "missing-runs-root");
+    const test = harness();
+    const dependencies = {
+      ...test.dependencies,
+      environment: { ...ENVIRONMENT, LINEAGEGUARD_RUNS_DIR: candidate },
+    };
+
+    const exitCode = await runCli(["--request", REQUEST], dependencies);
+
+    expect(exitCode).toBe(4);
+    expect(test.createCatalogCalls).toBe(0);
+    expect(test.analysisCalls).toBe(0);
+    expect(test.stderr.join("")).toContain("Status: ARTIFACT_WRITE_FAILED");
+    expect(test.stderr.join("")).not.toContain(candidate);
+  });
+
+  it("rejects an absolute regular file before catalog creation", async () => {
+    const candidate = join(cliSandbox, "runs-file");
+    await writeFile(candidate, "not a directory", "utf8");
+    const test = harness();
+    const dependencies = {
+      ...test.dependencies,
+      environment: { ...ENVIRONMENT, LINEAGEGUARD_RUNS_DIR: candidate },
+    };
+
+    const exitCode = await runCli(["--request", REQUEST], dependencies);
+
+    expect(exitCode).toBe(4);
+    expect(test.createCatalogCalls).toBe(0);
+    expect(test.analysisCalls).toBe(0);
+    expect(test.stderr.join("")).toContain("Status: ARTIFACT_WRITE_FAILED");
+    expect(test.stderr.join("")).not.toContain(candidate);
+  });
+
+  it("rejects an absolute symlink or junction before catalog creation", async () => {
+    const target = join(cliSandbox, "runs-link-target");
+    const candidate = join(cliSandbox, "runs-link");
+    await mkdir(target);
+    await symlink(target, candidate, process.platform === "win32" ? "junction" : "dir");
+    const test = harness();
+    const dependencies = {
+      ...test.dependencies,
+      environment: { ...ENVIRONMENT, LINEAGEGUARD_RUNS_DIR: candidate },
+    };
+
+    const exitCode = await runCli(["--request", REQUEST], dependencies);
+
+    expect(exitCode).toBe(4);
+    expect(test.createCatalogCalls).toBe(0);
+    expect(test.analysisCalls).toBe(0);
+    expect(test.stderr.join("")).toContain("Status: ARTIFACT_WRITE_FAILED");
+    expect(test.stderr.join("")).not.toContain(candidate);
+  });
+
+  it("uses a valid absolute flag instead of the environment root", async () => {
+    const override = await mkdtemp(join(cliSandbox, "override-runs-"));
+    const canonicalOverride = await realpath(override);
+    const test = harness();
+
+    const exitCode = await runCli(
+      ["--request", REQUEST, "--runs-dir", override],
+      test.dependencies,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(test.createCatalogCalls).toBe(1);
+    expect(test.analysisCalls).toBe(1);
+    expect(test.received.analysis?.runsRoot).toBe(canonicalOverride);
   });
 
   it("delegates context and server identity while retaining exactly-once close", async () => {
@@ -211,7 +351,7 @@ describe("runCli", () => {
       expect(input.catalog.getServerInfo()).toEqual({ reportedServerName: "test-datahub" });
       await input.catalog.close();
       await input.catalog.close();
-      return { status: "COMPLETED", runId: input.runId, artifactPath: "report.md" };
+      return { status: "COMPLETED", runId: input.runId, artifactFilename: "impact-report.md" };
     }, catalog);
 
     await expect(runCli(["--request", REQUEST], test.dependencies)).resolves.toBe(0);
@@ -262,14 +402,14 @@ describe("runCli", () => {
     },
     {
       code: "ARTIFACT_WRITE_FAILED",
-      details: {
-        attemptedPath: `C:\\runs\\${ENVIRONMENT.DATAHUB_GMS_TOKEN}\u001b[2J\nforged\\impact-report.md`,
-      },
       exitCode: 4,
-      diagnostic:
-        "Attempted report path: C:\\runs\\[REDACTED]\\u001B[2J\\nforged\\impact-report.md\n",
       recovery:
-        "Verify that the configured runs directory is writable and has no symbolic-link or junction ancestors.",
+        "Verify that the configured runs root is a pre-created writable real directory with no symbolic-link or junction path components.",
+    },
+    {
+      code: "GENERATION_FAILED",
+      exitCode: 5,
+      recovery: "Retry migration generation without changing the validated DataHub context.",
     },
   ];
 
@@ -287,15 +427,39 @@ describe("runCli", () => {
       const actualExitCode = await runCli(["--request", REQUEST], test.dependencies);
 
       const expectedRecovery = recovery === undefined ? "" : `Recovery: ${recovery}\n`;
+      const expectedMessage =
+        code === "ARTIFACT_WRITE_FAILED"
+          ? "The artifact operation failed."
+          : `Safe ${code} message.`;
       expect(actualExitCode).toBe(exitCode);
       expect(test.stdout).toEqual([]);
       expect(test.stderr.join("")).toBe(
-        `Status: ${code}\nSafe ${code} message.\n${diagnostic}${expectedRecovery}`,
+        `Status: ${code}\n${expectedMessage}\n${diagnostic}${expectedRecovery}`,
       );
       expect(test.stderr.join("")).not.toContain(rawSecret);
       expect(test.stderr.join("")).not.toContain("raw dependency stderr");
     },
   );
+
+  it("maps typed cancellation to stable safe CLI output", async () => {
+    const secretAbortReason = "secret-abort-reason";
+    const test = harness(async () => {
+      const controller = new AbortController();
+      controller.abort(new Error(secretAbortReason));
+      throw new AppError("CANCELLED", "The run was cancelled.");
+    });
+
+    const exitCode = await runCli(["--request", REQUEST], test.dependencies);
+
+    expect(exitCode).toBe(130);
+    expect(test.stdout).toEqual([]);
+    expect(test.stderr.join("")).toBe(
+      "Status: CANCELLED\n" +
+        "The run was cancelled.\n" +
+        "Recovery: The operation was cancelled. Retry when ready.\n",
+    );
+    expect(test.stderr.join("")).not.toContain(secretAbortReason);
+  });
 
   it("neutralizes terminal controls and injected lines in external diagnostics", async () => {
     const test = harness(async () => {
@@ -324,14 +488,14 @@ describe("runCli", () => {
     const test = harness(async () => ({
       status: "COMPLETED",
       runId: token,
-      artifactPath: `C:\\runs\\${token}\\impact-report.md`,
+      artifactFilename: "impact-report.md",
     }));
 
     const exitCode = await runCli(["--request", REQUEST], test.dependencies);
 
     expect(exitCode).toBe(0);
     expect(test.stdout.join("")).toBe(
-      "Status: COMPLETED\nRun ID: [REDACTED]\nReport: C:\\runs\\[REDACTED]\\impact-report.md\n",
+      "Status: COMPLETED\nRun ID: [REDACTED]\nReport: impact-report.md\n",
     );
     expect(test.stdout.join("")).not.toContain(token);
   });
@@ -339,9 +503,10 @@ describe("runCli", () => {
   it("redacts the configured token from error messages and typed diagnostics", async () => {
     const token = ENVIRONMENT.DATAHUB_GMS_TOKEN;
     const test = harness(async () => {
-      throw new AppError("ARTIFACT_WRITE_FAILED", `Could not write ${token}.`, {
-        attemptedPath: `C:\\runs\\${token}\\impact-report.md`,
-      });
+      throw new AppError(
+        "ARTIFACT_WRITE_FAILED",
+        `Could not write ${SYNTHETIC_REDACTION_PATH}\\${token}.`,
+      );
     });
 
     const exitCode = await runCli(["--request", REQUEST], test.dependencies);
@@ -349,16 +514,22 @@ describe("runCli", () => {
     expect(exitCode).toBe(4);
     expect(test.stderr.join("")).toBe(
       "Status: ARTIFACT_WRITE_FAILED\n" +
-        "Could not write [REDACTED].\n" +
-        "Attempted report path: C:\\runs\\[REDACTED]\\impact-report.md\n" +
-        "Recovery: Verify that the configured runs directory is writable and has no symbolic-link or junction ancestors.\n",
+        "The artifact operation failed.\n" +
+        "Recovery: Verify that the configured runs root is a pre-created writable real directory with no symbolic-link or junction path components.\n",
     );
     expect(test.stderr.join("")).not.toContain(token);
+    expect(test.stderr.join("")).not.toContain(SYNTHETIC_REDACTION_PATH);
   });
 
   it("returns stable configuration guidance without exposing validation details", async () => {
     const test = harness();
-    const dependencies = { ...test.dependencies, environment: { DATAHUB_GMS_TOKEN: "secret" } };
+    const dependencies = {
+      ...test.dependencies,
+      environment: {
+        DATAHUB_GMS_TOKEN: "secret",
+        LINEAGEGUARD_RUNS_DIR: defaultRunsRoot,
+      },
+    };
 
     const exitCode = await runCli(["--request", REQUEST], dependencies);
 
@@ -434,7 +605,7 @@ describe("runCli", () => {
             resolve({
               status: "COMPLETED",
               runId: input.runId,
-              artifactPath: `${input.runsRoot}/${input.runId}/impact-report.md`,
+              artifactFilename: "impact-report.md",
             });
           input.signal.addEventListener("abort", abortObserved, { once: true });
           analysisStarted();
@@ -485,13 +656,5 @@ describe("runCli", () => {
     expect(test.catalog.closeCount).toBe(1);
     expect(test.stderr.join("")).toBe("Interrupted by the user.\n");
     expect(test.signal.listenerCount("SIGINT")).toBe(0);
-  });
-});
-
-describe("createRunId", () => {
-  it("uses compact UTC time and exactly four cryptographic random bytes", () => {
-    expect(createRunId(new Date("2026-07-22T12:34:56.789Z"))).toMatch(
-      /^20260722T123456Z-[0-9a-f]{8}$/,
-    );
   });
 });

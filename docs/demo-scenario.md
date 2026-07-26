@@ -26,9 +26,9 @@ uv venv --seed --python 3.11 .venv
 .\.venv\Scripts\python.exe -m pip install acryl-datahub==1.6.0.15
 .\.venv\Scripts\python.exe --version
 .\.venv\Scripts\datahub.exe version
+$env:PYTHONUTF8 = "1"
 .\.venv\Scripts\datahub.exe docker quickstart --version v1.6.0 --pull-images
 Invoke-RestMethod http://localhost:8080/health
-$env:PYTHONUTF8 = "1"
 .\.venv\Scripts\datahub.exe init --username datahub --password datahub
 ```
 
@@ -65,7 +65,9 @@ Set the local token only in the current shell. The following command extracts it
 ```powershell
 $env:DATAHUB_GMS_URL = "http://localhost:8080"
 $env:DATAHUB_GMS_TOKEN = & .\.venv\Scripts\python.exe -c "from pathlib import Path; import yaml; config=yaml.safe_load(Path(r'$env:USERPROFILE\.datahubenv').read_text(encoding='utf-8')); find=lambda value: next((found for key,item in value.items() for found in ([item] if key.lower()=='token' and isinstance(item,str) else [find(item)] if isinstance(item,dict) else [] ) if found), None); token=find(config); assert token and isinstance(token,str); print(token)"
-$env:DATAHUB_MCP_UVX_PATH = "uvx"
+$env:DATAHUB_MCP_UVX_PATH = (Get-Command uvx -ErrorAction Stop).Source
+& $env:DATAHUB_MCP_UVX_PATH mcp-server-datahub@0.6.0 --version
+if ($LASTEXITCODE -ne 0) { throw "Pinned MCP prewarm failed." }
 pnpm test:integration
 pnpm tsx scripts/capture-datahub-fixtures.ts
 ```
@@ -81,6 +83,34 @@ The capture command prints a repository-relative path beneath `tmp/datahub-fixtu
 | `entity-context-order-details-impact.json` | Allowlisted target and downstream entity context. |
 
 The candidate is replay-compatible review evidence rather than a current live-service claim. The entity-context schema rejects fields named `email`, `profile`, `relatedDocuments`, `rawSql`, `token`, and `diagnostics`, and rejects descriptions longer than 2,000 characters; serialization redacts the configured DataHub token literal. This does not claim a general content scan for every SQL or credential-shaped string. An unmarked candidate is untrusted even if its files look complete: do not manually create, copy, or add `.complete`; delete it and rerun capture. Promotion into `tests/fixtures/datahub/` is a separate owner-approved deterministic migration; the `.complete` marker is never promoted.
+
+## Run the Live OpenAI Acceptance
+
+Keep the DataHub variables from the MCP proof in the current shell. Supply the OpenAI key through hidden input, disable provider tracing explicitly, and remove both credentials when the test ends:
+
+```powershell
+$secureOpenAIKey = Read-Host "OpenAI API key (input hidden)" -AsSecureString
+try {
+  [Environment]::SetEnvironmentVariable(
+    "OPENAI_API_KEY",
+    [Net.NetworkCredential]::new("", $secureOpenAIKey).Password,
+    "Process"
+  )
+  Remove-Variable secureOpenAIKey
+  $env:RUN_LIVE_OPENAI_TEST = "1"
+  $env:OPENAI_AGENTS_DISABLE_TRACING = "1"
+  pnpm test:openai
+  if ($LASTEXITCODE -ne 0) { throw "Live OpenAI acceptance failed." }
+} finally {
+  Remove-Variable secureOpenAIKey -ErrorAction SilentlyContinue
+  Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
+  Remove-Item Env:RUN_LIVE_OPENAI_TEST -ErrorAction SilentlyContinue
+  Remove-Item Env:OPENAI_AGENTS_DISABLE_TRACING -ErrorAction SilentlyContinue
+  Remove-Item Env:DATAHUB_GMS_TOKEN -ErrorAction SilentlyContinue
+}
+```
+
+The passing acceptance requires status `COMPLETED`, deterministic impact 24 downstream assets / 11 column-confirmed assets / score 90, and exactly four validated artifacts. It does not execute SQL or mutate DataHub.
 
 ## Selected Change
 
@@ -111,3 +141,15 @@ These counts and mappings are verified fixture facts for the pinned datapack ver
 The certified golden replay has complete search, schema, table-lineage, and column-lineage collections for the stated 24/11 facts. If any required collection is incomplete, LineageGuard uses `INCOMPLETE_EVIDENCE`: collected counts are lower bounds, incomplete search/schema cannot prove absence, and incomplete lineage cannot justify direct-rename guidance. Entity-context gaps are reported separately as Context Coverage and do not alone select that status.
 
 Official datapack index: <https://github.com/datahub-project/static-assets/blob/main/datapacks/showcase-ecommerce/index.json>
+
+## Three-Minute Video Script
+
+1. 0:00–0:20 — Frame the Metadata-Aware Code Generation & Development problem and trigger.
+2. 0:20–0:35 — Show the LIVE/REPLAY badge and state which evidence source is active.
+3. 0:35–1:05 — Verify the DataHub dataset, schema, table lineage, column lineage, and ownership.
+4. 1:05–1:30 — Show Evidence Completeness, Context Coverage, and Runtime Proof as separate panels.
+5. 1:30–1:50 — Show 24 downstream, 11 column-confirmed, risk score 90, and BLOCK_DIRECT_RENAME.
+6. 1:50–2:35 — Run analyze_rename_change and generate_migration_package; inspect four artifacts and the non-executable physical-name gate.
+7. 2:35–2:55 — Close on mutations disabled, read-only/no-SQL behavior, human approval, and practical team value.
+
+If DataHub or OpenAI is unavailable, restart in `REPLAY` mode. Replay is recorded fixture execution.

@@ -27,7 +27,7 @@ __pycache__/
 .mcp/
 
 # Generated run artifacts
-runs/
+/runs/
 
 # Logs and temporary files
 *.log
@@ -44,3 +44,6 @@ tmp/
 .DS_Store
 Thumbs.db
 Desktop.ini
+.tmp/
+playwright-report/
+test-results/

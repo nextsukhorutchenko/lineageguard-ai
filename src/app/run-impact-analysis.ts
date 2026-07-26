@@ -1,4 +1,3 @@
-import { resolve } from "node:path";
 import { renderImpactReport } from "../artifacts/render-impact-report.js";
 import { writeRunArtifact } from "../artifacts/write-run-artifacts.js";
 import type { DataHubCatalog } from "../datahub/catalog.js";
@@ -42,17 +41,14 @@ export interface ImpactReportDraft {
 }
 
 export interface AnalysisRun extends ImpactReportDraft {
-  readonly artifactPath: string;
+  readonly artifactFilename: "impact-report.md";
 }
 
 export class ImpactReportPersistenceError extends AppError {
-  constructor(
-    readonly report: ImpactReportDraft,
-    readonly attemptedPath: string,
-  ) {
-    super("ARTIFACT_WRITE_FAILED", "The impact report could not be persisted.", {
-      attemptedPath,
-    });
+  readonly artifactFilename = "impact-report.md" as const;
+
+  constructor(readonly report: ImpactReportDraft) {
+    super("ARTIFACT_WRITE_FAILED", "The impact report could not be persisted.");
     this.name = "ImpactReportPersistenceError";
   }
 }
@@ -68,10 +64,8 @@ interface BuildImpactReportDraftInput {
 
 type AnalysisOutcome =
   | {
-      readonly kind: "readyToPublish";
+      readonly kind: "ready";
       readonly report: ImpactReportDraft;
-      readonly markdown: string;
-      readonly attemptedPath: string;
     }
   | {
       readonly kind: "failed";
@@ -82,6 +76,14 @@ const assumptions = [
   "Dataset resolution required one exact URN, name, or platform-qualified name match.",
   "Downstream lineage inspection was bounded to two hops.",
 ] as const;
+
+function cancellationError(): AppError {
+  return new AppError("CANCELLED", "The run was cancelled.");
+}
+
+function throwIfCancelled(signal: AbortSignal): void {
+  if (signal.aborted) throw cancellationError();
+}
 
 function attachSuppressedFailure(error: unknown, failure: SuppressedFailure): void {
   try {
@@ -221,16 +223,18 @@ function buildImpactReportDraft(input: BuildImpactReportDraftInput): ImpactRepor
   };
 }
 
-export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Promise<AnalysisRun> {
+export async function analyzeImpact(
+  deps: RunImpactAnalysisDependencies,
+): Promise<ImpactReportDraft> {
   let outcome: AnalysisOutcome;
 
   try {
-    deps.signal.throwIfAborted();
+    throwIfCancelled(deps.signal);
     const intent = parseChangeIntent(deps.request);
     const search = await deps.catalog.searchDatasets(intent.datasetHint, {
       signal: deps.signal,
     });
-    deps.signal.throwIfAborted();
+    throwIfCancelled(deps.signal);
     let target;
     if (search.completeness.complete) {
       target = resolveDataset(intent, search.items);
@@ -243,7 +247,7 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
       target = resolveDataset(intent, [canonicalMatch]);
     }
     const schema = await deps.catalog.listSchemaFields(target.urn, { signal: deps.signal });
-    deps.signal.throwIfAborted();
+    throwIfCancelled(deps.signal);
     let sourceColumn;
     try {
       sourceColumn = requireSourceColumn(schema.items, intent.sourceColumn);
@@ -257,18 +261,18 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
       maxHops: 2,
       signal: deps.signal,
     });
-    deps.signal.throwIfAborted();
+    throwIfCancelled(deps.signal);
     const columnLineage = await deps.catalog.getDownstreamLineage(target.urn, {
       column: sourceColumn.fieldPath,
       maxHops: 2,
       signal: deps.signal,
     });
-    deps.signal.throwIfAborted();
+    throwIfCancelled(deps.signal);
     const relevantUrns = [target.urn, ...tableLineage.items.map(({ urn }) => urn)];
     const entityContext = await deps.catalog.getEntityContext(relevantUrns, {
       signal: deps.signal,
     });
-    deps.signal.throwIfAborted();
+    throwIfCancelled(deps.signal);
     const evidenceCompleteness = {
       complete:
         search.completeness.complete &&
@@ -307,23 +311,22 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
       evidence,
       assessment,
     });
-    deps.signal.throwIfAborted();
-    const markdown = renderImpactReport(report, deps.secrets);
-    deps.signal.throwIfAborted();
+    throwIfCancelled(deps.signal);
     outcome = {
-      kind: "readyToPublish",
+      kind: "ready",
       report,
-      markdown,
-      attemptedPath: resolve(deps.runsRoot, report.runId, "impact-report.md"),
     };
   } catch (error) {
-    outcome = { kind: "failed", error };
+    outcome = {
+      kind: "failed",
+      error: deps.signal.aborted ? cancellationError() : error,
+    };
   }
 
   try {
     await deps.catalog.close();
   } catch (closeError) {
-    if (outcome.kind === "readyToPublish") throw closeError;
+    if (outcome.kind === "ready") throw closeError;
 
     const failure: SuppressedFailure = {
       code: "MCP_UNAVAILABLE",
@@ -334,23 +337,31 @@ export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Pr
 
   if (outcome.kind === "failed") throw outcome.error;
 
-  deps.signal.throwIfAborted();
+  throwIfCancelled(deps.signal);
+  return outcome.report;
+}
 
-  let artifactPath: string;
+export async function runImpactAnalysis(deps: RunImpactAnalysisDependencies): Promise<AnalysisRun> {
+  const report = await analyzeImpact(deps);
+  const markdown = renderImpactReport(report, deps.secrets);
+  throwIfCancelled(deps.signal);
+
+  let artifactFilename: "impact-report.md";
   try {
-    artifactPath = await writeRunArtifact({
+    artifactFilename = await writeRunArtifact({
       runsRoot: deps.runsRoot,
-      runId: outcome.report.runId,
+      runId: report.runId,
       filename: "impact-report.md",
-      content: outcome.markdown,
+      content: markdown,
+      status: report.status,
       signal: deps.signal,
     });
   } catch (error) {
     if (error instanceof AppError && error.code === "ARTIFACT_WRITE_FAILED") {
-      throw new ImpactReportPersistenceError(outcome.report, outcome.attemptedPath);
+      throw new ImpactReportPersistenceError(report);
     }
     throw error;
   }
 
-  return { ...outcome.report, artifactPath };
+  return { ...report, artifactFilename };
 }
