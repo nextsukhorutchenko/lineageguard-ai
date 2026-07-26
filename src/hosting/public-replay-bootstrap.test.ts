@@ -36,6 +36,19 @@ function publicEnvironment(
   };
 }
 
+function directoryStats(
+  dev: number,
+  ino: number,
+  options: { readonly directory?: boolean; readonly symbolicLink?: boolean } = {},
+) {
+  return {
+    dev,
+    ino,
+    isDirectory: () => options.directory ?? true,
+    isSymbolicLink: () => options.symbolicLink ?? false,
+  };
+}
+
 afterEach(async () => {
   await Promise.all(
     ownedSandboxes.splice(0).map(async (sandbox) => {
@@ -49,23 +62,27 @@ describe("preparePublicReplayEnvironment", () => {
     const sandbox = await freshSandbox();
     const runsRoot = join(sandbox, "runs");
     const mkdirCalls: Array<{ readonly path: string; readonly mode: number }> = [];
-    const chmodCalls: Array<{ readonly path: string; readonly mode: number }> = [];
-
-    const prepared = await preparePublicReplayEnvironment(publicEnvironment(runsRoot), {
-      mkdir: async (path, options) => {
+    let pathnameChmodCalled = false;
+    const dependencies = {
+      chmod: async (path: string, mode: number) => {
+        pathnameChmodCalled = true;
+        await chmod(path, mode);
+      },
+      mkdir: async (path: string, options: { readonly mode: number }) => {
         mkdirCalls.push({ path, mode: options.mode });
         await mkdir(path, options);
       },
-      chmod: async (path, mode) => {
-        chmodCalls.push({ path, mode });
-        await chmod(path, mode);
-      },
-    });
+    };
+
+    const prepared = await preparePublicReplayEnvironment(
+      publicEnvironment(runsRoot),
+      dependencies,
+    );
 
     expect(prepared.runsRoot).toBe(await realpath(runsRoot));
     expect((await lstat(runsRoot)).isDirectory()).toBe(true);
     expect(mkdirCalls).toEqual([{ path: runsRoot, mode: 0o700 }]);
-    expect(chmodCalls).toEqual([{ path: runsRoot, mode: 0o700 }]);
+    expect(pathnameChmodCalled).toBe(false);
   });
 
   it("does not recursively create a missing parent", async () => {
@@ -123,23 +140,21 @@ describe("preparePublicReplayEnvironment", () => {
   it("rejects a symbolic-link root before changing permissions", async () => {
     const sandbox = await freshSandbox();
     const runsRoot = join(sandbox, "runs");
-    let chmodCalled = false;
+    let openDirectoryCalled = false;
 
     await expect(
       preparePublicReplayEnvironment(publicEnvironment(runsRoot), {
         mkdir: async () => {
           throw Object.assign(new Error("exists"), { code: "EEXIST" });
         },
-        lstat: async () => ({
-          isDirectory: () => true,
-          isSymbolicLink: () => true,
-        }),
-        chmod: async () => {
-          chmodCalled = true;
+        lstat: async () => directoryStats(1, 1, { symbolicLink: true }),
+        openDirectory: async () => {
+          openDirectoryCalled = true;
+          throw new Error("must not open");
         },
       }),
     ).rejects.toThrow("Public replay environment is invalid.");
-    expect(chmodCalled).toBe(false);
+    expect(openDirectoryCalled).toBe(false);
   });
 
   it("rejects a root whose canonical path differs", async () => {
@@ -265,6 +280,256 @@ describe("preparePublicReplayEnvironment", () => {
       preparePublicReplayEnvironment(publicEnvironment(runsRoot), dependencies),
     ).rejects.toThrow("Public replay environment is invalid.");
   });
+
+  it("fails closed when a symlink replaces the root before no-follow open", async () => {
+    const sandbox = await freshSandbox();
+    const runsRoot = join(sandbox, "runs");
+    let unrelatedTargetMode = 0o755;
+    let openedFlags: number | undefined;
+    const dependencies = {
+      platform: "linux" as const,
+      directoryOpenFlags: 0x3_0000,
+      mkdir: async () => {
+        throw Object.assign(new Error("exists"), { code: "EEXIST" });
+      },
+      lstat: async () => directoryStats(11, 12),
+      openDirectory: async (_path: string, flags: number) => {
+        openedFlags = flags;
+        throw Object.assign(new Error("replacement symlink"), { code: "ELOOP" });
+      },
+      chmod: async () => {
+        unrelatedTargetMode = 0o700;
+      },
+      realpath: async () => runsRoot,
+      access: async () => undefined,
+      assertRunsRoot: async () => runsRoot,
+    };
+
+    await expect(
+      preparePublicReplayEnvironment(publicEnvironment(runsRoot), dependencies),
+    ).rejects.toThrow("Public replay environment is invalid.");
+    expect(openedFlags).toBe(0x3_0000);
+    expect(unrelatedTargetMode).toBe(0o755);
+  });
+
+  it("fails closed when the same path becomes a symlink after handle open", async () => {
+    const sandbox = await freshSandbox();
+    const runsRoot = join(sandbox, "runs");
+    let pathnameChecks = 0;
+    let originalMode = 0o755;
+    let unrelatedTargetMode = 0o755;
+    let handleClosed = false;
+    const dependencies = {
+      platform: "linux" as const,
+      directoryOpenFlags: 0x3_0000,
+      mkdir: async () => {
+        throw Object.assign(new Error("exists"), { code: "EEXIST" });
+      },
+      lstat: async () => {
+        pathnameChecks += 1;
+        return pathnameChecks === 1
+          ? directoryStats(21, 22)
+          : directoryStats(31, 32, { symbolicLink: true });
+      },
+      openDirectory: async () => ({
+        stat: async () => directoryStats(21, 22),
+        chmod: async (mode: number) => {
+          originalMode = mode;
+        },
+        close: async () => {
+          handleClosed = true;
+        },
+      }),
+      chmod: async () => {
+        unrelatedTargetMode = 0o700;
+      },
+      realpath: async () => runsRoot,
+      access: async () => undefined,
+      assertRunsRoot: async () => runsRoot,
+    };
+
+    await expect(
+      preparePublicReplayEnvironment(publicEnvironment(runsRoot), dependencies),
+    ).rejects.toThrow("Public replay environment is invalid.");
+    expect(originalMode).toBe(0o700);
+    expect(unrelatedTargetMode).toBe(0o755);
+    expect(handleClosed).toBe(true);
+  });
+
+  it("rejects a directory-handle identity mismatch before permission mutation", async () => {
+    const sandbox = await freshSandbox();
+    const runsRoot = join(sandbox, "runs");
+    let handleChmodCalled = false;
+    let handleClosed = false;
+    const dependencies = {
+      platform: "linux" as const,
+      directoryOpenFlags: 0x3_0000,
+      mkdir: async () => {
+        throw Object.assign(new Error("exists"), { code: "EEXIST" });
+      },
+      lstat: async () => directoryStats(41, 42),
+      openDirectory: async () => ({
+        stat: async () => directoryStats(51, 52),
+        chmod: async () => {
+          handleChmodCalled = true;
+        },
+        close: async () => {
+          handleClosed = true;
+        },
+      }),
+      chmod: async () => undefined,
+      realpath: async () => runsRoot,
+      access: async () => undefined,
+      assertRunsRoot: async () => runsRoot,
+    };
+
+    await expect(
+      preparePublicReplayEnvironment(publicEnvironment(runsRoot), dependencies),
+    ).rejects.toThrow("Public replay environment is invalid.");
+    expect(handleChmodCalled).toBe(false);
+    expect(handleClosed).toBe(true);
+  });
+
+  it("rejects a canonical mismatch before opening or changing the directory", async () => {
+    const sandbox = await freshSandbox();
+    const runsRoot = join(sandbox, "runs");
+    let handleOpened = false;
+    let handleChmodCalled = false;
+    const dependencies = {
+      platform: "linux" as const,
+      directoryOpenFlags: 0x3_0000,
+      mkdir: async () => {
+        throw Object.assign(new Error("exists"), { code: "EEXIST" });
+      },
+      lstat: async () => directoryStats(56, 57),
+      openDirectory: async () => {
+        handleOpened = true;
+        return {
+          stat: async () => directoryStats(56, 57),
+          chmod: async () => {
+            handleChmodCalled = true;
+          },
+          close: async () => undefined,
+        };
+      },
+      chmod: async () => undefined,
+      realpath: async () => join(sandbox, "different-root"),
+      access: async () => undefined,
+      assertRunsRoot: async () => runsRoot,
+    };
+
+    await expect(
+      preparePublicReplayEnvironment(publicEnvironment(runsRoot), dependencies),
+    ).rejects.toThrow("Public replay environment is invalid.");
+    expect(handleOpened).toBe(false);
+    expect(handleChmodCalled).toBe(false);
+  });
+
+  it("fails closed when directory-handle stat is uncertain", async () => {
+    const sandbox = await freshSandbox();
+    const runsRoot = join(sandbox, "runs");
+    let handleClosed = false;
+    const dependencies = {
+      platform: "linux" as const,
+      directoryOpenFlags: 0x3_0000,
+      mkdir: async () => {
+        throw Object.assign(new Error("exists"), { code: "EEXIST" });
+      },
+      lstat: async () => directoryStats(61, 62),
+      openDirectory: async () => ({
+        stat: async () => {
+          throw new Error("private fstat detail");
+        },
+        chmod: async () => undefined,
+        close: async () => {
+          handleClosed = true;
+        },
+      }),
+      chmod: async () => undefined,
+      realpath: async () => runsRoot,
+      access: async () => undefined,
+      assertRunsRoot: async () => runsRoot,
+    };
+
+    await expect(
+      preparePublicReplayEnvironment(publicEnvironment(runsRoot), dependencies),
+    ).rejects.toThrow("Public replay environment is invalid.");
+    expect(handleClosed).toBe(true);
+  });
+
+  it("fails closed when the directory handle cannot be closed", async () => {
+    const sandbox = await freshSandbox();
+    const runsRoot = join(sandbox, "runs");
+    const dependencies = {
+      platform: "linux" as const,
+      directoryOpenFlags: 0x3_0000,
+      mkdir: async () => {
+        throw Object.assign(new Error("exists"), { code: "EEXIST" });
+      },
+      lstat: async () => directoryStats(71, 72),
+      openDirectory: async () => ({
+        stat: async () => directoryStats(71, 72),
+        chmod: async () => undefined,
+        close: async () => {
+          throw new Error("private close detail");
+        },
+      }),
+      chmod: async () => undefined,
+      realpath: async () => runsRoot,
+      access: async () => undefined,
+      assertRunsRoot: async () => runsRoot,
+    };
+
+    await expect(
+      preparePublicReplayEnvironment(publicEnvironment(runsRoot), dependencies),
+    ).rejects.toThrow("Public replay environment is invalid.");
+  });
+
+  it("validates Windows root identity before and after trusted-root checks without chmod", async () => {
+    const sandbox = await freshSandbox();
+    const runsRoot = join(sandbox, "runs");
+    let pathnameChecks = 0;
+    let realpathChecks = 0;
+    let trustedRootChecks = 0;
+    let openDirectoryCalled = false;
+    let pathnameChmodCalled = false;
+    const dependencies = {
+      platform: "win32" as const,
+      directoryOpenFlags: 0x3_0000,
+      mkdir: async () => {
+        throw Object.assign(new Error("exists"), { code: "EEXIST" });
+      },
+      lstat: async () => {
+        pathnameChecks += 1;
+        return directoryStats(81, 82);
+      },
+      openDirectory: async () => {
+        openDirectoryCalled = true;
+        throw new Error("Windows directory handles are unavailable");
+      },
+      chmod: async () => {
+        pathnameChmodCalled = true;
+      },
+      realpath: async () => {
+        realpathChecks += 1;
+        return runsRoot;
+      },
+      access: async () => undefined,
+      assertRunsRoot: async () => {
+        trustedRootChecks += 1;
+        return runsRoot;
+      },
+    };
+
+    await expect(
+      preparePublicReplayEnvironment(publicEnvironment(runsRoot), dependencies),
+    ).resolves.toMatchObject({ runsRoot });
+    expect(pathnameChecks).toBe(3);
+    expect(realpathChecks).toBe(2);
+    expect(trustedRootChecks).toBe(1);
+    expect(openDirectoryCalled).toBe(false);
+    expect(pathnameChmodCalled).toBe(false);
+  });
 });
 
 class FakeChildProcess extends EventEmitter {
@@ -283,6 +548,10 @@ class FakeChildProcess extends EventEmitter {
     this.emit("error", error);
   }
 
+  confirmSpawn(): void {
+    this.emit("spawn");
+  }
+
   close(code: number | null, signal: NodeJS.Signals | null = null): void {
     this.exitCode = code;
     this.signalCode = signal;
@@ -295,6 +564,8 @@ class FakeChildProcess extends EventEmitter {
 }
 
 interface FakeProcessBoundary extends PublicReplayProcessBoundary {
+  on(signal: "SIGINT" | "SIGTERM", listener: () => void): unknown;
+  once(signal: "SIGINT" | "SIGTERM", listener: () => void): unknown;
   emitSignal(signal: "SIGINT" | "SIGTERM"): void;
   listenerCount(signal: "SIGINT" | "SIGTERM"): number;
 }
@@ -304,6 +575,7 @@ function createFakeProcessBoundary(): FakeProcessBoundary {
   return {
     execPath: resolve("test-node"),
     cwd: () => resolve("test-working-directory"),
+    on: (signal, listener) => signals.on(signal, listener),
     once: (signal, listener) => signals.once(signal, listener),
     off: (signal, listener) => signals.off(signal, listener),
     emitSignal: (signal) => {
@@ -441,6 +713,22 @@ describe("runPublicReplayServer", () => {
     ).rejects.toThrow("Public replay server failed to start.");
   });
 
+  it("keeps numeric close authoritative after an error from a spawned child", async () => {
+    const launched = await launchFakeServer();
+
+    launched.child.confirmSpawn();
+    launched.child.fail(new Error("late child-process detail"));
+    launched.child.close(9);
+
+    await expect(launched.result).resolves.toBe(9);
+    expect(launched.child.killSignals).toEqual([]);
+    expect(launched.child.listenerCount("spawn")).toBe(0);
+    expect(launched.child.listenerCount("error")).toBe(0);
+    expect(launched.child.listenerCount("close")).toBe(0);
+    expect(launched.processBoundary.listenerCount("SIGINT")).toBe(0);
+    expect(launched.processBoundary.listenerCount("SIGTERM")).toBe(0);
+  });
+
   it.each(["SIGINT", "SIGTERM"] as const)("forwards %s only once", async (signal) => {
     const launched = await launchFakeServer();
 
@@ -462,6 +750,22 @@ describe("runPublicReplayServer", () => {
     expect(launched.child.killSignals).toEqual(["SIGTERM"]);
     launched.child.close(null, "SIGTERM");
     await expect(launched.result).resolves.toBe(143);
+  });
+
+  it("keeps both shutdown handlers active while absorbing repeated signals", async () => {
+    const launched = await launchFakeServer();
+
+    launched.processBoundary.emitSignal("SIGTERM");
+    launched.processBoundary.emitSignal("SIGTERM");
+    launched.processBoundary.emitSignal("SIGINT");
+
+    expect(launched.child.killSignals).toEqual(["SIGTERM"]);
+    expect(launched.processBoundary.listenerCount("SIGINT")).toBe(1);
+    expect(launched.processBoundary.listenerCount("SIGTERM")).toBe(1);
+    launched.child.close(null, "SIGTERM");
+    await expect(launched.result).resolves.toBe(143);
+    expect(launched.processBoundary.listenerCount("SIGINT")).toBe(0);
+    expect(launched.processBoundary.listenerCount("SIGTERM")).toBe(0);
   });
 
   it.each([

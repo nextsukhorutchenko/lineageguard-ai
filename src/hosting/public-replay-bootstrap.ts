@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
-import { access, chmod, lstat, mkdir, realpath } from "node:fs/promises";
+import { access, lstat, mkdir, open, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { assertTrustedRunsRoot } from "../artifacts/run-envelope-files.js";
@@ -32,19 +32,29 @@ const CHILD_ENVIRONMENT_ALLOWLIST = [
 ] as const;
 
 interface RootStats {
+  readonly dev: number;
+  readonly ino: number;
   isDirectory(): boolean;
   isSymbolicLink(): boolean;
+}
+
+interface DirectoryHandle {
+  stat(): Promise<RootStats>;
+  chmod(mode: number): Promise<void>;
+  close(): Promise<void>;
 }
 
 export interface PublicReplayBootstrapDependencies {
   readonly mkdir: (path: string, options: { readonly mode: number }) => Promise<void>;
   readonly lstat: (path: string) => Promise<RootStats>;
   readonly realpath: (path: string) => Promise<string>;
-  readonly chmod: (path: string, mode: number) => Promise<void>;
   readonly access: (path: string, mode?: number) => Promise<void>;
+  readonly openDirectory: (path: string, flags: number) => Promise<DirectoryHandle>;
   readonly isAbsolute: (path: string) => boolean;
   readonly resolvePath: (path: string) => string;
   readonly relativePath: (from: string, to: string) => string;
+  readonly platform: NodeJS.Platform;
+  readonly directoryOpenFlags: number;
   readonly writableAccessMode: number;
   readonly assertRunsRoot: (runsRoot: string) => Promise<string>;
 }
@@ -60,7 +70,7 @@ type PublicReplayShutdownSignal = "SIGINT" | "SIGTERM";
 export interface PublicReplayProcessBoundary {
   readonly execPath: string;
   cwd(): string;
-  once(signal: PublicReplayShutdownSignal, listener: () => void): unknown;
+  on(signal: PublicReplayShutdownSignal, listener: () => void): unknown;
   off(signal: PublicReplayShutdownSignal, listener: () => void): unknown;
 }
 
@@ -83,17 +93,32 @@ export interface PublicReplayServerDependencies extends PublicReplayBootstrapDep
   ) => ChildProcess;
 }
 
+function optionalOpenFlag(name: string): number {
+  const value = (constants as unknown as Readonly<Record<string, unknown>>)[name];
+  return typeof value === "number" ? value : 0;
+}
+
 const defaultBootstrapDependencies: PublicReplayBootstrapDependencies = {
   mkdir: async (path, options) => {
     await mkdir(path, options);
   },
   lstat,
   realpath,
-  chmod,
   access,
+  openDirectory: async (path, flags) => {
+    const handle = await open(path, flags);
+    return {
+      stat: async () => await handle.stat(),
+      chmod: async (mode) => await handle.chmod(mode),
+      close: async () => await handle.close(),
+    };
+  },
   isAbsolute,
   resolvePath: resolve,
   relativePath: relative,
+  platform: process.platform,
+  directoryOpenFlags:
+    constants.O_RDONLY | optionalOpenFlag("O_NOFOLLOW") | optionalOpenFlag("O_DIRECTORY"),
   writableAccessMode: constants.W_OK,
   assertRunsRoot: assertTrustedRunsRoot,
 };
@@ -101,7 +126,7 @@ const defaultBootstrapDependencies: PublicReplayBootstrapDependencies = {
 const defaultProcessBoundary: PublicReplayProcessBoundary = {
   execPath: process.execPath,
   cwd: () => process.cwd(),
-  once: (signal, listener) => process.once(signal, listener),
+  on: (signal, listener) => process.on(signal, listener),
   off: (signal, listener) => process.off(signal, listener),
 };
 
@@ -154,6 +179,36 @@ function buildChildEnvironment(
   return childEnvironment;
 }
 
+function assertRealDirectory(stats: RootStats): void {
+  if (stats.isSymbolicLink() || !stats.isDirectory()) throw invalidEnvironment();
+}
+
+function assertSameIdentity(expected: RootStats, actual: RootStats): void {
+  assertRealDirectory(actual);
+  if (expected.dev !== actual.dev || expected.ino !== actual.ino) {
+    throw invalidEnvironment();
+  }
+}
+
+async function validateRootPath(
+  configuredRoot: string,
+  expectedIdentity: RootStats,
+  operations: PublicReplayBootstrapDependencies,
+): Promise<string> {
+  assertSameIdentity(expectedIdentity, await operations.lstat(configuredRoot));
+  const canonicalRoot = await operations.realpath(configuredRoot);
+  if (operations.relativePath(configuredRoot, canonicalRoot) !== "") {
+    throw invalidEnvironment();
+  }
+  await operations.access(canonicalRoot, operations.writableAccessMode);
+  const trustedRoot = await operations.assertRunsRoot(configuredRoot);
+  if (operations.relativePath(canonicalRoot, trustedRoot) !== "") {
+    throw invalidEnvironment();
+  }
+  assertSameIdentity(expectedIdentity, await operations.lstat(configuredRoot));
+  return trustedRoot;
+}
+
 export async function preparePublicReplayEnvironment(
   environment: Readonly<NodeJS.ProcessEnv>,
   dependencies: Partial<PublicReplayBootstrapDependencies> = {},
@@ -174,19 +229,26 @@ export async function preparePublicReplayEnvironment(
     }
 
     const configuredRoot = operations.resolvePath(config.runsRoot);
-    const stats = await operations.lstat(configuredRoot);
-    if (stats.isSymbolicLink() || !stats.isDirectory()) throw invalidEnvironment();
-
-    const canonicalRoot = await operations.realpath(configuredRoot);
-    if (operations.relativePath(configuredRoot, canonicalRoot) !== "") {
+    const configuredStats = await operations.lstat(configuredRoot);
+    assertRealDirectory(configuredStats);
+    const initialCanonicalRoot = await operations.realpath(configuredRoot);
+    if (operations.relativePath(configuredRoot, initialCanonicalRoot) !== "") {
       throw invalidEnvironment();
     }
 
-    await operations.chmod(canonicalRoot, PRIVATE_ROOT_MODE);
-    await operations.access(canonicalRoot, operations.writableAccessMode);
-    const trustedRoot = await operations.assertRunsRoot(configuredRoot);
-    if (operations.relativePath(canonicalRoot, trustedRoot) !== "") {
-      throw invalidEnvironment();
+    let trustedRoot: string;
+    if (operations.platform === "win32") {
+      trustedRoot = await validateRootPath(configuredRoot, configuredStats, operations);
+    } else {
+      const handle = await operations.openDirectory(configuredRoot, operations.directoryOpenFlags);
+      try {
+        const openedStats = await handle.stat();
+        assertSameIdentity(configuredStats, openedStats);
+        await handle.chmod(PRIVATE_ROOT_MODE);
+        trustedRoot = await validateRootPath(configuredRoot, openedStats, operations);
+      } finally {
+        await handle.close();
+      }
     }
 
     return {
@@ -213,6 +275,7 @@ function waitForChildClose(
   return new Promise<number>((resolveClose, rejectClose) => {
     let settled = false;
     let shutdownForwarded = false;
+    let spawned = false;
     let startupFailed = false;
 
     const onSigint = (): void => {
@@ -222,6 +285,7 @@ function waitForChildClose(
       forwardShutdown("SIGTERM");
     };
     const cleanup = (): void => {
+      child.off("spawn", onSpawn);
       child.off("error", onError);
       child.off("close", onClose);
       processBoundary.off("SIGINT", onSigint);
@@ -236,8 +300,11 @@ function waitForChildClose(
         // Child close or error remains the only lifecycle authority.
       }
     };
+    const onSpawn = (): void => {
+      spawned = true;
+    };
     const onError = (): void => {
-      if (settled || startupFailed) return;
+      if (settled || startupFailed || spawned) return;
       startupFailed = true;
       forwardShutdown("SIGTERM");
     };
@@ -252,10 +319,11 @@ function waitForChildClose(
       }
     };
 
+    child.once("spawn", onSpawn);
     child.on("error", onError);
     child.once("close", onClose);
-    processBoundary.once("SIGINT", onSigint);
-    processBoundary.once("SIGTERM", onSigterm);
+    processBoundary.on("SIGINT", onSigint);
+    processBoundary.on("SIGTERM", onSigterm);
   });
 }
 
