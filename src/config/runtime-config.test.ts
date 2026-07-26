@@ -69,13 +69,14 @@ describe("loadRuntimeConfig", () => {
   });
 
   it("accepts explicit executable and runs-directory settings", () => {
+    const uvxPath = resolve("configured-uvx");
     expect(
       loadRuntimeConfig({
         ...minimumEnvironment,
-        DATAHUB_MCP_UVX_PATH: "C:\\tools\\uvx.exe",
+        DATAHUB_MCP_UVX_PATH: uvxPath,
         LINEAGEGUARD_RUNS_DIR: resolve("private-runs"),
       }),
-    ).toMatchObject({ uvxPath: "C:\\tools\\uvx.exe", runsRoot: resolve("private-runs") });
+    ).toMatchObject({ uvxPath, runsRoot: resolve("private-runs") });
   });
 
   it("lets an absolute CLI override win over the environment", () => {
