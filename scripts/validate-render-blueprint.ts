@@ -1,9 +1,13 @@
-import { readFile } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
 const MAX_BLUEPRINT_BYTES = 16 * 1024;
+const MAX_BLUEPRINT_READ_BYTES = MAX_BLUEPRINT_BYTES + 1;
+const BLUEPRINT_READ_CHUNK_BYTES = 4 * 1024;
 const GENERIC_DIFFERENCE = "Render Blueprint differs from the approved contract.";
+const READ_FAILURE = "Render Blueprint could not be read.";
+const BLUEPRINT_TOO_LARGE = "Render Blueprint exceeds the 16 KiB limit.";
 
 export const EXPECTED_RENDER_BLUEPRINT = `services:
   - type: web
@@ -110,18 +114,69 @@ export function validateRenderBlueprintText(value: string): readonly string[] {
   return [...findings, GENERIC_DIFFERENCE];
 }
 
-export async function validateRenderBlueprint(root = process.cwd()): Promise<void> {
-  let contents: Buffer;
+async function readBoundedRenderBlueprint(filePath: string): Promise<Buffer> {
+  let fileHandle: Awaited<ReturnType<typeof open>> | undefined;
+  let contents: Buffer | undefined;
+  let failure: string | undefined;
 
   try {
-    contents = await readFile(resolve(root, "render.yaml"));
+    fileHandle = await open(filePath, "r");
+    const { size } = await fileHandle.stat();
+
+    if (!Number.isSafeInteger(size) || size < 0) {
+      failure = READ_FAILURE;
+    } else if (size > MAX_BLUEPRINT_BYTES) {
+      failure = BLUEPRINT_TOO_LARGE;
+    } else {
+      const chunks: Buffer[] = [];
+      let position = 0;
+      let totalBytes = 0;
+
+      while (totalBytes < MAX_BLUEPRINT_READ_BYTES) {
+        const length = Math.min(BLUEPRINT_READ_CHUNK_BYTES, MAX_BLUEPRINT_READ_BYTES - totalBytes);
+        const chunk = Buffer.allocUnsafe(length);
+        const { bytesRead } = await fileHandle.read(chunk, 0, length, position);
+
+        if (!Number.isSafeInteger(bytesRead) || bytesRead < 0 || bytesRead > length) {
+          failure = READ_FAILURE;
+          break;
+        }
+
+        if (bytesRead === 0) {
+          break;
+        }
+
+        chunks.push(chunk.subarray(0, bytesRead));
+        totalBytes += bytesRead;
+        position += bytesRead;
+      }
+
+      if (failure === undefined) {
+        failure = totalBytes > MAX_BLUEPRINT_BYTES ? BLUEPRINT_TOO_LARGE : undefined;
+      }
+      contents = Buffer.concat(chunks, totalBytes);
+    }
   } catch {
-    throw new RenderBlueprintValidationError("Render Blueprint could not be read.");
+    failure = READ_FAILURE;
+  } finally {
+    if (fileHandle !== undefined) {
+      try {
+        await fileHandle.close();
+      } catch {
+        failure = READ_FAILURE;
+      }
+    }
   }
 
-  if (contents.byteLength > MAX_BLUEPRINT_BYTES) {
-    throw new RenderBlueprintValidationError("Render Blueprint exceeds the 16 KiB limit.");
+  if (failure !== undefined || contents === undefined) {
+    throw new RenderBlueprintValidationError(failure ?? READ_FAILURE);
   }
+
+  return contents;
+}
+
+export async function validateRenderBlueprint(root = process.cwd()): Promise<void> {
+  const contents = await readBoundedRenderBlueprint(resolve(root, "render.yaml"));
 
   const findings = validateRenderBlueprintText(contents.toString("utf8"));
 

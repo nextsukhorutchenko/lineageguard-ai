@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   EXPECTED_RENDER_BLUEPRINT,
   validateRenderBlueprint,
@@ -37,6 +37,7 @@ const CANONICAL_RENDER_BLUEPRINT = `services:
 `;
 
 const temporaryRoots: string[] = [];
+const MAX_BLUEPRINT_BYTES = 16 * 1024;
 
 async function createRoot(blueprint?: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "lineageguard-render-blueprint-"));
@@ -82,10 +83,22 @@ async function runValidator(root: string): Promise<{
   });
 }
 
+async function loadValidatorWithMockedFileHandle(
+  open: () => Promise<unknown>,
+  readFile: () => Promise<Buffer>,
+): Promise<typeof import("./validate-render-blueprint.js")> {
+  vi.resetModules();
+  vi.doMock("node:fs/promises", () => ({ open, readFile }));
+
+  return import("./validate-render-blueprint.js");
+}
+
 afterEach(async () => {
   await Promise.all(
     temporaryRoots.splice(0).map((root) => rm(root, { force: true, recursive: true })),
   );
+  vi.doUnmock("node:fs/promises");
+  vi.resetModules();
 });
 
 describe("validateRenderBlueprintText", () => {
@@ -262,6 +275,61 @@ describe("validateRenderBlueprint", () => {
     await expect(validateRenderBlueprint(root)).rejects.toThrow(
       "Render Blueprint exceeds the 16 KiB limit.",
     );
+  });
+
+  it("caps a Blueprint that grows after its size preflight", async () => {
+    const source = Buffer.alloc(MAX_BLUEPRINT_BYTES + 1, "x");
+    const observedReads: number[] = [];
+    const close = vi.fn().mockResolvedValue(undefined);
+    const handle = {
+      close,
+      read: vi.fn(async (buffer: Buffer, offset: number, length: number, position: number) => {
+        observedReads.push(length);
+        const bytesRead = Math.min(1024, length, source.byteLength - position);
+        source.copy(buffer, offset, position, position + bytesRead);
+        return { buffer, bytesRead };
+      }),
+      stat: vi.fn().mockResolvedValue({ size: MAX_BLUEPRINT_BYTES }),
+    };
+    const open = vi.fn().mockResolvedValue(handle);
+    const readFile = vi.fn().mockResolvedValue(Buffer.from(CANONICAL_RENDER_BLUEPRINT));
+    const { validateRenderBlueprint: validateWithHandle } = await loadValidatorWithMockedFileHandle(
+      open,
+      readFile,
+    );
+
+    await expect(validateWithHandle("safe-root")).rejects.toThrow(
+      "Render Blueprint exceeds the 16 KiB limit.",
+    );
+    expect(open).toHaveBeenCalledOnce();
+    expect(readFile).not.toHaveBeenCalled();
+    expect(observedReads).not.toEqual([]);
+    expect(observedReads.every((length) => length <= MAX_BLUEPRINT_BYTES + 1)).toBe(true);
+    expect(handle.read).toHaveBeenCalledTimes(17);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("treats a file-handle close failure as a fixed safe read error", async () => {
+    const source = Buffer.from(CANONICAL_RENDER_BLUEPRINT, "utf8");
+    const close = vi.fn().mockRejectedValue(new Error("close failure"));
+    const handle = {
+      close,
+      read: vi.fn(async (buffer: Buffer, offset: number, length: number, position: number) => {
+        const bytesRead = Math.min(length, source.byteLength - position);
+        source.copy(buffer, offset, position, position + bytesRead);
+        return { buffer, bytesRead };
+      }),
+      stat: vi.fn().mockResolvedValue({ size: source.byteLength }),
+    };
+    const { validateRenderBlueprint: validateWithHandle } = await loadValidatorWithMockedFileHandle(
+      vi.fn().mockResolvedValue(handle),
+      vi.fn().mockResolvedValue(source),
+    );
+
+    await expect(validateWithHandle("safe-root")).rejects.toThrow(
+      "Render Blueprint could not be read.",
+    );
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it("exits successfully when the executable reads a canonical Blueprint", async () => {
