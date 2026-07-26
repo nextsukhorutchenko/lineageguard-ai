@@ -22,7 +22,7 @@
     "start": "node dist/cli.js",
     "start:web": "next start",
     "submission:check": "tsx scripts/validate-submission-assets.ts",
-    "test": "vitest run --exclude tests/integration/** --exclude tests/e2e/**",
+    "test": "vitest run --exclude \"tests/integration/**\" --exclude \"tests/e2e/**\"",
     "test:e2e": "playwright test",
     "test:integration": "vitest run tests/integration/datahub-mcp.integration.test.ts",
     "test:openai": "vitest run tests/integration/openai-agent.integration.test.ts",

@@ -36,6 +36,7 @@ describe("toolchain", () => {
       "build:web": "next build --webpack",
       dev: "next dev --webpack",
       "start:web": "next start",
+      test: 'vitest run --exclude "tests/integration/**" --exclude "tests/e2e/**"',
       "test:e2e": "playwright test",
       "test:runtime-mode": "vitest run tests/integration/runtime-mode-page.integration.test.ts",
     });
