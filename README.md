@@ -223,13 +223,20 @@ OpenAI.
 
 Start the pinned DataHub stack and load the documented showcase datapack first.
 
+DataHub Quickstart is local-development-only and requires Docker Compose v2. Its CLI supports a
+Python 3.10 or newer baseline, while pinned MCP Server `0.6.0` requires Python 3.11 or newer;
+LineageGuard standardizes live mode on Python 3.11. The tested local allocation is
+2 CPU / 8 GB RAM / 2 GB swap / 13 GB disk. `datahub datapack` is experimental, so Fixture replay
+is the deterministic fallback. Default credentials and exposed ports must never be published.
+Repeat `datahub init` after an operator-approved local nuke or a signing-key change.
+
 ### Live Operator Preflight
 
 1. Verify Python `3.11.x`, `acryl-datahub==1.6.0.15`, the pinned DataHub Core `v1.6.0` services, MCP Server `0.6.0`, and the tested Docker baseline of 2 CPU / 8 GB RAM / 2 GB swap / 13 GB disk.
 2. Check ports `3306`, `8080`, `8081`, `9002`, `9092`, `9200`, and `2181`; each must be available before startup or owned by the expected pinned DataHub service.
 3. Run `.\.venv\Scripts\datahub.exe docker check` and require success.
 4. Run `Invoke-RestMethod http://localhost:8080/health` and require a healthy GMS response.
-5. Open <http://localhost:9002>, use `datahub/datahub` only on an isolated localhost Quickstart, and verify `b2fd91.order_entry_db.analytics.order_details`, `customer_id`, lineage, ownership, the intended account, and available search-visibility scope. Never expose the default credentials or ports publicly.
+5. Open <http://localhost:9002>, use `datahub/datahub` only on an isolated localhost Quickstart, and verify `b2fd91.order_entry_db.analytics.order_details`, `customer_id`, visible lineage, ownership, the intended account, and available search-visibility scope. Never expose the default credentials or ports publicly.
 6. Resolve and prewarm the pinned MCP executable before requesting a PAT. Then configure shell-local `DATAHUB_GMS_URL` and `DATAHUB_GMS_TOKEN` without printing or persisting the PAT and run the four-operation integration contract. Every path after token entry must remove the token:
 
    ```powershell
@@ -287,10 +294,42 @@ Start the pinned DataHub stack and load the documented showcase datapack first.
    The operator-owned live runs root remains in place after the shell variable is cleared. Do not
    recursively remove it as part of application shutdown.
 
-The UI endpoint is `http://localhost:9002`; the MCP subprocess connects to the GMS endpoint at `http://localhost:8080`. If personal-access-token controls are unavailable, verify that Metadata Authentication is enabled and that the local user has `Generate Personal Access Tokens` or `Manage All Access Tokens`; do not enable mutations as a workaround.
+The UI endpoint is `http://localhost:9002`; the MCP subprocess connects to the GMS endpoint at
+`http://localhost:8080`.
 
-`Get-Command uvx` is LineageGuard's Windows adaptation of the official guide's absolute-path remedy for `spawn uvx ENOENT`; `DATAHUB_MCP_UVX_PATH` is LineageGuard configuration, not an upstream MCP contract. Never use `@latest`, put a PAT in a URL, or persist either token. Set `OPENAI_API_KEY`, `OPENAI_MODEL=gpt-5.6-sol`, `OPENAI_AGENTS_DISABLE_TRACING=1`, `LINEAGEGUARD_DEMO_MODE=LIVE`, and `LINEAGEGUARD_RUNS_DIR` pointing to an absolute, pre-created, application-account-owned directory in the same shell before running `pnpm dev`.
+`datahub/datahub` authenticates only the default local Quickstart frontend. A shell-local `DATAHUB_GMS_TOKEN` authenticates the MCP subprocess to GMS. `OPENAI_API_KEY` authenticates only the server-side OpenAI provider. These credentials are separate; default frontend credentials and directly exposed DataHub ports are allowed only on an isolated localhost Quickstart and must never be published.
 
-The application reads DataHub through the official read-only MCP server. It does not execute SQL, mutate DataHub, or perform GitHub operations.
+UI ingestion, connector recipes, DataHub Secrets, ingestion schedules, user onboarding, custom
+JAAS, and OIDC are not LineageGuard runtime dependencies and must not be enabled as a PAT or MCP
+workaround. If PAT controls are unavailable, verify `METADATA_SERVICE_AUTH_ENABLED=true`
+consistently for `datahub-gms` and `datahub-frontend`, restart the affected services, and verify
+token-generation privileges; never disable authentication or enable mutations. Default-credential
+changes and OIDC are future production-hardening references only.
 
-Expected: every check passes against the pinned local profile; `DATAHUB_MCP_UVX_PATH` is absolute; no token is printed or persisted; the four-operation integration contract passes before OpenAI is called. Any failure stops live mode and preserves replay.
+Destructive recovery is separate from the golden path. Inspect expected containers and targeted
+logs first. `datahub docker nuke` is an explicit data-loss action allowed only after backup and an
+operator's choice; never use broad Docker pruning or manual database/index repair as routine
+recovery.
+
+The MCP server may advertise additional tools. LineageGuard AI invokes only `search`, `list_schema_fields`, `get_lineage`, and `get_entities` through an application-owned read-only allowlist. The OpenAI agent never receives raw MCP access.
+
+Total advertised counts such as `22`, `10 read`, or `12 write` are version- and
+configuration-dependent. Only the four-name application allowlist is contractual.
+
+The current DataHub MCP guide is deployment, authentication, and troubleshooting guidance, not LineageGuard AI's executable contract. Certified local mode uses `uvx mcp-server-datahub@0.6.0 --transport stdio`; the pinned `v0.6.0` release and source, runtime discovery, and application contract tests define supported names and parameters. `@latest`, managed remote HTTP/OAuth, and newly advertised tools are not certified runtime authority.
+
+The guide's `spawn uvx ENOENT` remedy is an absolute `uvx` path. On Windows, LineageGuard AI locates that path with `Get-Command uvx` and supplies it through its own `DATAHUB_MCP_UVX_PATH` configuration.
+
+A service account's Default View scopes MCP searches. The live record must identify the intended account and search-visibility scope when available; a changed view invalidates comparison with certified search evidence. Effects on schema, lineage, or entity reads remain unclaimed until the pinned live contract test establishes them. Never disable the view or bypass DataHub authorization to recover an expected result.
+
+Never use `@latest`, put a PAT in a URL, or persist either token. Set `OPENAI_API_KEY`,
+`OPENAI_MODEL=gpt-5.6-sol`, `OPENAI_AGENTS_DISABLE_TRACING=1`,
+`LINEAGEGUARD_DEMO_MODE=LIVE`, and `LINEAGEGUARD_RUNS_DIR` pointing to an absolute, pre-created,
+application-account-owned directory in the same shell before running `pnpm dev`.
+
+The application reads DataHub through the official read-only MCP server. It does not execute SQL,
+mutate DataHub, or perform GitHub operations.
+
+Expected: every check passes against the pinned local profile; `DATAHUB_MCP_UVX_PATH` is absolute;
+no token is printed or persisted; the four-operation integration contract passes before OpenAI is
+called. Any failure stops live mode and preserves replay.

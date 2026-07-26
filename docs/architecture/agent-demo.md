@@ -15,9 +15,10 @@ flowchart LR
   T2 --> P["Validated migration package<br/>four review-ready artifacts"]
 ```
 
-This clean-room diagram is adapted conceptually from the official hackathon build-session
-reference architecture. LineageGuard has no SQL execution, notification, incident, arbitrary API,
-or DataHub write-back action.
+This clean-room diagram is adapted conceptually from the official hackathon reference architecture; no diagram asset or source text was copied.
+
+LineageGuard has no SQL execution, notification, incident, arbitrary API, or DataHub write-back
+action.
 
 ## Agent Building Blocks
 
@@ -33,9 +34,23 @@ MCP is the only runtime DataHub access surface. Agent Context Kit is an architec
 the repository-owned DataHub Skill is a contribution candidate, and Analytics Agent is a
 clean-room UX reference. None is a runtime dependency.
 
+Agent Context Kit is an architecture reference only. LineageGuard AI does not install `datahub-agent-context` or framework adapters and does not expose raw MCP discovery, SQL execution, assertion creation, or metadata writes.
+
+The MCP server may advertise additional tools. LineageGuard AI invokes only `search`, `list_schema_fields`, `get_lineage`, and `get_entities` through an application-owned read-only allowlist. The OpenAI agent never receives raw MCP access.
+
+The current DataHub MCP guide is deployment, authentication, and troubleshooting guidance, not LineageGuard AI's executable contract. Certified local mode uses `uvx mcp-server-datahub@0.6.0 --transport stdio`; the pinned `v0.6.0` release and source, runtime discovery, and application contract tests define supported names and parameters. `@latest`, managed remote HTTP/OAuth, and newly advertised tools are not certified runtime authority.
+
+The guide's `spawn uvx ENOENT` remedy is an absolute `uvx` path. On Windows, LineageGuard AI locates that path with `Get-Command uvx` and supplies it through its own `DATAHUB_MCP_UVX_PATH` configuration.
+
+A service account's Default View scopes MCP searches. The live record must identify the intended account and search-visibility scope when available; a changed view invalidates comparison with certified search evidence. Effects on schema, lineage, or entity reads remain unclaimed until the pinned live contract test establishes them. Never disable the view or bypass DataHub authorization to recover an expected result.
+
 ## Trust Boundaries
 
 The browser sends one validated rename request to a Node.js Route Handler. The server owns credentials, run IDs, cancellation, and persistence. DataHub metadata and model output are untrusted inputs; Zod schemas, deterministic domain rules, redaction, artifact validation, and atomic file publication are the trust boundaries.
+
+## Context-First Sequence
+
+`rename intent -> four read-only DataHub operations -> normalized bounded evidence -> deterministic ChangeContext and decision -> two application-owned OpenAI tools -> validated artifacts -> human approval`
 
 ## Exactly Two Agent Tools
 
