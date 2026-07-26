@@ -341,7 +341,15 @@ export async function scanRepositorySecrets(
     const findings = [...(await scanWorkingTree(root))];
     if (options.history === true) {
       const history = decodeGitText(
-        await runGit(root, ["log", "-p", "--all", "--no-ext-diff", "--text"]),
+        await runGit(root, [
+          "log",
+          "-p",
+          "--all",
+          "--no-ext-diff",
+          "--text",
+          "--no-color",
+          "--format=commit %H",
+        ]),
       );
       findings.push(...scanHistory(history));
     }

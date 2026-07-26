@@ -164,6 +164,27 @@ it("finds a removed credential in synthetic history and still scans the clean tr
   expect(result.stderr).not.toContain(root);
 });
 
+it("finds a removed credential when Git color is forced on", async () => {
+  const root = await createRepository();
+  await git(root, "config", "color.ui", "always");
+  const token = dataHubJwt();
+  await writeRepositoryFile(root, "src/colored-history.txt", `${token}\n`);
+  const secretCommit = await commitAll(root, "test: add colored historical fixture");
+  await writeRepositoryFile(root, "src/colored-history.txt", "removed\n");
+  await commitAll(root, "test: remove colored historical fixture");
+
+  await expect(scanRepositorySecrets(root)).resolves.toEqual([]);
+  const findings = await scanRepositorySecrets(root, { history: true });
+  expect(findings).toContain(`history:${secretCommit}:datahub-jwt`);
+  expect(findings.join("\n")).not.toContain(token);
+
+  const result = spawnScanner(root, ["--history"]);
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain(`history:${secretCommit}:datahub-jwt`);
+  expect(result.stderr).not.toContain(token);
+  expect(result.stderr).not.toContain(root);
+});
+
 it("allows only empty values, placeholders, commands, and documentation sentinels", async () => {
   const root = await createRepository();
   await writeRepositoryFile(
