@@ -695,6 +695,35 @@ describe("Task 1A bounded evidence collection", () => {
     expect(client.calls.at(-1)?.arguments.offset).toBe(50);
   });
 
+  it("accepts the official search page-size count when the final page returns fewer results", async () => {
+    const searchResults = Array.from({ length: 12 }, (_, index) => ({
+      entity: {
+        urn: `urn:li:dataset:(official-search-${index})`,
+        name: index === 0 ? "order_details" : `other_${index}`,
+      },
+    }));
+    const client = new RecordingMcpClient([
+      jsonResult({
+        start: 0,
+        count: 50,
+        total: 12,
+        searchResults,
+      }),
+    ]);
+
+    const result = await new DataHubMcpCatalog(client).searchDatasets("order_details");
+
+    expect(result.completeness).toEqual({
+      complete: true,
+      pages: 1,
+      itemCount: 12,
+      offsets: [0],
+      reasonCodes: [],
+    });
+    expect(result.items).toHaveLength(12);
+    expect(client.calls).toHaveLength(1);
+  });
+
   it.each([
     ["missing start", { count: 0, total: 0, searchResults: [] }],
     ["missing count", { start: 0, total: 0, searchResults: [] }],

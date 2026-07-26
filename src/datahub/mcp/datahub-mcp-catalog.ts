@@ -156,11 +156,13 @@ export class DataHubMcpCatalog implements DataHubCatalog {
         options.signal,
         offsets.length,
       );
+      const returned = parsed.searchResults.length;
       if (
         parsed.start !== offset ||
-        parsed.count !== parsed.searchResults.length ||
         parsed.count > SEARCH_PAGE_SIZE ||
-        parsed.start + parsed.count > parsed.total
+        returned > parsed.count ||
+        (returned !== parsed.count && parsed.start + returned !== parsed.total) ||
+        parsed.start + returned > parsed.total
       ) {
         throw this.unavailable();
       }
@@ -185,7 +187,7 @@ export class DataHubMcpCatalog implements DataHubCatalog {
           withOptional({ urn: entity.urn, name }, "platform", entity.platform?.name),
         );
       }
-      const hasMore = parsed.start + parsed.count < parsed.total;
+      const hasMore = parsed.start + returned < parsed.total;
       let mustStop = false;
       if (candidates.size >= MAX_SEARCH_ITEMS || parsed.total > MAX_SEARCH_ITEMS) {
         reasons.add("ITEM_LIMIT_REACHED");
@@ -207,7 +209,7 @@ export class DataHubMcpCatalog implements DataHubCatalog {
         break;
       }
       if (!hasMore) break;
-      offset += parsed.count;
+      offset += returned;
     }
 
     const items = [...candidates.values()].sort((left, right) =>

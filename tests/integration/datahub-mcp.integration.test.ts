@@ -144,7 +144,7 @@ describe("DataHub MCP live integration", () => {
         DATAHUB_MCP_UVX_PATH: process.env.DATAHUB_MCP_UVX_PATH,
         LINEAGEGUARD_RUNS_DIR: process.env.LINEAGEGUARD_RUNS_DIR ?? tmpdir(),
       });
-      const request = createRequestAbortScope(AbortSignal.timeout(1));
+      const request = createRequestAbortScope(new AbortController().signal);
       const deadline = createDeadline(request, 1, "MCP_CONNECT_TIMEOUT");
       try {
         await expect(

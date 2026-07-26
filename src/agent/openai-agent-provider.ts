@@ -17,7 +17,7 @@ import { createOpenAIAgentProviderIdentity } from "./provider.js";
 const CompletionSchema = z
   .object({
     status: z.enum(["completed", "needs_clarification", "failed"]),
-    candidates: z.array(z.string().startsWith("urn:li:").max(500)).min(1).max(20).optional(),
+    candidates: z.array(z.string().startsWith("urn:li:").max(500)).min(1).max(20).nullish(),
     failure: z
       .object({
         code: z.enum([
@@ -33,20 +33,16 @@ const CompletionSchema = z
         knownFields: z.array(z.string().min(1).max(500)).max(100).optional(),
       })
       .strict()
-      .optional(),
+      .nullish(),
   })
   .strict()
   .superRefine((completion, ctx) => {
+    const candidatesAbsent = completion.candidates == null;
+    const failureAbsent = completion.failure == null;
     const valid =
-      (completion.status === "completed" &&
-        completion.candidates === undefined &&
-        completion.failure === undefined) ||
-      (completion.status === "needs_clarification" &&
-        completion.candidates !== undefined &&
-        completion.failure === undefined) ||
-      (completion.status === "failed" &&
-        completion.candidates === undefined &&
-        completion.failure !== undefined);
+      (completion.status === "completed" && candidatesAbsent && failureAbsent) ||
+      (completion.status === "needs_clarification" && !candidatesAbsent && failureAbsent) ||
+      (completion.status === "failed" && candidatesAbsent && !failureAbsent);
     if (!valid) {
       ctx.addIssue({
         code: "custom",

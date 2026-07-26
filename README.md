@@ -62,9 +62,9 @@ uv venv --seed --python 3.11 .venv
 .\.venv\Scripts\python.exe -m pip install acryl-datahub==1.6.0.15
 .\.venv\Scripts\python.exe --version
 .\.venv\Scripts\datahub.exe version
+$env:PYTHONUTF8 = "1"
 .\.venv\Scripts\datahub.exe docker quickstart --version v1.6.0 --pull-images
 Invoke-RestMethod http://localhost:8080/health
-$env:PYTHONUTF8 = "1"
 .\.venv\Scripts\datahub.exe init --username datahub --password datahub
 ```
 

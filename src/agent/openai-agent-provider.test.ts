@@ -241,6 +241,26 @@ describe("OpenAIAgentProvider", () => {
     });
   });
 
+  it("accepts null placeholders for absent closed completion branches", async () => {
+    sdk.run.mockImplementation(async (agent) => {
+      await analyze(agent);
+      await generate(agent);
+      return mockResult({ status: "completed", candidates: null, failure: null });
+    });
+
+    const result = await new OpenAIAgentProvider({ apiKey: "test-provider-key" }).run({
+      request: "Rename column customer_id to customer_key in dataset example",
+      tools: makeTools(),
+      ...abortBoundary(),
+    });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      analysisCalls: 1,
+      generationAttempts: 1,
+    });
+  });
+
   it("expires one classified generation attempt and suppresses its late acceptance", async () => {
     vi.useFakeTimers();
     const abortScope = createRequestAbortScope(new AbortController().signal);
