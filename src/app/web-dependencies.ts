@@ -12,6 +12,7 @@ import {
   MAX_RUN_REQUEST_BYTES,
   readBoundedUtf8Body,
 } from "../http/bounded-body.js";
+import { noStoreHeaders } from "../http/response-headers.js";
 import {
   createPublicReplayAdmission,
   type PublicReplayAdmission,
@@ -40,6 +41,14 @@ import { runAgentWorkflow, type RunAgentWorkflowDependencies } from "./run-agent
 
 const sharedPublicReplayAdmission = createPublicReplayAdmission();
 const localReplayLease: PublicReplayLease = Object.freeze({ release() {} });
+
+function withNoStoreHeaders(response: Response): Response {
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: noStoreHeaders(Object.fromEntries(response.headers)),
+  });
+}
 
 async function acquireWorkflowLease(
   config: WebConfig,
@@ -212,25 +221,36 @@ export function createPostRunsHandler(overrides: PostRunsHandlerOverrides = {}) 
       }
       rawRequest = rawInput.request;
     } catch {
-      return Response.json({ error: "Invalid rename request." }, { status: 400 });
+      return Response.json(
+        { error: "Invalid rename request." },
+        { status: 400, headers: noStoreHeaders() },
+      );
     }
     let config: WebConfig;
     try {
       config = loadConfig(process.env);
     } catch {
-      return Response.json({ error: "Demo service is not configured." }, { status: 503 });
+      return Response.json(
+        { error: "Demo service is not configured." },
+        { status: 503, headers: noStoreHeaders() },
+      );
     }
     if (config.deploymentProfile === "PUBLIC_REPLAY" && rawRequest !== PUBLIC_REPLAY_REQUEST) {
-      return publicReplayInvalidRequestResponse();
+      return withNoStoreHeaders(publicReplayInvalidRequestResponse());
     }
     let trustedRunsRoot: string;
     try {
       trustedRunsRoot = await assertRunsRoot(config.runsRoot);
     } catch {
-      return Response.json({ error: "Demo service storage is unavailable." }, { status: 503 });
+      return Response.json(
+        { error: "Demo service storage is unavailable." },
+        { status: 503, headers: noStoreHeaders() },
+      );
     }
     const admission = await acquireWorkflowLease(config, trustedRunsRoot, publicAdmission);
-    if (admission.kind === "rejected") return publicReplayErrorResponse(admission.code);
+    if (admission.kind === "rejected") {
+      return withNoStoreHeaders(publicReplayErrorResponse(admission.code));
+    }
     let leaseReleased = false;
     let streamOwnsLease = false;
     const releaseLease = (): void => {
@@ -242,7 +262,7 @@ export function createPostRunsHandler(overrides: PostRunsHandlerOverrides = {}) 
       if (input.mode !== config.mode) {
         return Response.json(
           { error: "Requested mode does not match server mode." },
-          { status: 409 },
+          { status: 409, headers: noStoreHeaders() },
         );
       }
 
@@ -323,11 +343,9 @@ export function createPostRunsHandler(overrides: PostRunsHandlerOverrides = {}) 
         },
       });
       const response = new Response(stream, {
-        headers: {
-          "Cache-Control": "no-store",
+        headers: noStoreHeaders({
           "Content-Type": "application/x-ndjson; charset=utf-8",
-          "X-Content-Type-Options": "nosniff",
-        },
+        }),
       });
       streamOwnsLease = true;
       return response;
@@ -361,9 +379,9 @@ export function createReloadRunHandler(overrides: ReloadRunHandlerOverrides = {}
       const config = loadConfig(process.env);
       const runsRoot = await assertRunsRoot(config.runsRoot);
       const snapshot = await loadSnapshot({ runsRoot, runId });
-      return Response.json(snapshot, { headers: { "Cache-Control": "no-store" } });
+      return Response.json(snapshot, { headers: noStoreHeaders() });
     } catch {
-      return Response.json({ error: "Run not found." }, { status: 404 });
+      return Response.json({ error: "Run not found." }, { status: 404, headers: noStoreHeaders() });
     }
   };
 }
@@ -404,17 +422,18 @@ export function createDownloadArtifactHandler(overrides: DownloadArtifactHandler
       const runsRoot = await assertRunsRoot(config.runsRoot);
       const body = await readArtifact({ runsRoot, runId, filename });
       return new Response(body, {
-        headers: {
-          "Cache-Control": "no-store",
+        headers: noStoreHeaders({
           "Content-Disposition": `attachment; filename="${filename}"`,
           "Content-Type": filename.endsWith(".sql")
             ? "text/sql; charset=utf-8"
             : "text/markdown; charset=utf-8",
-          "X-Content-Type-Options": "nosniff",
-        },
+        }),
       });
     } catch {
-      return Response.json({ error: "Artifact not found." }, { status: 404 });
+      return Response.json(
+        { error: "Artifact not found." },
+        { status: 404, headers: noStoreHeaders() },
+      );
     }
   };
 }
@@ -445,23 +464,34 @@ export function createRegenerateRunHandler(overrides: RegenerateRunHandlerOverri
     try {
       await assertEmptyRequestBody(request);
     } catch {
-      return Response.json({ error: "Invalid regeneration request." }, { status: 400 });
+      return Response.json(
+        { error: "Invalid regeneration request." },
+        { status: 400, headers: noStoreHeaders() },
+      );
     }
 
     let config: WebConfig;
     try {
       config = loadConfig(process.env);
     } catch {
-      return Response.json({ error: "Demo service is not configured." }, { status: 503 });
+      return Response.json(
+        { error: "Demo service is not configured." },
+        { status: 503, headers: noStoreHeaders() },
+      );
     }
     let runsRoot: string;
     try {
       runsRoot = await assertRunsRoot(config.runsRoot);
     } catch {
-      return Response.json({ error: "Demo service storage is unavailable." }, { status: 503 });
+      return Response.json(
+        { error: "Demo service storage is unavailable." },
+        { status: 503, headers: noStoreHeaders() },
+      );
     }
     const admission = await acquireWorkflowLease(config, runsRoot, publicAdmission);
-    if (admission.kind === "rejected") return publicReplayErrorResponse(admission.code);
+    if (admission.kind === "rejected") {
+      return withNoStoreHeaders(publicReplayErrorResponse(admission.code));
+    }
     let leaseReleased = false;
     let streamOwnsLease = false;
     const releaseLease = (): void => {
@@ -526,11 +556,9 @@ export function createRegenerateRunHandler(overrides: RegenerateRunHandlerOverri
       });
 
       const response = new Response(stream, {
-        headers: {
-          "Cache-Control": "no-store",
+        headers: noStoreHeaders({
           "Content-Type": "application/x-ndjson; charset=utf-8",
-          "X-Content-Type-Options": "nosniff",
-        },
+        }),
       });
       streamOwnsLease = true;
       return response;

@@ -305,6 +305,10 @@ it("streams NDJSON and ends with one validated terminal snapshot", async () => {
   const response = await startRun(runRequest({ mode: "REPLAY", request: REQUEST }));
   expect(response.status).toBe(200);
   expect(response.headers.get("content-type")).toBe("application/x-ndjson; charset=utf-8");
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+  expect(response.headers.get("x-frame-options")).toBe("DENY");
 
   const events = await collectEvents(response);
   const terminal = events.filter(
@@ -523,6 +527,10 @@ it("reloads sanitized snapshots, regenerates without DataHub, and downloads only
   });
   const parent = WorkflowSnapshotSchema.parse(await reload.json());
   expect(JSON.stringify(parent)).not.toContain(runsRoot);
+  expect(reload.headers.get("cache-control")).toBe("no-store");
+  expect(reload.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(reload.headers.get("x-content-type-options")).toBe("nosniff");
+  expect(reload.headers.get("x-frame-options")).toBe("DENY");
 
   const regenerationRequest = new Request(`http://localhost/api/runs/${runId}/regenerate`, {
     method: "POST",
@@ -531,6 +539,10 @@ it("reloads sanitized snapshots, regenerates without DataHub, and downloads only
   const regenerated = await regenerateRun(regenerationRequest, {
     params: Promise.resolve({ runId }),
   });
+  expect(regenerated.headers.get("cache-control")).toBe("no-store");
+  expect(regenerated.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(regenerated.headers.get("x-content-type-options")).toBe("nosniff");
+  expect(regenerated.headers.get("x-frame-options")).toBe("DENY");
   const regenerationEvents = await collectEvents(regenerated);
   const child = regenerationEvents.at(-1);
   if (child?.type !== "snapshot") throw new Error("Expected a terminal child snapshot.");
@@ -557,7 +569,9 @@ it("reloads sanitized snapshots, regenerates without DataHub, and downloads only
       filename.endsWith(".sql") ? "text/sql; charset=utf-8" : "text/markdown; charset=utf-8",
     );
     expect(download.headers.get("cache-control")).toBe("no-store");
+    expect(download.headers.get("referrer-policy")).toBe("no-referrer");
     expect(download.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(download.headers.get("x-frame-options")).toBe("DENY");
   }
 
   for (const filename of ["secret.txt", "../migration-up.sql", "%2e%2e"] as const) {
@@ -576,6 +590,17 @@ it("does not fall back when a final envelope is missing or tampered", async () =
   });
   expect(missing.status).toBe(404);
   expect(await missing.json()).toEqual({ error: "Run not found." });
+  expect(missing.headers.get("cache-control")).toBe("no-store");
+  expect(missing.headers.get("x-content-type-options")).toBe("nosniff");
+
+  const missingArtifact = await downloadArtifact(
+    new Request("http://localhost/api/runs/missing/artifacts/migration-up.sql"),
+    { params: Promise.resolve({ runId: "missing", filename: "migration-up.sql" }) },
+  );
+  expect(missingArtifact.status).toBe(404);
+  expect(await missingArtifact.json()).toEqual({ error: "Artifact not found." });
+  expect(missingArtifact.headers.get("cache-control")).toBe("no-store");
+  expect(missingArtifact.headers.get("x-content-type-options")).toBe("nosniff");
 
   const { runId } = await createCompletedRun();
   const envelopePath = join(runsRoot, `run-${runId}.json`);

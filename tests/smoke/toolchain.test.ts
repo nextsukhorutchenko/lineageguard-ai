@@ -62,6 +62,22 @@ describe("toolchain", () => {
     expect(nextConfig.output).toBeUndefined();
   });
 
+  it("applies no-store browser-security headers to every public path", async () => {
+    const headerRules = await nextConfig.headers?.();
+
+    expect(headerRules).toEqual([
+      {
+        source: "/:path*",
+        headers: expect.arrayContaining([
+          { key: "cache-control", value: "no-store" },
+          { key: "referrer-policy", value: "no-referrer" },
+          { key: "x-content-type-options", value: "nosniff" },
+          { key: "x-frame-options", value: "DENY" },
+        ]),
+      },
+    ]);
+  });
+
   it("keeps advisory PR impact reporting read-only and PR-gated", async () => {
     const workflow = await readFile(resolve(process.cwd(), ".github/workflows/ci.yml"), "utf8");
 

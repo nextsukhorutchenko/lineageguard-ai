@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { readPublicReplayFailureMessage } from "./demo-client.js";
+import { readArtifact, readPublicReplayFailureMessage } from "./demo-client.js";
 
 const FALLBACK = "The workflow stream ended unexpectedly.";
 
@@ -99,4 +99,20 @@ it("rejects a response body above 1,024 bytes without committing its text", asyn
   expect(message).not.toContain(untrustedText);
   expect(cancelled).toHaveBeenCalledOnce();
   expect(response.body?.locked).toBe(false);
+});
+
+it("maps an expired public artifact to the rerun recovery instruction", async () => {
+  const response = new Response("UNTRUSTED_EXPIRED_ARTIFACT", { status: 404 });
+
+  await expect(readArtifact(response, "migration-up.sql", "PUBLIC_REPLAY")).rejects.toThrow(
+    "Run expired; analyze again.",
+  );
+});
+
+it("keeps the local artifact preview failure copy for a missing artifact", async () => {
+  const response = new Response("UNTRUSTED_EXPIRED_ARTIFACT", { status: 404 });
+
+  await expect(readArtifact(response, "migration-up.sql", "LOCAL")).rejects.toThrow(
+    "Artifact preview is unavailable.",
+  );
 });

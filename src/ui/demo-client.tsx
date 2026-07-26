@@ -34,6 +34,8 @@ const artifactContentType = (filename: string): string =>
 
 const WORKFLOW_STREAM_FALLBACK = "The workflow stream ended unexpectedly.";
 const MAX_PUBLIC_REPLAY_ERROR_BYTES = 1_024;
+const ARTIFACT_PREVIEW_UNAVAILABLE = "Artifact preview is unavailable.";
+const PUBLIC_REPLAY_ARTIFACT_EXPIRED = "Run expired; analyze again.";
 
 async function cancelResponseBody(response: Response): Promise<void> {
   if (response.body === null) return;
@@ -96,7 +98,15 @@ export async function readPublicReplayFailureMessage(response: Response): Promis
   }
 }
 
-async function readArtifact(response: Response, filename: string): Promise<string> {
+export async function readArtifact(
+  response: Response,
+  filename: string,
+  deploymentProfile: DeploymentProfile,
+): Promise<string> {
+  const failureMessage =
+    deploymentProfile === "PUBLIC_REPLAY" && response.status === 404
+      ? PUBLIC_REPLAY_ARTIFACT_EXPIRED
+      : ARTIFACT_PREVIEW_UNAVAILABLE;
   if (!response.ok || response.headers.get("content-type") !== artifactContentType(filename)) {
     if (response.body !== null) {
       try {
@@ -105,9 +115,9 @@ async function readArtifact(response: Response, filename: string): Promise<strin
         // The fixed artifact error remains authoritative.
       }
     }
-    throw new Error("Artifact preview is unavailable.");
+    throw new Error(failureMessage);
   }
-  if (response.body === null) throw new Error("Artifact preview is unavailable.");
+  if (response.body === null) throw new Error(failureMessage);
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let length = 0;
@@ -119,7 +129,7 @@ async function readArtifact(response: Response, filename: string): Promise<strin
         !(value instanceof Uint8Array) ||
         value.byteLength > CLIENT_MAX_VIRTUAL_ARTIFACT_BYTES - length
       ) {
-        throw new Error("Artifact preview is unavailable.");
+        throw new Error(failureMessage);
       }
       chunks.push(value);
       length += value.byteLength;
@@ -137,7 +147,7 @@ async function readArtifact(response: Response, filename: string): Promise<strin
     } catch {
       // The fixed artifact error remains authoritative.
     }
-    throw new Error("Artifact preview is unavailable.");
+    throw new Error(failureMessage);
   } finally {
     reader.releaseLock();
   }
@@ -169,15 +179,21 @@ export function DemoClient(props: {
               const response = await fetch(`/api/runs/${snapshot.runId}/artifacts/${filename}`, {
                 signal: controller.signal,
               });
-              return [filename, await readArtifact(response, filename)] as const;
+              return [filename, await readArtifact(response, filename, deploymentProfile)] as const;
             }),
         );
         if (active) setContent(Object.fromEntries(pairs));
-      } catch {
+      } catch (error) {
         controller.abort();
         if (active) {
           setContent({});
-          setOperationStatus("Artifact preview is unavailable.");
+          setOperationStatus(
+            error instanceof Error &&
+              (error.message === ARTIFACT_PREVIEW_UNAVAILABLE ||
+                error.message === PUBLIC_REPLAY_ARTIFACT_EXPIRED)
+              ? error.message
+              : ARTIFACT_PREVIEW_UNAVAILABLE,
+          );
         }
       }
     })();
@@ -185,7 +201,7 @@ export function DemoClient(props: {
       active = false;
       controller.abort();
     };
-  }, [snapshot]);
+  }, [deploymentProfile, snapshot]);
 
   const consume = async (url: string, body?: unknown) => {
     const lease = requestOwner.current.begin();
