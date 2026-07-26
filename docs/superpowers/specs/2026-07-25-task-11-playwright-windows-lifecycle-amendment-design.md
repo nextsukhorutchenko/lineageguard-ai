@@ -1,7 +1,7 @@
 # Task 11 Playwright Windows Lifecycle Amendment Design
 
 **Status:** Approved
-**Date:** 2026-07-25  
+**Date:** 2026-07-25
 **Authority:** Owner-approved amendment A for Task 11
 
 ## Problem
