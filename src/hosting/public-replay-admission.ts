@@ -1,4 +1,4 @@
-import { readdir } from "node:fs/promises";
+import { lstat, readdir } from "node:fs/promises";
 import { readRunEnvelope } from "../artifacts/run-envelope-files.js";
 import { SafeRunIdSchema } from "../runs/run-envelope.js";
 
@@ -18,6 +18,23 @@ export type PublicReplayAdmissionDecision =
 
 export interface PublicReplayAdmission {
   acquire(runsRoot: string): Promise<PublicReplayAdmissionDecision>;
+}
+
+interface RunsRootIdentity {
+  readonly dev: bigint;
+  readonly ino: bigint;
+}
+
+async function readRunsRootIdentity(runsRoot: string): Promise<RunsRootIdentity> {
+  const stats = await lstat(runsRoot, { bigint: true });
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    throw new Error("Public replay storage is unavailable.");
+  }
+  return { dev: stats.dev, ino: stats.ino };
+}
+
+function isSameRootIdentity(expected: RunsRootIdentity, actual: RunsRootIdentity): boolean {
+  return expected.dev === actual.dev && expected.ino === actual.ino;
 }
 
 async function countPublishedRunEnvelopes(runsRoot: string): Promise<number> {
@@ -46,6 +63,7 @@ export function createPublicReplayAdmission(
   const envelopeLimit = options.envelopeLimit ?? PUBLIC_REPLAY_ENVELOPE_LIMIT;
   const countPublished = options.countPublished ?? countPublishedRunEnvelopes;
   let initializedRoot: string | undefined;
+  let initializedIdentity: RunsRootIdentity | undefined;
   let initializationPromise: Promise<void> | undefined;
   let activeWorkflows = 0;
   let publicationReservations = 0;
@@ -54,18 +72,21 @@ export function createPublicReplayAdmission(
     if (initializedRoot === undefined) initializedRoot = runsRoot;
     if (initializedRoot !== runsRoot) return false;
     if (initializationPromise === undefined) {
-      initializationPromise = Promise.resolve()
-        .then(() => countPublished(runsRoot))
-        .then((count) => {
-          if (!Number.isSafeInteger(count) || count < 0) {
-            throw new Error("Public replay storage is unavailable.");
-          }
-          publicationReservations = count;
-        });
+      initializationPromise = Promise.resolve().then(async () => {
+        const identity = await readRunsRootIdentity(runsRoot);
+        const count = await countPublished(runsRoot);
+        if (!Number.isSafeInteger(count) || count < 0) {
+          throw new Error("Public replay storage is unavailable.");
+        }
+        initializedIdentity = identity;
+        publicationReservations = count;
+      });
     }
     try {
       await initializationPromise;
-      return true;
+      if (initializedIdentity === undefined) return false;
+      const currentIdentity = await readRunsRootIdentity(runsRoot);
+      return isSameRootIdentity(initializedIdentity, currentIdentity);
     } catch {
       return false;
     }

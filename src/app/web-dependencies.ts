@@ -197,9 +197,20 @@ export function createPostRunsHandler(overrides: PostRunsHandlerOverrides = {}) 
 
   return async function postRuns(request: Request): Promise<Response> {
     let input: RunRequest;
+    let rawRequest: string;
     try {
       const rawBody = await readBoundedUtf8Body(request, MAX_RUN_REQUEST_BYTES);
-      input = RunRequestSchema.parse(JSON.parse(rawBody));
+      const rawInput: unknown = JSON.parse(rawBody);
+      input = RunRequestSchema.parse(rawInput);
+      if (
+        typeof rawInput !== "object" ||
+        rawInput === null ||
+        !("request" in rawInput) ||
+        typeof rawInput.request !== "string"
+      ) {
+        throw new Error("Invalid rename request.");
+      }
+      rawRequest = rawInput.request;
     } catch {
       return Response.json({ error: "Invalid rename request." }, { status: 400 });
     }
@@ -209,7 +220,7 @@ export function createPostRunsHandler(overrides: PostRunsHandlerOverrides = {}) 
     } catch {
       return Response.json({ error: "Demo service is not configured." }, { status: 503 });
     }
-    if (config.deploymentProfile === "PUBLIC_REPLAY" && input.request !== PUBLIC_REPLAY_REQUEST) {
+    if (config.deploymentProfile === "PUBLIC_REPLAY" && rawRequest !== PUBLIC_REPLAY_REQUEST) {
       return publicReplayInvalidRequestResponse();
     }
     let trustedRunsRoot: string;
@@ -220,98 +231,109 @@ export function createPostRunsHandler(overrides: PostRunsHandlerOverrides = {}) 
     }
     const admission = await acquireWorkflowLease(config, trustedRunsRoot, publicAdmission);
     if (admission.kind === "rejected") return publicReplayErrorResponse(admission.code);
-    if (input.mode !== config.mode) {
+    let leaseReleased = false;
+    let streamOwnsLease = false;
+    const releaseLease = (): void => {
+      if (leaseReleased) return;
+      leaseReleased = true;
       admission.lease.release();
-      return Response.json(
-        { error: "Requested mode does not match server mode." },
-        { status: 409 },
-      );
-    }
+    };
+    try {
+      if (input.mode !== config.mode) {
+        return Response.json(
+          { error: "Requested mode does not match server mode." },
+          { status: 409 },
+        );
+      }
 
-    const runId = createId(new Date());
-    const abortController = new AbortController();
-    const abort = () => abortController.abort();
-    if (request.signal.aborted) abort();
-    else request.signal.addEventListener("abort", abort, { once: true });
+      const runId = createId(new Date());
+      const abortController = new AbortController();
+      const abort = () => abortController.abort();
+      if (request.signal.aborted) abort();
+      else request.signal.addEventListener("abort", abort, { once: true });
 
-    const stream = new ReadableStream<Uint8Array>({
-      async start(controller) {
-        let terminalSnapshotSent = false;
-        const safeEnqueue = (event: WorkflowEvent): boolean => {
-          try {
-            controller.enqueue(encodeWorkflowEvent(event));
-            if (event.type === "snapshot" && isTerminalWorkflowStatus(event.snapshot.status)) {
-              terminalSnapshotSent = true;
-            }
-            return true;
-          } catch {
-            return false;
-          }
-        };
-        try {
-          const snapshot = await runWorkflow(
-            createDependencies({
-              config,
-              runsRoot: trustedRunsRoot,
-              request: input.request,
-              runId,
-              signal: abortController.signal,
-              onEvent: (event) => void safeEnqueue(event),
-            }),
-          );
-          if (!terminalSnapshotSent) safeEnqueue({ type: "snapshot", snapshot });
-        } catch {
-          if (!terminalSnapshotSent) {
-            let snapshot: WorkflowSnapshot | undefined;
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          let terminalSnapshotSent = false;
+          const safeEnqueue = (event: WorkflowEvent): boolean => {
             try {
-              const persisted = await loadRunSnapshot({
-                runsRoot: trustedRunsRoot,
-                runId,
-              });
-              if (persisted.status === "COMPLETED") snapshot = persisted;
+              controller.enqueue(encodeWorkflowEvent(event));
+              if (event.type === "snapshot" && isTerminalWorkflowStatus(event.snapshot.status)) {
+                terminalSnapshotSent = true;
+              }
+              return true;
             } catch {
-              // Only an already-published completion supersedes the closed fallback.
+              return false;
             }
-            if (snapshot === undefined) {
-              snapshot = abortController.signal.aborted
-                ? safeCancellationSnapshot(runId, config.mode)
-                : safeUnexpectedFailureSnapshot(runId, config.mode);
+          };
+          try {
+            const snapshot = await runWorkflow(
+              createDependencies({
+                config,
+                runsRoot: trustedRunsRoot,
+                request: input.request,
+                runId,
+                signal: abortController.signal,
+                onEvent: (event) => void safeEnqueue(event),
+              }),
+            );
+            if (!terminalSnapshotSent) safeEnqueue({ type: "snapshot", snapshot });
+          } catch {
+            if (!terminalSnapshotSent) {
+              let snapshot: WorkflowSnapshot | undefined;
               try {
-                await persistFailure({
+                const persisted = await loadRunSnapshot({
                   runsRoot: trustedRunsRoot,
                   runId,
-                  snapshot,
-                  secrets:
-                    config.mode === "LIVE" ? [config.openaiApiKey, config.datahubGmsToken] : [],
                 });
+                if (persisted.status === "COMPLETED") snapshot = persisted;
               } catch {
-                // The same closed fallback is safe to stream when persistence is unavailable.
+                // Only an already-published completion supersedes the closed fallback.
               }
+              if (snapshot === undefined) {
+                snapshot = abortController.signal.aborted
+                  ? safeCancellationSnapshot(runId, config.mode)
+                  : safeUnexpectedFailureSnapshot(runId, config.mode);
+                try {
+                  await persistFailure({
+                    runsRoot: trustedRunsRoot,
+                    runId,
+                    snapshot,
+                    secrets:
+                      config.mode === "LIVE" ? [config.openaiApiKey, config.datahubGmsToken] : [],
+                  });
+                } catch {
+                  // The same closed fallback is safe to stream when persistence is unavailable.
+                }
+              }
+              safeEnqueue({ type: "snapshot", snapshot });
             }
-            safeEnqueue({ type: "snapshot", snapshot });
+          } finally {
+            releaseLease();
+            request.signal.removeEventListener("abort", abort);
+            try {
+              controller.close();
+            } catch {
+              // A disconnected client is expected to have cancelled the stream.
+            }
           }
-        } finally {
-          admission.lease.release();
-          request.signal.removeEventListener("abort", abort);
-          try {
-            controller.close();
-          } catch {
-            // A disconnected client is expected to have cancelled the stream.
-          }
-        }
-      },
-      cancel() {
-        abortController.abort();
-        admission.lease.release();
-      },
-    });
-    return new Response(stream, {
-      headers: {
-        "Cache-Control": "no-store",
-        "Content-Type": "application/x-ndjson; charset=utf-8",
-        "X-Content-Type-Options": "nosniff",
-      },
-    });
+        },
+        cancel() {
+          abortController.abort();
+        },
+      });
+      const response = new Response(stream, {
+        headers: {
+          "Cache-Control": "no-store",
+          "Content-Type": "application/x-ndjson; charset=utf-8",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+      streamOwnsLease = true;
+      return response;
+    } finally {
+      if (!streamOwnsLease) releaseLease();
+    }
   };
 }
 
@@ -440,69 +462,80 @@ export function createRegenerateRunHandler(overrides: RegenerateRunHandlerOverri
     }
     const admission = await acquireWorkflowLease(config, runsRoot, publicAdmission);
     if (admission.kind === "rejected") return publicReplayErrorResponse(admission.code);
+    let leaseReleased = false;
+    let streamOwnsLease = false;
+    const releaseLease = (): void => {
+      if (leaseReleased) return;
+      leaseReleased = true;
+      admission.lease.release();
+    };
+    try {
+      const { runId: parentRunId } = await context.params;
+      const runId = createId(new Date());
+      const abortController = new AbortController();
+      const abort = () => abortController.abort();
+      if (request.signal.aborted) abort();
+      else request.signal.addEventListener("abort", abort, { once: true });
 
-    const { runId: parentRunId } = await context.params;
-    const runId = createId(new Date());
-    const abortController = new AbortController();
-    const abort = () => abortController.abort();
-    if (request.signal.aborted) abort();
-    else request.signal.addEventListener("abort", abort, { once: true });
-
-    const stream = new ReadableStream<Uint8Array>({
-      async start(controller) {
-        let terminalSnapshotSent = false;
-        const safeEnqueue = (event: WorkflowEvent): boolean => {
-          try {
-            controller.enqueue(encodeWorkflowEvent(event));
-            if (event.type === "snapshot" && isTerminalWorkflowStatus(event.snapshot.status)) {
-              terminalSnapshotSent = true;
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          let terminalSnapshotSent = false;
+          const safeEnqueue = (event: WorkflowEvent): boolean => {
+            try {
+              controller.enqueue(encodeWorkflowEvent(event));
+              if (event.type === "snapshot" && isTerminalWorkflowStatus(event.snapshot.status)) {
+                terminalSnapshotSent = true;
+              }
+              return true;
+            } catch {
+              return false;
             }
-            return true;
-          } catch {
-            return false;
-          }
-        };
-        try {
-          const snapshot = await regenerate(
-            createDependencies({
-              config,
-              runsRoot,
-              parentRunId,
-              runId,
-              signal: abortController.signal,
-              onEvent: (event) => void safeEnqueue(event),
-            }),
-          );
-          if (!terminalSnapshotSent) safeEnqueue({ type: "snapshot", snapshot });
-        } catch {
-          if (!terminalSnapshotSent) {
-            const snapshot = abortController.signal.aborted
-              ? safeCancellationSnapshot(runId, config.mode)
-              : safeUnexpectedFailureSnapshot(runId, config.mode);
-            safeEnqueue({ type: "snapshot", snapshot });
-          }
-        } finally {
-          admission.lease.release();
-          request.signal.removeEventListener("abort", abort);
+          };
           try {
-            controller.close();
+            const snapshot = await regenerate(
+              createDependencies({
+                config,
+                runsRoot,
+                parentRunId,
+                runId,
+                signal: abortController.signal,
+                onEvent: (event) => void safeEnqueue(event),
+              }),
+            );
+            if (!terminalSnapshotSent) safeEnqueue({ type: "snapshot", snapshot });
           } catch {
-            // A disconnected client is expected to have cancelled the stream.
+            if (!terminalSnapshotSent) {
+              const snapshot = abortController.signal.aborted
+                ? safeCancellationSnapshot(runId, config.mode)
+                : safeUnexpectedFailureSnapshot(runId, config.mode);
+              safeEnqueue({ type: "snapshot", snapshot });
+            }
+          } finally {
+            releaseLease();
+            request.signal.removeEventListener("abort", abort);
+            try {
+              controller.close();
+            } catch {
+              // A disconnected client is expected to have cancelled the stream.
+            }
           }
-        }
-      },
-      cancel() {
-        abortController.abort();
-        admission.lease.release();
-      },
-    });
+        },
+        cancel() {
+          abortController.abort();
+        },
+      });
 
-    return new Response(stream, {
-      headers: {
-        "Cache-Control": "no-store",
-        "Content-Type": "application/x-ndjson; charset=utf-8",
-        "X-Content-Type-Options": "nosniff",
-      },
-    });
+      const response = new Response(stream, {
+        headers: {
+          "Cache-Control": "no-store",
+          "Content-Type": "application/x-ndjson; charset=utf-8",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+      streamOwnsLease = true;
+      return response;
+    } finally {
+      if (!streamOwnsLease) releaseLease();
+    }
   };
 }

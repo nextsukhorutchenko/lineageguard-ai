@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -138,6 +138,24 @@ it("rejects a different runs root after initialization", async () => {
   first.lease.release();
 
   await expect(admission.acquire(secondRoot)).resolves.toEqual({
+    kind: "rejected",
+    code: "DEMO_CAPACITY_REACHED",
+  });
+});
+
+it("rejects the same path when it names a replacement directory after initialization", async () => {
+  const runsRoot = await freshRunsRoot();
+  const originalRoot = `${runsRoot}-original`;
+  temporaryRoots.push(originalRoot);
+  const admission = createPublicReplayAdmission({ countPublished: async () => 0 });
+  const first = await admission.acquire(runsRoot);
+  if (first.kind !== "accepted") throw new Error("Expected admission.");
+  first.lease.release();
+
+  await rename(runsRoot, originalRoot);
+  await mkdir(runsRoot);
+
+  await expect(admission.acquire(runsRoot)).resolves.toEqual({
     kind: "rejected",
     code: "DEMO_CAPACITY_REACHED",
   });

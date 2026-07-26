@@ -1171,6 +1171,39 @@ it("rejects a non-golden public request before storage, admission, run ID, or pe
   expect(await readdir(runsRoot)).toEqual([]);
 });
 
+it.each([
+  ["leading non-breaking space", `\u00a0${PUBLIC_REPLAY_REQUEST}`],
+  ["trailing em space", `${PUBLIC_REPLAY_REQUEST}\u2003`],
+] as const)(
+  "rejects the golden public request with %s before normalized downstream use",
+  async (_name, rawRequest) => {
+    const assertRunsRoot = vi.fn(async () => runsRoot);
+    const admissionDelegate = createPublicReplayAdmission({ countPublished: async () => 0 });
+    const acquire = vi.fn((root: string) => admissionDelegate.acquire(root));
+    const publicAdmission: PublicReplayAdmission = { acquire };
+    const createId = vi.fn(() => "unicode-whitespace-must-not-run");
+    const runWorkflow = vi.fn(async ({ runId }) => completedRouteSnapshot(runId));
+    const handler = createPostRunsHandler({
+      loadConfig: () => publicReplayConfig(runsRoot),
+      assertRunsRoot,
+      publicAdmission,
+      createId,
+      runWorkflow,
+    });
+
+    const response = await handler(runRequest({ mode: "REPLAY", request: rawRequest }));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: { code: "INVALID_REQUEST" },
+    });
+    expect(assertRunsRoot).not.toHaveBeenCalled();
+    expect(acquire).not.toHaveBeenCalled();
+    expect(createId).not.toHaveBeenCalled();
+    expect(runWorkflow).not.toHaveBeenCalled();
+  },
+);
+
 it("returns DEMO_BUSY before allocating or persisting a third concurrent public root run", async () => {
   const publicAdmission = createPublicReplayAdmission({ countPublished: async () => 0 });
   const workflows: Array<ReturnType<typeof deferred<WorkflowSnapshot>>> = [];
@@ -1206,6 +1239,96 @@ it("returns DEMO_BUSY before allocating or persisting a third concurrent public 
   workflows[1]?.resolve(completedRouteSnapshot("concurrent-root-2"));
   await Promise.all([collectEvents(first), collectEvents(second)]);
   expect(await readdir(runsRoot)).toEqual([]);
+});
+
+it("keeps a cancelled public root slot until the underlying workflow settles", async () => {
+  const publicAdmission = createPublicReplayAdmission({ countPublished: async () => 0 });
+  const workflows: Array<ReturnType<typeof deferred<WorkflowSnapshot>>> = [];
+  let runNumber = 0;
+  const handler = createPostRunsHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    publicAdmission,
+    createId: () => `cancel-pending-root-${(runNumber += 1)}`,
+    runWorkflow: () => {
+      const workflow = deferred<WorkflowSnapshot>();
+      workflows.push(workflow);
+      return workflow.promise;
+    },
+    persistFailure: async () => {},
+  });
+
+  const first = await handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+  const second = await handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+  await first.body?.cancel();
+
+  const whileCancelledWorkflowIsPending = await handler(
+    runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }),
+  );
+  expect(whileCancelledWorkflowIsPending.status).toBe(429);
+  expect(await whileCancelledWorkflowIsPending.json()).toMatchObject({
+    error: { code: "DEMO_BUSY" },
+  });
+
+  workflows[0]?.resolve(completedRouteSnapshot("cancel-pending-root-1"));
+  await workflows[0]?.promise;
+  const afterSettlement = await handler(
+    runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }),
+  );
+  expect(afterSettlement.status).toBe(200);
+
+  workflows[1]?.resolve(completedRouteSnapshot("cancel-pending-root-2"));
+  workflows[2]?.resolve(completedRouteSnapshot("cancel-pending-root-3"));
+  await Promise.all([collectEvents(second), collectEvents(afterSettlement)]);
+});
+
+it("keeps a cancelled public regeneration slot until regeneration settles", async () => {
+  const publicAdmission = createPublicReplayAdmission({ countPublished: async () => 0 });
+  const rootWorkflows: Array<ReturnType<typeof deferred<WorkflowSnapshot>>> = [];
+  const regenerationWorkflow = deferred<WorkflowSnapshot>();
+  let rootRunNumber = 0;
+  const rootHandler = createPostRunsHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    publicAdmission,
+    createId: () => `cancel-pending-shared-root-${(rootRunNumber += 1)}`,
+    runWorkflow: () => {
+      const workflow = deferred<WorkflowSnapshot>();
+      rootWorkflows.push(workflow);
+      return workflow.promise;
+    },
+    persistFailure: async () => {},
+  });
+  const regenerationHandler = createRegenerateRunHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    publicAdmission,
+    createId: () => "cancel-pending-child",
+    regenerate: () => regenerationWorkflow.promise,
+  });
+
+  const root = await rootHandler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+  const regeneration = await regenerationHandler(
+    new Request("http://localhost/api/runs/parent/regenerate", { method: "POST" }),
+    { params: Promise.resolve({ runId: "parent" }) },
+  );
+  await regeneration.body?.cancel();
+
+  const whileRegenerationIsPending = await rootHandler(
+    runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }),
+  );
+  expect(whileRegenerationIsPending.status).toBe(429);
+  expect(await whileRegenerationIsPending.json()).toMatchObject({
+    error: { code: "DEMO_BUSY" },
+  });
+
+  regenerationWorkflow.resolve(completedRouteSnapshot("cancel-pending-child"));
+  await regenerationWorkflow.promise;
+  const afterSettlement = await rootHandler(
+    runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }),
+  );
+  expect(afterSettlement.status).toBe(200);
+
+  rootWorkflows[0]?.resolve(completedRouteSnapshot("cancel-pending-shared-root-1"));
+  rootWorkflows[1]?.resolve(completedRouteSnapshot("cancel-pending-shared-root-2"));
+  await Promise.all([collectEvents(root), collectEvents(afterSettlement)]);
 });
 
 it("shares the default two-slot public controller between root and regeneration workflows", async () => {
@@ -1280,6 +1403,110 @@ it("returns DEMO_CAPACITY_REACHED before a sixty-fifth public run ID or persiste
   expect(createId).toHaveBeenCalledOnce();
   expect(persistFailure).not.toHaveBeenCalled();
   expect(await readdir(runsRoot)).toEqual([]);
+});
+
+it("releases public root admission when run ID allocation fails before stream ownership", async () => {
+  const publicAdmission = createPublicReplayAdmission({
+    concurrencyLimit: 1,
+    envelopeLimit: 4,
+    countPublished: async () => 0,
+  });
+  let createAttempt = 0;
+  const handler = createPostRunsHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    publicAdmission,
+    createId: () => {
+      createAttempt += 1;
+      if (createAttempt === 1) throw new Error("run ID allocation failed");
+      return "root-after-pre-stream-failure";
+    },
+    runWorkflow: async ({ runId }) => completedRouteSnapshot(runId),
+    persistFailure: async () => {},
+  });
+
+  await expect(
+    handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST })),
+  ).rejects.toThrow();
+
+  const afterFailure = await handler(
+    runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }),
+  );
+  expect(afterFailure.status).toBe(200);
+  expect(terminalSnapshots(await collectEvents(afterFailure))).toEqual([
+    expect.objectContaining({ runId: "root-after-pre-stream-failure", status: "COMPLETED" }),
+  ]);
+});
+
+it("releases public regeneration admission when route params reject before stream ownership", async () => {
+  const publicAdmission = createPublicReplayAdmission({
+    concurrencyLimit: 1,
+    envelopeLimit: 4,
+    countPublished: async () => 0,
+  });
+  const handler = createRegenerateRunHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    publicAdmission,
+    createId: () => "child-after-param-failure",
+    regenerate: async ({ runId }) => completedRouteSnapshot(runId),
+  });
+  const paramsFailure = new Error("route params failed");
+  const rejectingParams = {
+    then(
+      _resolve: (value: { readonly runId: string }) => void,
+      reject: (reason: unknown) => void,
+    ): void {
+      reject(paramsFailure);
+    },
+  } as unknown as Promise<{ readonly runId: string }>;
+
+  await expect(
+    handler(new Request("http://localhost/api/runs/parent/regenerate", { method: "POST" }), {
+      params: rejectingParams,
+    }),
+  ).rejects.toThrow();
+
+  const afterFailure = await handler(
+    new Request("http://localhost/api/runs/parent/regenerate", { method: "POST" }),
+    { params: Promise.resolve({ runId: "parent" }) },
+  );
+  expect(afterFailure.status).toBe(200);
+  expect(terminalSnapshots(await collectEvents(afterFailure))).toEqual([
+    expect.objectContaining({ runId: "child-after-param-failure", status: "COMPLETED" }),
+  ]);
+});
+
+it("releases public regeneration admission when child run ID allocation fails", async () => {
+  const publicAdmission = createPublicReplayAdmission({
+    concurrencyLimit: 1,
+    envelopeLimit: 4,
+    countPublished: async () => 0,
+  });
+  let createAttempt = 0;
+  const handler = createRegenerateRunHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    publicAdmission,
+    createId: () => {
+      createAttempt += 1;
+      if (createAttempt === 1) throw new Error("child run ID allocation failed");
+      return "child-after-id-failure";
+    },
+    regenerate: async ({ runId }) => completedRouteSnapshot(runId),
+  });
+
+  await expect(
+    handler(new Request("http://localhost/api/runs/parent/regenerate", { method: "POST" }), {
+      params: Promise.resolve({ runId: "parent" }),
+    }),
+  ).rejects.toThrow();
+
+  const afterFailure = await handler(
+    new Request("http://localhost/api/runs/parent/regenerate", { method: "POST" }),
+    { params: Promise.resolve({ runId: "parent" }) },
+  );
+  expect(afterFailure.status).toBe(200);
+  expect(terminalSnapshots(await collectEvents(afterFailure))).toEqual([
+    expect.objectContaining({ runId: "child-after-id-failure", status: "COMPLETED" }),
+  ]);
 });
 
 it.each(["success", "failure", "cancellation"] as const)(
