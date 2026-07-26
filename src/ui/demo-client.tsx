@@ -1,7 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type * as React from "react";
 import { CLIENT_MAX_VIRTUAL_ARTIFACT_BYTES } from "./artifact-limits.js";
+import {
+  PUBLIC_REPLAY_REQUEST,
+  type DeploymentProfile,
+} from "../hosting/public-replay-contracts.js";
 import type { DemoMode, WorkflowSnapshot } from "../workflow/contracts.js";
 import { readNdjson } from "./read-ndjson.js";
 import { ActivityTimeline } from "./activity-timeline.js";
@@ -73,7 +78,11 @@ async function readArtifact(response: Response, filename: string): Promise<strin
   }
 }
 
-export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) {
+export function DemoClient(props: {
+  readonly initialMode: DemoMode;
+  readonly deploymentProfile: DeploymentProfile;
+}): React.JSX.Element {
+  const { initialMode, deploymentProfile } = props;
   const [value, setValue] = useState(initialValue);
   const [snapshot, setSnapshot] = useState<WorkflowSnapshot>();
   const [activity, setActivity] = useState<WorkflowSnapshot["activity"]>([]);
@@ -166,7 +175,10 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
 
   const run = () => {
     if (!requestOwner.current.isInFlight())
-      void consume("/api/runs", { mode: initialMode, request: requestText(value) });
+      void consume("/api/runs", {
+        mode: initialMode,
+        request: deploymentProfile === "PUBLIC_REPLAY" ? PUBLIC_REPLAY_REQUEST : requestText(value),
+      });
   };
   const regenerate = () => {
     if (!requestOwner.current.isInFlight() && snapshot !== undefined) {
@@ -181,7 +193,11 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
           <span className="brand-mark">LG</span>
           <strong>LineageGuard AI</strong>
           <span className="mode-badge">
-            {initialMode === "REPLAY" ? "Fixture replay" : "Live DataHub + OpenAI"}
+            {deploymentProfile === "PUBLIC_REPLAY"
+              ? "Public fixture replay"
+              : initialMode === "REPLAY"
+                ? "Fixture replay"
+                : "Live DataHub + OpenAI"}
           </span>
         </nav>
         <p className="eyebrow">Metadata-aware change intelligence</p>
@@ -196,6 +212,7 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
           <ChangeRequestForm
             value={value}
             busy={busy}
+            locked={deploymentProfile === "PUBLIC_REPLAY"}
             onChange={setValue}
             onSubmit={run}
             onCancel={() => requestOwner.current.cancel()}

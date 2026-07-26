@@ -128,6 +128,7 @@ type LiveWebConfig = Extract<WebConfig, { readonly mode: "LIVE" }>;
 const liveConfig = (root: string): LiveWebConfig => ({
   mode: "LIVE",
   runsRoot: root,
+  deploymentProfile: "LOCAL",
   openaiApiKey: "test-openai-key",
   openaiModel: "gpt-5.6-sol",
   datahubGmsUrl: "http://localhost:8080",
@@ -135,7 +136,11 @@ const liveConfig = (root: string): LiveWebConfig => ({
   uvxPath: resolve("test-uvx"),
 });
 
-const replayConfig = (root: string): WebConfig => ({ mode: "REPLAY", runsRoot: root });
+const replayConfig = (root: string): WebConfig => ({
+  mode: "REPLAY",
+  runsRoot: root,
+  deploymentProfile: "LOCAL",
+});
 
 class LiveFixtureProvider implements AgentProvider {
   readonly identity = createOpenAIAgentProviderIdentity("test-live-model");

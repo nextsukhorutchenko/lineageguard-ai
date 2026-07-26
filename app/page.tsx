@@ -4,9 +4,9 @@ import { DemoClient } from "../src/ui/demo-client.js";
 export const dynamic = "force-dynamic";
 
 export default function Page() {
-  let initialMode;
+  let config: ReturnType<typeof loadWebConfig>;
   try {
-    initialMode = loadWebConfig(process.env).mode;
+    config = loadWebConfig(process.env);
   } catch {
     return (
       <main>
@@ -18,5 +18,5 @@ export default function Page() {
       </main>
     );
   }
-  return <DemoClient initialMode={initialMode} />;
+  return <DemoClient initialMode={config.mode} deploymentProfile={config.deploymentProfile} />;
 }
