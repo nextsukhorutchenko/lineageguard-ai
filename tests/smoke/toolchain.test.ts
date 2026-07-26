@@ -38,6 +38,7 @@ describe("toolchain", () => {
       "build:web": "next build --webpack",
       dev: "next dev --webpack",
       "prepare:pr-impact": "tsx scripts/prepare-pr-impact.ts",
+      "start:public-replay": "node dist/hosting/start-public-replay.js",
       "start:web": "next start",
       "summary:pr-impact": "tsx scripts/append-pr-impact-summary.ts",
       test: 'vitest run --exclude "tests/integration/**" --exclude "tests/e2e/**" --exclude "tests/exploratory/**" --exclude ".worktrees/**"',

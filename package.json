@@ -22,6 +22,7 @@
     "security:scan": "tsx scripts/scan-repository-secrets.ts",
     "security:scan:history": "tsx scripts/scan-repository-secrets.ts --history",
     "start": "node dist/cli.js",
+    "start:public-replay": "node dist/hosting/start-public-replay.js",
     "start:web": "next start",
     "submission:check": "tsx scripts/validate-submission-assets.ts",
     "summary:pr-impact": "tsx scripts/append-pr-impact-summary.ts",
