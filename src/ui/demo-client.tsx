@@ -5,6 +5,7 @@ import type * as React from "react";
 import { CLIENT_MAX_VIRTUAL_ARTIFACT_BYTES } from "./artifact-limits.js";
 import {
   PUBLIC_REPLAY_REQUEST,
+  PublicReplayErrorSchema,
   type DeploymentProfile,
 } from "../hosting/public-replay-contracts.js";
 import type { DemoMode, WorkflowSnapshot } from "../workflow/contracts.js";
@@ -30,6 +31,70 @@ const requestText = (value: ChangeFormValue): string =>
 
 const artifactContentType = (filename: string): string =>
   filename.endsWith(".sql") ? "text/sql; charset=utf-8" : "text/markdown; charset=utf-8";
+
+const WORKFLOW_STREAM_FALLBACK = "The workflow stream ended unexpectedly.";
+const MAX_PUBLIC_REPLAY_ERROR_BYTES = 1_024;
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  if (response.body === null) return;
+  try {
+    await response.body.cancel();
+  } catch {
+    // The fixed workflow fallback remains authoritative.
+  }
+}
+
+export async function readPublicReplayFailureMessage(response: Response): Promise<string> {
+  const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  if (response.ok || response.body === null || mediaType !== "application/json") {
+    await cancelResponseBody(response);
+    return WORKFLOW_STREAM_FALLBACK;
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (
+        !(value instanceof Uint8Array) ||
+        value.byteLength > MAX_PUBLIC_REPLAY_ERROR_BYTES - length
+      ) {
+        throw new Error("Public replay error is invalid.");
+      }
+      chunks.push(value);
+      length += value.byteLength;
+    }
+
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const parsed = PublicReplayErrorSchema.safeParse(JSON.parse(raw));
+    if (!parsed.success) return WORKFLOW_STREAM_FALLBACK;
+    if (parsed.data.error.code === "DEMO_BUSY") {
+      return "Public replay is busy. Try again shortly.";
+    }
+    if (parsed.data.error.code === "DEMO_CAPACITY_REACHED") {
+      return "Public replay capacity was reached. Try again after the service restarts.";
+    }
+    return WORKFLOW_STREAM_FALLBACK;
+  } catch {
+    try {
+      await reader.cancel();
+    } catch {
+      // The fixed workflow fallback remains authoritative.
+    }
+    return WORKFLOW_STREAM_FALLBACK;
+  } finally {
+    reader.releaseLock();
+  }
+}
 
 async function readArtifact(response: Response, filename: string): Promise<string> {
   if (!response.ok || response.headers.get("content-type") !== artifactContentType(filename)) {
@@ -124,6 +189,7 @@ export function DemoClient(props: {
 
   const consume = async (url: string, body?: unknown) => {
     const lease = requestOwner.current.begin();
+    let failureMessage = WORKFLOW_STREAM_FALLBACK;
     setBusy(true);
     setOperationStatus("");
     setSnapshot(undefined);
@@ -136,6 +202,10 @@ export function DemoClient(props: {
         signal: lease.controller.signal,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
+      if (!response.ok) {
+        failureMessage = await readPublicReplayFailureMessage(response);
+        throw new Error("Workflow stream is unavailable.");
+      }
       await readNdjson(response, (event) => {
         if (!requestOwner.current.isCurrent(lease)) return;
         if (event.type === "activity") setActivity((current) => [...current, event.entry]);
@@ -162,7 +232,7 @@ export function DemoClient(props: {
           validation: { outcome: "NOT_RUN", findingCount: 0, findingCodes: [] },
           failure: {
             code: "GENERATION_FAILED",
-            message: "The workflow stream ended unexpectedly.",
+            message: failureMessage,
           },
         });
       }

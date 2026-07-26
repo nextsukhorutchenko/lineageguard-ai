@@ -12,6 +12,17 @@ import {
   MAX_RUN_REQUEST_BYTES,
   readBoundedUtf8Body,
 } from "../http/bounded-body.js";
+import {
+  createPublicReplayAdmission,
+  type PublicReplayAdmission,
+  type PublicReplayAdmissionDecision,
+  type PublicReplayLease,
+} from "../hosting/public-replay-admission.js";
+import { PUBLIC_REPLAY_REQUEST } from "../hosting/public-replay-contracts.js";
+import {
+  publicReplayErrorResponse,
+  publicReplayInvalidRequestResponse,
+} from "../hosting/public-replay-http.js";
 import { createRunId } from "../runs/create-run-id.js";
 import { loadRunSnapshot, persistFailedRun, readCompletedPackageFile } from "../runs/run-store.js";
 import { DEADLINES_MS } from "../runtime/deadlines.js";
@@ -26,6 +37,24 @@ import {
 import { isTerminalWorkflowStatus } from "../workflow/state-machine.js";
 import { regeneratePackage } from "./regenerate-package.js";
 import { runAgentWorkflow, type RunAgentWorkflowDependencies } from "./run-agent-workflow.js";
+
+const sharedPublicReplayAdmission = createPublicReplayAdmission();
+const localReplayLease: PublicReplayLease = Object.freeze({ release() {} });
+
+async function acquireWorkflowLease(
+  config: WebConfig,
+  runsRoot: string,
+  publicAdmission: PublicReplayAdmission,
+): Promise<PublicReplayAdmissionDecision> {
+  if (config.deploymentProfile !== "PUBLIC_REPLAY") {
+    return { kind: "accepted", lease: localReplayLease };
+  }
+  try {
+    return await publicAdmission.acquire(runsRoot);
+  } catch {
+    return { kind: "rejected", code: "DEMO_CAPACITY_REACHED" };
+  }
+}
 
 export interface WebWorkflowDependencyInput {
   readonly config: WebConfig;
@@ -150,6 +179,7 @@ export function safeCancellationSnapshot(runId: string, mode: WebConfig["mode"])
 export interface PostRunsHandlerOverrides {
   readonly loadConfig?: typeof loadWebConfig;
   readonly assertRunsRoot?: typeof assertTrustedRunsRoot;
+  readonly publicAdmission?: PublicReplayAdmission;
   readonly createDependencies?: typeof createWebWorkflowDependencies;
   readonly runWorkflow?: typeof runAgentWorkflow;
   readonly persistFailure?: typeof persistFailedRun;
@@ -159,6 +189,7 @@ export interface PostRunsHandlerOverrides {
 export function createPostRunsHandler(overrides: PostRunsHandlerOverrides = {}) {
   const loadConfig = overrides.loadConfig ?? loadWebConfig;
   const assertRunsRoot = overrides.assertRunsRoot ?? assertTrustedRunsRoot;
+  const publicAdmission = overrides.publicAdmission ?? sharedPublicReplayAdmission;
   const createDependencies = overrides.createDependencies ?? createWebWorkflowDependencies;
   const runWorkflow = overrides.runWorkflow ?? runAgentWorkflow;
   const persistFailure = overrides.persistFailure ?? persistFailedRun;
@@ -178,13 +209,19 @@ export function createPostRunsHandler(overrides: PostRunsHandlerOverrides = {}) 
     } catch {
       return Response.json({ error: "Demo service is not configured." }, { status: 503 });
     }
+    if (config.deploymentProfile === "PUBLIC_REPLAY" && input.request !== PUBLIC_REPLAY_REQUEST) {
+      return publicReplayInvalidRequestResponse();
+    }
     let trustedRunsRoot: string;
     try {
       trustedRunsRoot = await assertRunsRoot(config.runsRoot);
     } catch {
       return Response.json({ error: "Demo service storage is unavailable." }, { status: 503 });
     }
+    const admission = await acquireWorkflowLease(config, trustedRunsRoot, publicAdmission);
+    if (admission.kind === "rejected") return publicReplayErrorResponse(admission.code);
     if (input.mode !== config.mode) {
+      admission.lease.release();
       return Response.json(
         { error: "Requested mode does not match server mode." },
         { status: 409 },
@@ -254,6 +291,7 @@ export function createPostRunsHandler(overrides: PostRunsHandlerOverrides = {}) 
             safeEnqueue({ type: "snapshot", snapshot });
           }
         } finally {
+          admission.lease.release();
           request.signal.removeEventListener("abort", abort);
           try {
             controller.close();
@@ -264,6 +302,7 @@ export function createPostRunsHandler(overrides: PostRunsHandlerOverrides = {}) 
       },
       cancel() {
         abortController.abort();
+        admission.lease.release();
       },
     });
     return new Response(stream, {
@@ -363,6 +402,7 @@ type RegenerateRouteContext = { readonly params: Promise<{ readonly runId: strin
 export interface RegenerateRunHandlerOverrides {
   readonly loadConfig?: typeof loadWebConfig;
   readonly assertRunsRoot?: typeof assertTrustedRunsRoot;
+  readonly publicAdmission?: PublicReplayAdmission;
   readonly createDependencies?: typeof createWebRegenerationDependencies;
   readonly regenerate?: typeof regeneratePackage;
   readonly createId?: typeof createRunId;
@@ -371,6 +411,7 @@ export interface RegenerateRunHandlerOverrides {
 export function createRegenerateRunHandler(overrides: RegenerateRunHandlerOverrides = {}) {
   const loadConfig = overrides.loadConfig ?? loadWebConfig;
   const assertRunsRoot = overrides.assertRunsRoot ?? assertTrustedRunsRoot;
+  const publicAdmission = overrides.publicAdmission ?? sharedPublicReplayAdmission;
   const createDependencies = overrides.createDependencies ?? createWebRegenerationDependencies;
   const regenerate = overrides.regenerate ?? regeneratePackage;
   const createId = overrides.createId ?? createRunId;
@@ -397,6 +438,8 @@ export function createRegenerateRunHandler(overrides: RegenerateRunHandlerOverri
     } catch {
       return Response.json({ error: "Demo service storage is unavailable." }, { status: 503 });
     }
+    const admission = await acquireWorkflowLease(config, runsRoot, publicAdmission);
+    if (admission.kind === "rejected") return publicReplayErrorResponse(admission.code);
 
     const { runId: parentRunId } = await context.params;
     const runId = createId(new Date());
@@ -439,6 +482,7 @@ export function createRegenerateRunHandler(overrides: RegenerateRunHandlerOverri
             safeEnqueue({ type: "snapshot", snapshot });
           }
         } finally {
+          admission.lease.release();
           request.signal.removeEventListener("abort", abort);
           try {
             controller.close();
@@ -449,6 +493,7 @@ export function createRegenerateRunHandler(overrides: RegenerateRunHandlerOverri
       },
       cancel() {
         abortController.abort();
+        admission.lease.release();
       },
     });
 

@@ -1,4 +1,4 @@
-import { link, lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -34,6 +34,11 @@ import type {
   EntityContext,
   EntityContextIncompleteReasonCode,
 } from "../../src/domain/evidence.js";
+import {
+  createPublicReplayAdmission,
+  type PublicReplayAdmission,
+} from "../../src/hosting/public-replay-admission.js";
+import { PUBLIC_REPLAY_REQUEST } from "../../src/hosting/public-replay-contracts.js";
 import type { VirtualArtifactFilename } from "../../src/runs/run-envelope.js";
 import { persistCompletedRun } from "../../src/runs/run-store.js";
 import { readNdjson } from "../../src/ui/read-ndjson.js";
@@ -141,6 +146,61 @@ const replayConfig = (root: string): WebConfig => ({
   runsRoot: root,
   deploymentProfile: "LOCAL",
 });
+
+const publicReplayConfig = (root: string): WebConfig => ({
+  mode: "REPLAY",
+  runsRoot: root,
+  deploymentProfile: "PUBLIC_REPLAY",
+});
+
+function completedRouteSnapshot(runId: string): WorkflowSnapshot {
+  return WorkflowSnapshotSchema.parse({
+    ...safeUnexpectedFailureSnapshot(runId, "REPLAY"),
+    status: "COMPLETED",
+    validation: { outcome: "PASSED", findingCount: 0, findingCodes: [] },
+    failure: undefined,
+  });
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function observeLeaseReleases(delegate: PublicReplayAdmission): {
+  readonly admission: PublicReplayAdmission;
+  readonly releaseCount: () => number;
+} {
+  let count = 0;
+  return {
+    admission: {
+      async acquire(root) {
+        const decision = await delegate.acquire(root);
+        if (decision.kind === "rejected") return decision;
+        let released = false;
+        return {
+          kind: "accepted",
+          lease: {
+            release() {
+              if (!released) {
+                released = true;
+                count += 1;
+              }
+              decision.lease.release();
+            },
+          },
+        };
+      },
+    },
+    releaseCount: () => count,
+  };
+}
 
 class LiveFixtureProvider implements AgentProvider {
   readonly identity = createOpenAIAgentProviderIdentity("test-live-model");
@@ -1069,4 +1129,224 @@ it("rejects a regeneration request body", async () => {
   );
   expect(response.status).toBe(400);
   expect(await response.json()).toEqual({ error: "Invalid regeneration request." });
+});
+
+it("rejects a non-golden public request before storage, admission, run ID, or persistence", async () => {
+  const assertRunsRoot = vi.fn();
+  const publicAdmission: PublicReplayAdmission = { acquire: vi.fn() };
+  const createId = vi.fn();
+  const createDependencies = vi.fn();
+  const runWorkflow = vi.fn();
+  const persistFailure = vi.fn();
+  const handler = createPostRunsHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    assertRunsRoot,
+    publicAdmission,
+    createId,
+    createDependencies,
+    runWorkflow,
+    persistFailure,
+  });
+
+  const response = await handler(
+    runRequest({
+      mode: "REPLAY",
+      request: "Rename column another_column to another_name in dataset another.dataset",
+    }),
+  );
+
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({
+    error: {
+      code: "INVALID_REQUEST",
+      message: "Only the certified public replay request is supported.",
+    },
+  });
+  expect(assertRunsRoot).not.toHaveBeenCalled();
+  expect(publicAdmission.acquire).not.toHaveBeenCalled();
+  expect(createId).not.toHaveBeenCalled();
+  expect(createDependencies).not.toHaveBeenCalled();
+  expect(runWorkflow).not.toHaveBeenCalled();
+  expect(persistFailure).not.toHaveBeenCalled();
+  expect(await readdir(runsRoot)).toEqual([]);
+});
+
+it("returns DEMO_BUSY before allocating or persisting a third concurrent public root run", async () => {
+  const publicAdmission = createPublicReplayAdmission({ countPublished: async () => 0 });
+  const workflows: Array<ReturnType<typeof deferred<WorkflowSnapshot>>> = [];
+  let runNumber = 0;
+  const createId = vi.fn(() => `concurrent-root-${(runNumber += 1)}`);
+  const handler = createPostRunsHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    publicAdmission,
+    createId,
+    runWorkflow: () => {
+      const workflow = deferred<WorkflowSnapshot>();
+      workflows.push(workflow);
+      return workflow.promise;
+    },
+    persistFailure: async () => {},
+  });
+
+  const first = await handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+  const second = await handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+  const rejected = await handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+
+  expect(rejected.status).toBe(429);
+  expect(await rejected.json()).toEqual({
+    error: {
+      code: "DEMO_BUSY",
+      message: "Public replay is busy. Try again shortly.",
+    },
+  });
+  expect(createId).toHaveBeenCalledTimes(2);
+  expect(workflows).toHaveLength(2);
+
+  workflows[0]?.resolve(completedRouteSnapshot("concurrent-root-1"));
+  workflows[1]?.resolve(completedRouteSnapshot("concurrent-root-2"));
+  await Promise.all([collectEvents(first), collectEvents(second)]);
+  expect(await readdir(runsRoot)).toEqual([]);
+});
+
+it("shares the default two-slot public controller between root and regeneration workflows", async () => {
+  const rootWorkflow = deferred<WorkflowSnapshot>();
+  const regenerationWorkflow = deferred<WorkflowSnapshot>();
+  const rootCreateId = vi.fn(() => "shared-root");
+  const childCreateId = vi.fn(() => "shared-child");
+  const rootHandler = createPostRunsHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    createId: rootCreateId,
+    runWorkflow: () => rootWorkflow.promise,
+    persistFailure: async () => {},
+  });
+  const regenerationHandler = createRegenerateRunHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    createId: childCreateId,
+    regenerate: () => regenerationWorkflow.promise,
+  });
+
+  const rootResponse = await rootHandler(
+    runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }),
+  );
+  const regenerationResponse = await regenerationHandler(
+    new Request("http://localhost/api/runs/parent/regenerate", { method: "POST" }),
+    { params: Promise.resolve({ runId: "parent" }) },
+  );
+  const rejected = await rootHandler(
+    runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }),
+  );
+
+  expect(rejected.status).toBe(429);
+  expect(await rejected.json()).toEqual({
+    error: {
+      code: "DEMO_BUSY",
+      message: "Public replay is busy. Try again shortly.",
+    },
+  });
+  expect(rootCreateId).toHaveBeenCalledOnce();
+  expect(childCreateId).toHaveBeenCalledOnce();
+
+  rootWorkflow.resolve(completedRouteSnapshot("shared-root"));
+  regenerationWorkflow.resolve(completedRouteSnapshot("shared-child"));
+  await Promise.all([collectEvents(rootResponse), collectEvents(regenerationResponse)]);
+});
+
+it("returns DEMO_CAPACITY_REACHED before a sixty-fifth public run ID or persistence entry", async () => {
+  const publicAdmission = createPublicReplayAdmission({
+    envelopeLimit: 64,
+    countPublished: async () => 63,
+  });
+  const createId = vi.fn(() => "last-public-envelope");
+  const persistFailure = vi.fn();
+  const handler = createPostRunsHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    publicAdmission,
+    createId,
+    runWorkflow: async ({ runId }) => completedRouteSnapshot(runId),
+    persistFailure,
+  });
+
+  const accepted = await handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+  await collectEvents(accepted);
+  const rejected = await handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+
+  expect(rejected.status).toBe(503);
+  expect(await rejected.json()).toEqual({
+    error: {
+      code: "DEMO_CAPACITY_REACHED",
+      message: "Public replay capacity was reached. Try again after the service restarts.",
+    },
+  });
+  expect(createId).toHaveBeenCalledOnce();
+  expect(persistFailure).not.toHaveBeenCalled();
+  expect(await readdir(runsRoot)).toEqual([]);
+});
+
+it.each(["success", "failure", "cancellation"] as const)(
+  "releases only the concurrency slot after public workflow %s",
+  async (outcome) => {
+    const observed = observeLeaseReleases(
+      createPublicReplayAdmission({
+        concurrencyLimit: 1,
+        envelopeLimit: 2,
+        countPublished: async () => 0,
+      }),
+    );
+    let runNumber = 0;
+    const createId = vi.fn(() => `${outcome}-${(runNumber += 1)}`);
+    const handler = createPostRunsHandler({
+      loadConfig: () => publicReplayConfig(runsRoot),
+      publicAdmission: observed.admission,
+      createId,
+      persistFailure: async () => {},
+      runWorkflow:
+        outcome === "success"
+          ? async ({ runId }) => completedRouteSnapshot(runId)
+          : outcome === "failure"
+            ? async () => {
+                throw new Error("classified route test failure");
+              }
+            : ({ signal }) => waitForAbort(signal),
+    });
+
+    for (let reservation = 1; reservation <= 2; reservation += 1) {
+      const response = await handler(
+        runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }),
+      );
+      if (outcome === "cancellation") await response.body?.cancel();
+      else await collectEvents(response);
+      await vi.waitFor(() => expect(observed.releaseCount()).toBe(reservation));
+    }
+
+    const rejected = await handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+    expect(rejected.status).toBe(503);
+    expect(await rejected.json()).toEqual({
+      error: {
+        code: "DEMO_CAPACITY_REACHED",
+        message: "Public replay capacity was reached. Try again after the service restarts.",
+      },
+    });
+    expect(createId).toHaveBeenCalledTimes(2);
+  },
+);
+
+it("keeps local REPLAY outside the public admission boundary", async () => {
+  const publicAdmission: PublicReplayAdmission = {
+    acquire: vi.fn(async () => {
+      throw new Error("Local replay must not acquire public admission.");
+    }),
+  };
+  const handler = createPostRunsHandler({
+    loadConfig: () => replayConfig(runsRoot),
+    publicAdmission,
+    createId: () => "local-bypass",
+    runWorkflow: async ({ runId }) => completedRouteSnapshot(runId),
+  });
+
+  const response = await handler(runRequest({ mode: "REPLAY", request: REQUEST }));
+  expect(response.status).toBe(200);
+  expect(terminalSnapshots(await collectEvents(response))).toEqual([
+    expect.objectContaining({ runId: "local-bypass", status: "COMPLETED" }),
+  ]);
+  expect(publicAdmission.acquire).not.toHaveBeenCalled();
 });
