@@ -294,8 +294,8 @@ Repeat `datahub init` after an operator-approved local nuke or a signing-key cha
    The operator-owned live runs root remains in place after the shell variable is cleared. Do not
    recursively remove it as part of application shutdown.
 
-The UI endpoint is `http://localhost:9002`; the MCP subprocess connects to the GMS endpoint at
-`http://localhost:8080`.
+The LineageGuard demo UI is at `http://localhost:3000`. The DataHub UI is at
+`http://localhost:9002`; the MCP subprocess connects to the GMS endpoint at `http://localhost:8080`.
 
 `datahub/datahub` authenticates only the default local Quickstart frontend. A shell-local `DATAHUB_GMS_TOKEN` authenticates the MCP subprocess to GMS. `OPENAI_API_KEY` authenticates only the server-side OpenAI provider. These credentials are separate; default frontend credentials and directly exposed DataHub ports are allowed only on an isolated localhost Quickstart and must never be published.
 
