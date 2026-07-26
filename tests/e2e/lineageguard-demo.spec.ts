@@ -70,6 +70,10 @@ test("completes the golden grounded replay flow", async ({ page }) => {
   await expect(page.getByText("Field: customer_id")).toBeVisible();
   await expect(page.getByRole("tab", { name: "migration-up.sql" })).toBeVisible();
   await expect(page.getByRole("tabpanel")).toContainText("NON-EXECUTABLE TEMPLATE");
+  const goldenPanel = await page
+    .getByRole("tabpanel")
+    .evaluate((panel) => ({ clientWidth: panel.clientWidth, scrollWidth: panel.scrollWidth }));
+  expect(goldenPanel.scrollWidth).toBeLessThanOrEqual(goldenPanel.clientWidth);
 });
 
 test("asks the user to choose an ambiguous dataset", async ({ page }) => {
@@ -425,6 +429,73 @@ test("rejects a wrong artifact content type without a page error", async ({ page
   expect(errors).toEqual([]);
 });
 
+for (const [name, status, contentType] of [
+  ["non-success response", 503, "text/sql; charset=utf-8"],
+  ["wrong content type", 200, "application/json"],
+] as const) {
+  test(`cancels ${name} bodies and pending sibling artifact loads`, async ({ page }) => {
+    await page.addInitScript(
+      ({ rejectedStatus, rejectedContentType }) => {
+        const nativeFetch = window.fetch.bind(window);
+        const counters = { rejectedBody: 0, siblingAborts: 0 };
+        Object.defineProperty(window, "__artifactCancellationCounters", {
+          configurable: true,
+          value: counters,
+        });
+        window.fetch = async (input, init) => {
+          const url =
+            typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+          if (!url.includes("/artifacts/")) return await nativeFetch(input, init);
+          if (url.endsWith("/migration-up.sql")) {
+            return new Response(
+              new ReadableStream<Uint8Array>({
+                pull() {
+                  // Keep the rejected response body pending until the client cancels it.
+                },
+                cancel() {
+                  counters.rejectedBody += 1;
+                },
+              }),
+              {
+                status: rejectedStatus,
+                headers: { "content-type": rejectedContentType },
+              },
+            );
+          }
+          return await new Promise<Response>((_resolve, reject) => {
+            const abort = () => {
+              counters.siblingAborts += 1;
+              reject(new DOMException("Artifact load aborted.", "AbortError"));
+            };
+            if (init?.signal?.aborted === true) abort();
+            else init?.signal?.addEventListener("abort", abort, { once: true });
+          });
+        };
+      },
+      { rejectedStatus: status, rejectedContentType: contentType },
+    );
+
+    await page.goto("/");
+    await page.getByRole("button", { name: "Analyze change" }).click();
+    await expect(page.getByRole("status")).toHaveText("Artifact preview is unavailable.");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (
+              window as unknown as {
+                __artifactCancellationCounters: {
+                  readonly rejectedBody: number;
+                  readonly siblingAborts: number;
+                };
+              }
+            ).__artifactCancellationCounters,
+        ),
+      )
+      .toEqual({ rejectedBody: 1, siblingAborts: 3 });
+  });
+}
+
 test("rejects a missing artifact response without a page error", async ({ page }) => {
   const errors: Error[] = [];
   page.on("pageerror", (error) => errors.push(error));
@@ -436,6 +507,47 @@ test("rejects a missing artifact response without a page error", async ({ page }
   await expect(page.getByRole("status")).toHaveText("Artifact preview is unavailable.");
   await expect(page.getByRole("button", { name: "Copy" })).toBeDisabled();
   expect(errors).toEqual([]);
+});
+
+test("aborts stale never-ending artifact loads when the snapshot is replaced", async ({ page }) => {
+  await page.addInitScript(() => {
+    const nativeFetch = window.fetch.bind(window);
+    let aborted = 0;
+    Object.defineProperty(window, "__staleArtifactAbortCount", {
+      configurable: true,
+      get: () => aborted,
+    });
+    window.fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (!url.includes("/artifacts/")) return await nativeFetch(input, init);
+      return await new Promise<Response>((_resolve, reject) => {
+        const abort = () => {
+          aborted += 1;
+          reject(new DOMException("Stale artifact load aborted.", "AbortError"));
+        };
+        if (init?.signal?.aborted === true) abort();
+        else init?.signal?.addEventListener("abort", abort, { once: true });
+      });
+    };
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Analyze change" }).click();
+  await expect(page.getByRole("tab", { name: "migration-up.sql" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Analyze change" })).toBeEnabled();
+  await page.getByRole("button", { name: "Analyze change" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as unknown as {
+              readonly __staleArtifactAbortCount: number;
+            }
+          ).__staleArtifactAbortCount,
+      ),
+    )
+    .toBeGreaterThanOrEqual(4);
 });
 
 test("reports a fixed artifact network failure without a page error", async ({ page }) => {
@@ -673,4 +785,21 @@ test("keeps the golden decision usable on a phone viewport", async ({ page }) =>
     expect(box!.x).toBeGreaterThanOrEqual(0);
     expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
   }
+});
+
+test("wraps a long unbroken artifact without horizontal preview overflow", async ({ page }) => {
+  await page.route("**/artifacts/migration-up.sql", async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/sql; charset=utf-8" },
+      body: "x".repeat(10_000),
+    });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Analyze change" }).click();
+  await expect(page.getByRole("button", { name: "Copy" })).toBeEnabled();
+  const preview = await page
+    .getByRole("tabpanel")
+    .evaluate((panel) => ({ clientWidth: panel.clientWidth, scrollWidth: panel.scrollWidth }));
+  expect(preview.scrollWidth).toBeLessThanOrEqual(preview.clientWidth);
 });

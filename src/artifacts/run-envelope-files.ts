@@ -318,7 +318,7 @@ function createRunEnvelopeFileBoundary(dependencies: BoundaryDependencies = {}) 
         total += result.bytesRead;
       }
       if (total > maximumBytes) throw new Error("Final file exceeds its byte limit.");
-      return buffer.subarray(0, total).toString("utf8");
+      return new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, total));
     } finally {
       await handle.close().catch(() => undefined);
     }

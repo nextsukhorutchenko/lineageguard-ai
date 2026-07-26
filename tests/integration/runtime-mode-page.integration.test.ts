@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { access, mkdtemp, realpath, rm } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { expect, it } from "vitest";
 import { __testOnly, createRootSafety, renderBuiltPage } from "./runtime-mode-harness.js";
 
@@ -51,7 +51,7 @@ it(
           OPENAI_API_KEY: "test-placeholder-openai-key",
           DATAHUB_GMS_URL: "http://127.0.0.1:65535",
           DATAHUB_GMS_TOKEN: "test-placeholder-datahub-token",
-          DATAHUB_MCP_UVX_PATH: "uvx",
+          DATAHUB_MCP_UVX_PATH: resolve("test-uvx"),
         },
         rootSafety,
       );

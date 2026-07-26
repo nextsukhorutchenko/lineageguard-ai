@@ -9,6 +9,7 @@ const minimumEnvironment = {
 };
 const absoluteEnvironment = {
   ...minimumEnvironment,
+  DATAHUB_MCP_UVX_PATH: resolve("test-uvx"),
   LINEAGEGUARD_RUNS_DIR: resolve("test-runs"),
 };
 
@@ -43,9 +44,25 @@ describe("loadRuntimeConfig", () => {
     ).toThrowError(expect.objectContaining({ code: "ARTIFACT_WRITE_FAILED" }));
   });
 
-  it("applies the pinned non-storage runtime defaults", () => {
+  it("requires an explicit absolute uvx executable path", () => {
+    expect(() =>
+      loadRuntimeConfig({
+        ...minimumEnvironment,
+        LINEAGEGUARD_RUNS_DIR: absoluteEnvironment.LINEAGEGUARD_RUNS_DIR,
+      }),
+    ).toThrow();
+    expect(() =>
+      loadRuntimeConfig({
+        ...minimumEnvironment,
+        DATAHUB_MCP_UVX_PATH: "uvx",
+        LINEAGEGUARD_RUNS_DIR: absoluteEnvironment.LINEAGEGUARD_RUNS_DIR,
+      }),
+    ).toThrow();
+  });
+
+  it("loads the explicit pinned runtime settings", () => {
     expect(loadRuntimeConfig(absoluteEnvironment)).toMatchObject({
-      uvxPath: "uvx",
+      uvxPath: absoluteEnvironment.DATAHUB_MCP_UVX_PATH,
       runsRoot: absoluteEnvironment.LINEAGEGUARD_RUNS_DIR,
       maxHops: 2,
     });
@@ -65,7 +82,11 @@ describe("loadRuntimeConfig", () => {
     const override = resolve("override-runs");
     expect(
       loadRuntimeConfig(
-        { ...minimumEnvironment, LINEAGEGUARD_RUNS_DIR: resolve("environment-runs") },
+        {
+          ...minimumEnvironment,
+          DATAHUB_MCP_UVX_PATH: resolve("test-uvx"),
+          LINEAGEGUARD_RUNS_DIR: resolve("environment-runs"),
+        },
         override,
       ).runsRoot,
     ).toBe(override);

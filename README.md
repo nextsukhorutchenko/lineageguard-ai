@@ -95,7 +95,7 @@ Keep the local GMS token only in the current process environment. The extraction
 ```powershell
 $env:DATAHUB_GMS_URL = "http://localhost:8080"
 $env:DATAHUB_GMS_TOKEN = & .\.venv\Scripts\python.exe -c "from pathlib import Path; import yaml; config=yaml.safe_load(Path(r'$env:USERPROFILE\.datahubenv').read_text(encoding='utf-8')); find=lambda value: next((found for key,item in value.items() for found in ([item] if key.lower()=='token' and isinstance(item,str) else [find(item)] if isinstance(item,dict) else [] ) if found), None); token=find(config); assert token and isinstance(token,str); print(token)"
-$env:DATAHUB_MCP_UVX_PATH = "uvx"
+$env:DATAHUB_MCP_UVX_PATH = (Get-Command uvx -ErrorAction Stop).Source
 ```
 
 Never commit `.env`, `.datahubenv`, or `DATAHUB_GMS_TOKEN`. Remove the shell-local values when finished:

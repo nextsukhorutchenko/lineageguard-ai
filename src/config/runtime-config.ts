@@ -9,10 +9,15 @@ export const RunsRootPathSchema = z
   .min(1)
   .refine((value) => isAbsolute(value), "The runs root must be absolute.");
 
+export const AbsoluteExecutablePathSchema = z
+  .string()
+  .min(1)
+  .refine((value) => isAbsolute(value), "The executable path must be absolute.");
+
 const environmentSchema = z.object({
   DATAHUB_GMS_URL: z.url(),
   DATAHUB_GMS_TOKEN: z.string().min(1),
-  DATAHUB_MCP_UVX_PATH: z.string().min(1).default("uvx"),
+  DATAHUB_MCP_UVX_PATH: AbsoluteExecutablePathSchema,
   LINEAGEGUARD_RUNS_DIR: RunsRootPathSchema,
 });
 

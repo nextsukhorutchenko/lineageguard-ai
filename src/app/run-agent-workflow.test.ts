@@ -14,7 +14,11 @@ import { FixtureCatalog } from "../demo/fixture-catalog.js";
 import { createBoundedMcpClose } from "../datahub/mcp/mcp-boundary-policy.js";
 import { createGoldenDraft } from "../agent/fake-agent-provider.js";
 import { migrationAgentInstructions } from "../agent/prompt.js";
-import type { AgentProvider } from "../agent/provider.js";
+import {
+  createOpenAIAgentProviderIdentity,
+  fixtureAgentProviderIdentity,
+  type AgentProvider,
+} from "../agent/provider.js";
 import type { PackageFinding } from "../migrations/validate-sql.js";
 import { loadRunSnapshot, readCompletedPackageFile } from "../runs/run-store.js";
 import type { MigrationPackageDraft } from "../workflow/migration-draft.js";
@@ -143,6 +147,7 @@ it("persists the maximal six-event deadline record without duplicates", async ()
       return new FixtureCatalog();
     },
     provider: {
+      identity: fixtureAgentProviderIdentity,
       async run({ tools, request, signal, recordDeadlineEvent }) {
         const analysis = await tools.analyzeRenameChange({ request }, signal);
         if (analysis.kind !== "ready") throw new Error("Expected ready analysis.");
@@ -208,6 +213,7 @@ it("persists the maximal six-event deadline record without duplicates", async ()
 it("returns clarification and never calls package generation", async () => {
   const dependencies = await makeWorkflowDependencies({
     provider: {
+      identity: fixtureAgentProviderIdentity,
       async run({ tools, request, signal }) {
         const analysis = await tools.analyzeRenameChange({ request }, signal);
         expect(analysis.kind).toBe("clarification");
@@ -276,6 +282,44 @@ it("maps abort to CANCELLED and never emits COMPLETED afterwards", async () => {
     { kind: "AGENT_TIMEOUT", durationMs: 90_000, attempt: 1, outcome: "cancelled" },
     { kind: "WORKFLOW_TIMEOUT", durationMs: 95_000, attempt: 1, outcome: "cancelled" },
   ]);
+});
+
+it("persists the configured non-default live identity when cancellation wins", async () => {
+  const controller = new AbortController();
+  const provider = Object.assign(providerThatWaitsForAbort(), {
+    identity: Object.freeze({
+      provider: "openai" as const,
+      model: "gpt-5.6-terra",
+      reasoningEffort: "medium" as const,
+    }),
+  });
+  const dependencies = await makeWorkflowDependencies({
+    mode: "LIVE",
+    provider,
+    signal: controller.signal,
+  });
+  const work = runAgentWorkflow(dependencies);
+
+  controller.abort();
+  const result = await work;
+
+  expect(result).toMatchObject({
+    status: "CANCELLED",
+    agent: {
+      provider: "openai",
+      model: "gpt-5.6-terra",
+      reasoningEffort: "medium",
+    },
+  });
+  await expect(
+    loadRunSnapshot({ runsRoot: dependencies.runsRoot, runId: result.runId }),
+  ).resolves.toMatchObject({
+    agent: {
+      provider: "openai",
+      model: "gpt-5.6-terra",
+      reasoningEffort: "medium",
+    },
+  });
 });
 
 it("classifies the complete DataHub analysis deadline and suppresses a late catalog result", async () => {
@@ -411,6 +455,43 @@ it("persists one agent-deadline failure and never requires a route fallback", as
   expect(events.filter((event) => event.type === "snapshot")).toHaveLength(1);
 });
 
+it("persists the configured non-default live identity when the agent deadline expires", async () => {
+  vi.useFakeTimers();
+  const provider = Object.assign(providerThatWaitsForAbort(), {
+    identity: Object.freeze({
+      provider: "openai" as const,
+      model: "gpt-5.6-terra",
+      reasoningEffort: "medium" as const,
+    }),
+  });
+  const dependencies = await makeWorkflowDependencies({
+    mode: "LIVE",
+    provider,
+  });
+  const work = runAgentWorkflow(dependencies);
+
+  await vi.advanceTimersByTimeAsync(90_000);
+  const result = await work;
+
+  expect(result).toMatchObject({
+    status: "GENERATION_FAILED",
+    agent: {
+      provider: "openai",
+      model: "gpt-5.6-terra",
+      reasoningEffort: "medium",
+    },
+  });
+  await expect(
+    loadRunSnapshot({ runsRoot: dependencies.runsRoot, runId: result.runId }),
+  ).resolves.toMatchObject({
+    agent: {
+      provider: "openai",
+      model: "gpt-5.6-terra",
+      reasoningEffort: "medium",
+    },
+  });
+});
+
 it("expires the workflow deadline at the pre-link barrier and publishes only CANCELLED", async () => {
   vi.useFakeTimers();
   const entered = Promise.withResolvers<void>();
@@ -467,6 +548,7 @@ it.each([
     const dependencies = await makeWorkflowDependencies({
       createCatalog,
       provider: {
+        identity: fixtureAgentProviderIdentity,
         async run({ tools, request, signal }) {
           await tools.analyzeRenameChange({ request }, signal);
           const generated = await tools.generateMigrationPackage(
@@ -504,6 +586,7 @@ it("ignores a model-authored request copy and analyzes only the server-owned req
   const dependencies = await makeWorkflowDependencies({
     createCatalog: async () => catalog,
     provider: {
+      identity: fixtureAgentProviderIdentity,
       async run({ tools, signal }) {
         const analysis = await tools.analyzeRenameChange({ request: alternate }, signal);
         return analysis.kind === "ready"
@@ -538,6 +621,7 @@ it("does not count or validate a generation call made after an accepted package"
     | undefined;
   const dependencies = await makeWorkflowDependencies({
     provider: {
+      identity: fixtureAgentProviderIdentity,
       async run({ tools, request, signal }) {
         const analysis = await tools.analyzeRenameChange({ request }, signal);
         if (analysis.kind !== "ready") throw new Error("Expected ready context.");
@@ -567,6 +651,7 @@ it("enforces two application-owned rejected attempts and persists only the last 
   const observedCodes: string[][] = [];
   const dependencies = await makeWorkflowDependencies({
     provider: {
+      identity: fixtureAgentProviderIdentity,
       async run({ tools, request, signal }) {
         const analysis = await tools.analyzeRenameChange({ request }, signal);
         if (analysis.kind !== "ready") throw new Error("Expected ready context.");
@@ -641,6 +726,7 @@ it("rejects a malformed runtime draft without persisting provider data", async (
   const dependencies = await makeWorkflowDependencies({
     secrets: [secret],
     provider: {
+      identity: fixtureAgentProviderIdentity,
       async run({ tools, request, signal }) {
         const analysis = await tools.analyzeRenameChange({ request }, signal);
         expect(analysis.kind).toBe("ready");
@@ -717,6 +803,7 @@ it("normalizes ungrounded evidence IDs before validation and failed-envelope per
     secrets: [secret],
     onEvent: (event) => events.push(event),
     provider: {
+      identity: fixtureAgentProviderIdentity,
       async run({ tools, request, signal }) {
         const analysis = await tools.analyzeRenameChange({ request }, signal);
         if (analysis.kind !== "ready") throw new Error("Expected ready analysis.");
@@ -865,6 +952,7 @@ it("redacts active secrets from DataHub context, provider output, events, and th
     secrets: [secret],
     createCatalog: async () => new SecretBearingCatalog(secret),
     provider: {
+      identity: fixtureAgentProviderIdentity,
       async run({ request: safeRequest, tools, signal }) {
         expect(safeRequest).toBe(GOLDEN_REQUEST);
         expect(safeRequest).not.toContain(secret);
@@ -903,6 +991,7 @@ it("fails closed when request redaction would make the dataset identity unsafe",
     secrets: [secret],
     createCatalog: async () => new RedactedIdentityCatalog(),
     provider: {
+      identity: fixtureAgentProviderIdentity,
       async run({ request, tools, signal }) {
         expect(request).toContain("[REDACTED]");
         expect(request).not.toContain(secret);
@@ -1189,6 +1278,7 @@ it("maps a verified live catalog to the closed MCP proof", async () => {
 it("rejects generation before analysis without consuming an application attempt", async () => {
   const dependencies = await makeWorkflowDependencies({
     provider: {
+      identity: fixtureAgentProviderIdentity,
       async run({ tools, signal }) {
         expect(
           await tools.generateMigrationPackage(
@@ -1243,6 +1333,7 @@ it("preserves an already-started generation attempt when cancellation interrupts
   const dependencies = await makeWorkflowDependencies({
     signal: controller.signal,
     provider: {
+      identity: fixtureAgentProviderIdentity,
       async run({ tools, request, signal }) {
         const analysis = await tools.analyzeRenameChange({ request }, signal);
         if (analysis.kind !== "ready") throw new Error("Expected ready context.");
@@ -1540,6 +1631,7 @@ function completedProviderResult() {
 
 function providerThatFailsAfterAnalysis(): AgentProvider {
   return {
+    identity: fixtureAgentProviderIdentity,
     async run({ tools, request, signal }) {
       const analysis = await tools.analyzeRenameChange({ request }, signal);
       expect(analysis.kind).toBe("ready");
@@ -1562,6 +1654,7 @@ function providerThatFailsAfterAnalysis(): AgentProvider {
 
 function providerThatWaitsForAbort(): AgentProvider {
   return {
+    identity: fixtureAgentProviderIdentity,
     run({ signal }) {
       return new Promise((_, reject) => {
         const rejectFromAbort = () => reject(signal.reason);
@@ -1577,6 +1670,7 @@ function providerThatWaitsForAbort(): AgentProvider {
 
 function liveProviderThatStopsAfterAnalysis(): AgentProvider {
   return {
+    identity: createOpenAIAgentProviderIdentity("gpt-5.6-sol"),
     async run({ tools, request, signal }) {
       const analysis = await tools.analyzeRenameChange({ request }, signal);
       return {

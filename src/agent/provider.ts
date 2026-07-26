@@ -72,7 +72,26 @@ export interface AgentProviderResult {
   };
 }
 
+export type AgentProviderIdentity = Readonly<
+  Pick<AgentProviderResult, "provider" | "model" | "reasoningEffort">
+>;
+
+export const fixtureAgentProviderIdentity: AgentProviderIdentity = Object.freeze({
+  provider: "fixture",
+  model: "replay-v1",
+  reasoningEffort: "none",
+});
+
+export function createOpenAIAgentProviderIdentity(model: string): AgentProviderIdentity {
+  return Object.freeze({
+    provider: "openai",
+    model,
+    reasoningEffort: "medium",
+  });
+}
+
 export interface AgentProvider {
+  readonly identity: AgentProviderIdentity;
   run(input: {
     readonly request: string;
     readonly tools: AgentToolset;

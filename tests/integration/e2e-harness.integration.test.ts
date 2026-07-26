@@ -1,4 +1,4 @@
-import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -283,4 +283,69 @@ describe.sequential("Playwright server lifecycle", () => {
       ),
     ).toEqual(Buffer.from([...Buffer.alloc(16_381, 0x61), 0xe2, 0x82, 0xac]));
   });
+
+  it(
+    "starts replay with an explicit non-secret environment allowlist",
+    async () => {
+      const fixtureRoot = await mkdtemp(join(tmpdir(), "lineageguard-e2e-env-"));
+      const fakeNextCli = join(fixtureRoot, "fake-next.mjs");
+      const capturePath = join(fixtureRoot, "captured-environment.json");
+      const secretKeys = [
+        "OPENAI_API_KEY",
+        "DATAHUB_GMS_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+      ] as const;
+      const sentinel = ["ACTIVE", "SECRET", "SENTINEL"].join("_");
+      const previousValues = Object.fromEntries(
+        secretKeys.map((key) => [key, process.env[key]]),
+      ) as Record<(typeof secretKeys)[number], string | undefined>;
+      for (const key of secretKeys) process.env[key] = sentinel;
+      await writeFile(
+        fakeNextCli,
+        [
+          'import { writeFileSync } from "node:fs";',
+          'import { createServer } from "node:http";',
+          `const keys = ${JSON.stringify(secretKeys)};`,
+          `writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify({`,
+          "  secrets: Object.fromEntries(keys.map((key) => [key, process.env[key]])),",
+          "  mode: process.env.LINEAGEGUARD_DEMO_MODE,",
+          "  runsRoot: process.env.LINEAGEGUARD_RUNS_DIR,",
+          '}), "utf8");',
+          'createServer((_request, response) => response.end("ok")).listen(3107, "127.0.0.1");',
+        ].join("\n"),
+        "utf8",
+      );
+
+      let handle: Awaited<ReturnType<typeof __testOnly.startE2eServer>> | undefined;
+      try {
+        handle = await __testOnly.startE2eServer({
+          resolveNextCli: () => fakeNextCli,
+          timeouts: {
+            startupMs: 5_000,
+            terminationMs: FOCUSED_TERMINATION_TIMEOUT_MS,
+            pollMs: 10,
+          },
+        });
+        const captured = JSON.parse(await readFile(capturePath, "utf8")) as {
+          readonly secrets: Readonly<Record<string, string | undefined>>;
+          readonly mode?: string;
+          readonly runsRoot?: string;
+        };
+
+        expect(captured.secrets).toEqual({});
+        expect(captured.mode).toBe("REPLAY");
+        expect(captured.runsRoot).toBe(handle.runsRoot);
+      } finally {
+        if (handle !== undefined) await handle.stop();
+        for (const key of secretKeys) {
+          const previous = previousValues[key];
+          if (previous === undefined) delete process.env[key];
+          else process.env[key] = previous;
+        }
+        await rm(fixtureRoot, { recursive: true, force: true });
+      }
+    },
+    REAL_PROCESS_TEST_TIMEOUT_MS,
+  );
 });

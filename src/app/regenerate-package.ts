@@ -43,7 +43,6 @@ export async function regeneratePackage(input: {
       childRunId: input.runId,
       signal: requestScope.signal,
     });
-    throwIfCancelled();
     const snapshot = await runAgentWorkflowFromContext({
       ...input,
       signal: requestScope.signal,

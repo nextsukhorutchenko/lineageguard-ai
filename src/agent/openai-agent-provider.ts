@@ -7,10 +7,12 @@ import { MigrationPackageDraftSchema } from "../workflow/migration-draft.js";
 import { MIGRATION_AGENT_PROMPT_VERSION, migrationAgentInstructions } from "./prompt.js";
 import type {
   AgentProvider,
+  AgentProviderIdentity,
   AgentProviderResult,
   AgentToolset,
   AnalyzeRenameResult,
 } from "./provider.js";
+import { createOpenAIAgentProviderIdentity } from "./provider.js";
 
 const CompletionSchema = z
   .object({
@@ -73,6 +75,7 @@ const toolDeadlinePolicy = {
 } as const;
 
 export class OpenAIAgentProvider implements AgentProvider {
+  readonly identity: AgentProviderIdentity;
   readonly #model: string;
   readonly #runner: Runner;
 
@@ -81,6 +84,7 @@ export class OpenAIAgentProvider implements AgentProvider {
       throw new Error("OpenAI configuration is missing.");
     }
     this.#model = options.model ?? "gpt-5.6-sol";
+    this.identity = createOpenAIAgentProviderIdentity(this.#model);
     this.#runner =
       options.runner ??
       new Runner({

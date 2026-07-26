@@ -357,6 +357,16 @@ export function validateBoundaryDocuments(files: ReadonlyMap<string, string>): s
   );
 }
 
+export function validateAbsoluteUvxDocumentation(files: ReadonlyMap<string, string>): string[] {
+  const command = "$env:DATAHUB_MCP_UVX_PATH = (Get-Command uvx -ErrorAction Stop).Source";
+  return (
+    [
+      ["README.md", "relative uvx command in README.md"],
+      ["docs/demo-scenario.md", "relative uvx command in docs/demo-scenario.md"],
+    ] as const
+  ).flatMap(([path, finding]) => (files.get(path)?.includes(command) === true ? [] : [finding]));
+}
+
 export function validateLiveDocumentation(readme: string): string[] {
   const findings: string[] = [];
   const section =
@@ -591,6 +601,7 @@ export function validateAgentResourceDelta(files: ReadonlyMap<string, string>): 
   return [
     ...validateDataHubResourceTable(files.get("docs/resources-and-attribution.md") ?? ""),
     ...validateBoundaryDocuments(files),
+    ...validateAbsoluteUvxDocumentation(files),
     ...validateLiveDocumentation(files.get("README.md") ?? ""),
     ...validateRuntimeDependencies(files.get("package.json") ?? ""),
     ...validateOfficialSkillsNotInstalled(files),

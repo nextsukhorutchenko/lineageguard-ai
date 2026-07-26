@@ -28,6 +28,13 @@ const artifactContentType = (filename: string): string =>
 
 async function readArtifact(response: Response, filename: string): Promise<string> {
   if (!response.ok || response.headers.get("content-type") !== artifactContentType(filename)) {
+    if (response.body !== null) {
+      try {
+        await response.body.cancel();
+      } catch {
+        // The fixed artifact error remains authoritative.
+      }
+    }
     throw new Error("Artifact preview is unavailable.");
   }
   if (response.body === null) throw new Error("Artifact preview is unavailable.");
@@ -78,18 +85,22 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
   useEffect(() => {
     if (snapshot?.status !== "COMPLETED") return;
     let active = true;
+    const controller = new AbortController();
     void (async () => {
       try {
         const pairs = await Promise.all(
           snapshot.artifacts
             .filter(({ validated }) => validated)
             .map(async ({ filename }) => {
-              const response = await fetch(`/api/runs/${snapshot.runId}/artifacts/${filename}`);
+              const response = await fetch(`/api/runs/${snapshot.runId}/artifacts/${filename}`, {
+                signal: controller.signal,
+              });
               return [filename, await readArtifact(response, filename)] as const;
             }),
         );
         if (active) setContent(Object.fromEntries(pairs));
       } catch {
+        controller.abort();
         if (active) {
           setContent({});
           setOperationStatus("Artifact preview is unavailable.");
@@ -98,6 +109,7 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
     })();
     return () => {
       active = false;
+      controller.abort();
     };
   }, [snapshot]);
 

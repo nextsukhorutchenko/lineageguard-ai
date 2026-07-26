@@ -2353,7 +2353,7 @@ describe("dataHubMcpServerParameters", () => {
     const config = loadRuntimeConfig({
       DATAHUB_GMS_URL: "http://localhost:8080",
       DATAHUB_GMS_TOKEN: "local-test-token",
-      DATAHUB_MCP_UVX_PATH: "custom-uvx",
+      DATAHUB_MCP_UVX_PATH: resolve("custom-uvx"),
       LINEAGEGUARD_RUNS_DIR: resolve("runs"),
     });
     const connect = vi.spyOn(Client.prototype, "connect");
@@ -2384,7 +2384,7 @@ describe("dataHubMcpServerParameters", () => {
     const config = loadRuntimeConfig({
       DATAHUB_GMS_URL: "http://localhost:8080",
       DATAHUB_GMS_TOKEN: "local-test-token",
-      DATAHUB_MCP_UVX_PATH: "custom-uvx",
+      DATAHUB_MCP_UVX_PATH: resolve("custom-uvx"),
       LINEAGEGUARD_RUNS_DIR: resolve("runs"),
     });
     const connect = vi.spyOn(Client.prototype, "connect");
@@ -2412,12 +2412,12 @@ describe("dataHubMcpServerParameters", () => {
     const config = loadRuntimeConfig({
       DATAHUB_GMS_URL: "http://localhost:8080",
       DATAHUB_GMS_TOKEN: "local-test-token",
-      DATAHUB_MCP_UVX_PATH: "custom-uvx",
+      DATAHUB_MCP_UVX_PATH: resolve("custom-uvx"),
       LINEAGEGUARD_RUNS_DIR: resolve("runs"),
     });
 
     expect(dataHubMcpServerParameters(config)).toEqual({
-      command: "custom-uvx",
+      command: resolve("custom-uvx"),
       args: ["mcp-server-datahub@0.6.0", "--transport", "stdio"],
       env: {
         DATAHUB_GMS_URL: "http://localhost:8080",

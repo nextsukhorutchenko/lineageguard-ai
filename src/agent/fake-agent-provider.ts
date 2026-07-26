@@ -1,7 +1,11 @@
 import type { ChangeContext } from "../workflow/change-context.js";
 import type { MigrationPackageDraft } from "../workflow/migration-draft.js";
 import { parseSnowflakeObjectName } from "../migrations/snowflake-identifiers.js";
-import type { AgentProvider, AgentProviderResult } from "./provider.js";
+import {
+  fixtureAgentProviderIdentity,
+  type AgentProvider,
+  type AgentProviderResult,
+} from "./provider.js";
 
 export function createGoldenDraft(context: ChangeContext): MigrationPackageDraft {
   const identityEvidenceIncomplete =
@@ -73,6 +77,8 @@ export function createGoldenDraft(context: ChangeContext): MigrationPackageDraft
 }
 
 export class FakeAgentProvider implements AgentProvider {
+  readonly identity = fixtureAgentProviderIdentity;
+
   async run(input: Parameters<AgentProvider["run"]>[0]): Promise<AgentProviderResult> {
     input.signal.throwIfAborted();
     const analysis = await input.tools.analyzeRenameChange(

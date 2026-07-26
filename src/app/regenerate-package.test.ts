@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
-import type { AgentProvider } from "../agent/provider.js";
+import { fixtureAgentProviderIdentity, type AgentProvider } from "../agent/provider.js";
 import { createGoldenDraft, FakeAgentProvider } from "../agent/fake-agent-provider.js";
 import { readRunEnvelope } from "../artifacts/run-envelope-files.js";
 import {
@@ -18,6 +18,7 @@ it("regenerates from stored context into one fresh child without DataHub analysi
   const parent = await runAgentWorkflow(parentDependencies);
   let providerCalls = 0;
   const provider: AgentProvider = {
+    identity: fixtureAgentProviderIdentity,
     async run(input) {
       providerCalls += 1;
       return new FakeAgentProvider().run(input);
@@ -69,6 +70,7 @@ it("rejects a reused run ID before provider execution", async () => {
       runsRoot: parentDependencies.runsRoot,
       mode: "REPLAY",
       provider: {
+        identity: fixtureAgentProviderIdentity,
         async run() {
           providerCalls += 1;
           throw new Error("must not run");
@@ -145,6 +147,7 @@ it("rejects mode mismatch before provider execution", async () => {
       runsRoot: parentDependencies.runsRoot,
       mode: "LIVE",
       provider: {
+        identity: fixtureAgentProviderIdentity,
         async run() {
           providerCalls += 1;
           throw new Error("must not run");
@@ -197,6 +200,7 @@ it.each(["GENERATION_FAILED", "VALIDATION_FAILED"] as const)(
 it("rejects an ineligible parent status before provider execution", async () => {
   const parentDependencies = await makeWorkflowDependencies({
     provider: {
+      identity: fixtureAgentProviderIdentity,
       async run() {
         return {
           status: "failed",
@@ -221,6 +225,7 @@ it("rejects an ineligible parent status before provider execution", async () => 
       runsRoot: parentDependencies.runsRoot,
       mode: "REPLAY",
       provider: {
+        identity: fixtureAgentProviderIdentity,
         async run() {
           providerCalls += 1;
           throw new Error("must not run");
@@ -252,6 +257,7 @@ it("rejects a tampered parent envelope before provider execution", async () => {
       runsRoot: parentDependencies.runsRoot,
       mode: "REPLAY",
       provider: {
+        identity: fixtureAgentProviderIdentity,
         async run() {
           providerCalls += 1;
           throw new Error("must not run");
@@ -310,6 +316,7 @@ it("sanitizes provider output independently for the fresh child run", async () =
     runsRoot: parentDependencies.runsRoot,
     mode: "REPLAY",
     provider: {
+      identity: fixtureAgentProviderIdentity,
       async run({ tools, request, signal }) {
         await tools.analyzeRenameChange({ request }, signal);
         return {
@@ -335,6 +342,7 @@ it("sanitizes provider output independently for the fresh child run", async () =
 
 function providerThatFailsAfterAnalysis(): AgentProvider {
   return {
+    identity: fixtureAgentProviderIdentity,
     async run({ tools, request, signal }) {
       await tools.analyzeRenameChange({ request }, signal);
       return {
@@ -352,6 +360,7 @@ function providerThatFailsAfterAnalysis(): AgentProvider {
 
 function providerThatRejectsTwoDrafts(): AgentProvider {
   return {
+    identity: fixtureAgentProviderIdentity,
     async run({ tools, request, signal }) {
       const analysis = await tools.analyzeRenameChange({ request }, signal);
       if (analysis.kind !== "ready") throw new Error("Expected ready analysis.");

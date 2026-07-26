@@ -110,6 +110,19 @@ it("does not accept a preflight marker elsewhere in README", async () => {
   expect(findings).toContain(`missing live documentation requirement: ${marker}`);
 });
 
+it.each([
+  ["README.md", "relative uvx command in README.md"],
+  ["docs/demo-scenario.md", "relative uvx command in docs/demo-scenario.md"],
+] as const)("rejects a relative uvx command in %s", async (path, finding) => {
+  const absoluteCommand = "$env:DATAHUB_MCP_UVX_PATH = (Get-Command uvx -ErrorAction Stop).Source";
+  const relativeCommand = '$env:DATAHUB_MCP_UVX_PATH = "uvx"';
+  const findings = await validateWithMutation(path, (content) =>
+    content.replaceAll(relativeCommand, absoluteCommand).replace(absoluteCommand, relativeCommand),
+  );
+
+  expect(findings).toContain(finding);
+});
+
 function mutateResourceCell(content: string, url: string, index: number, value: string): string {
   return content
     .split(/\r?\n/u)

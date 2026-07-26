@@ -7,7 +7,11 @@ import { POST as regenerateRun } from "../../app/api/runs/[runId]/regenerate/rou
 import { GET as reloadRun } from "../../app/api/runs/[runId]/route.js";
 import { POST as startRun } from "../../app/api/runs/route.js";
 import { FakeAgentProvider } from "../../src/agent/fake-agent-provider.js";
-import type { AgentProvider, AgentProviderResult } from "../../src/agent/provider.js";
+import {
+  createOpenAIAgentProviderIdentity,
+  type AgentProvider,
+  type AgentProviderResult,
+} from "../../src/agent/provider.js";
 import { runAgentWorkflow } from "../../src/app/run-agent-workflow.js";
 import { regeneratePackage } from "../../src/app/regenerate-package.js";
 import {
@@ -128,12 +132,14 @@ const liveConfig = (root: string): LiveWebConfig => ({
   openaiModel: "gpt-5.6-sol",
   datahubGmsUrl: "http://localhost:8080",
   datahubGmsToken: "test-datahub-token",
-  uvxPath: "uvx",
+  uvxPath: resolve("test-uvx"),
 });
 
 const replayConfig = (root: string): WebConfig => ({ mode: "REPLAY", runsRoot: root });
 
 class LiveFixtureProvider implements AgentProvider {
+  readonly identity = createOpenAIAgentProviderIdentity("test-live-model");
+
   async run(input: Parameters<AgentProvider["run"]>[0]): Promise<AgentProviderResult> {
     const result = await new FakeAgentProvider().run(input);
     return {
@@ -965,6 +971,7 @@ it("redacts adversarial catalog and provider secrets from every route surface", 
   let providerRequest = "";
   let providerContext = "";
   const provider: AgentProvider = {
+    identity: createOpenAIAgentProviderIdentity("adversarial-test-live"),
     async run({ request, tools, signal }): Promise<AgentProviderResult> {
       providerRequest = request;
       const analysis = await tools.analyzeRenameChange({ request }, signal);

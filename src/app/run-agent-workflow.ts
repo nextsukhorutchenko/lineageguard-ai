@@ -720,6 +720,7 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
     finalizeAgent();
     const providerResult: AgentProviderResult = {
       ...reportedProviderResult,
+      ...deps.provider.identity,
       analysisCalls: applicationAnalysisCalls,
       generationAttempts: applicationGenerationAttempts,
     };
@@ -931,9 +932,7 @@ async function executeWorkflow(inputDeps: InternalWorkflowDependencies): Promise
       finalizeWorkflow();
       const fallbackProvider: AgentProviderResult = {
         status: "failed",
-        provider: deps.mode === "LIVE" ? "openai" : "fixture",
-        model: deps.mode === "LIVE" ? "gpt-5.6-sol" : "replay-v1",
-        reasoningEffort: deps.mode === "LIVE" ? "medium" : "none",
+        ...deps.provider.identity,
         analysisCalls: applicationAnalysisCalls,
         generationAttempts: applicationGenerationAttempts,
         message: classifiedFailure.message,

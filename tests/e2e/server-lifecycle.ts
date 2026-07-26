@@ -21,6 +21,27 @@ const PROBE_TIMEOUT_MS = 1_000;
 const POLL_INTERVAL_MS = 100;
 const TERMINATION_TIMEOUT_MS = 10_000;
 const DIAGNOSTIC_TAIL_BYTES = 16_384;
+const REPLAY_CHILD_ENVIRONMENT_ALLOWLIST = [
+  "APPDATA",
+  "CI",
+  "COMSPEC",
+  "FORCE_COLOR",
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "LOCALAPPDATA",
+  "NEXT_TELEMETRY_DISABLED",
+  "NO_COLOR",
+  "PATH",
+  "PATHEXT",
+  "SYSTEMROOT",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "TZ",
+  "USERPROFILE",
+  "WINDIR",
+] as const;
 
 export interface E2eServerHandle {
   readonly runsRoot: string;
@@ -68,17 +89,21 @@ function appendTail(
 }
 
 function spawnNext(nextCli: string, runsRoot: string): ChildProcess {
+  const environment: NodeJS.ProcessEnv = { NODE_ENV: "development" };
+  for (const key of REPLAY_CHILD_ENVIRONMENT_ALLOWLIST) {
+    const value = process.env[key];
+    if (value !== undefined) environment[key] = value;
+  }
+  environment.LINEAGEGUARD_DEMO_MODE = "REPLAY";
+  environment.LINEAGEGUARD_RUNS_DIR = runsRoot;
+
   return spawn(
     process.execPath,
     [nextCli, "dev", "--webpack", "--hostname", HOST, "--port", `${PORT}`],
     {
       cwd: process.cwd(),
       detached: process.platform !== "win32",
-      env: {
-        ...process.env,
-        LINEAGEGUARD_DEMO_MODE: "REPLAY",
-        LINEAGEGUARD_RUNS_DIR: runsRoot,
-      },
+      env: environment,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,

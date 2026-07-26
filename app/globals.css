@@ -314,11 +314,14 @@ pre {
   max-height: 500px;
   margin: 0;
   padding: 18px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
   border-radius: 14px;
   background: #020806;
   color: #d8fff0;
   line-height: 1.6;
+  white-space: pre-wrap;
 }
 
 .evidence-list li {

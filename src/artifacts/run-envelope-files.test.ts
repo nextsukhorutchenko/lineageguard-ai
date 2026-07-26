@@ -190,6 +190,18 @@ function reservation(parentRunId = "parent", childRunId = "child"): string {
   });
 }
 
+function replaceFirstUtf8ReplacementCharacterWithInvalidByte(serialized: string): Buffer {
+  const bytes = Buffer.from(serialized, "utf8");
+  const replacement = Buffer.from("\uFFFD", "utf8");
+  const offset = bytes.indexOf(replacement);
+  if (offset < 0) throw new Error("Expected a replacement-character fixture.");
+  return Buffer.concat([
+    bytes.subarray(0, offset),
+    Buffer.from([0xff]),
+    bytes.subarray(offset + replacement.byteLength),
+  ]);
+}
+
 describe("trusted flat run-envelope files", () => {
   it("requires an absolute, pre-created, writable real directory", async () => {
     const { sandbox, runsRoot } = await freshRoot();
@@ -614,6 +626,49 @@ describe("trusted flat run-envelope files", () => {
       await mkdir(finalPath);
       await expect(readRunEnvelope({ runsRoot, runId: "run-1" })).rejects.toMatchObject({
         message: "The stored run is unavailable.",
+      });
+    } finally {
+      await rm(sandbox, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects invalid UTF-8 before parsing run and retry envelopes", async () => {
+    const { sandbox, runsRoot } = await freshRoot();
+    try {
+      const envelope = makeFailedEnvelope("invalid-utf8");
+      const snapshot = WorkflowSnapshotSchema.parse({
+        ...envelope.snapshot,
+        failure: {
+          code: "GENERATION_FAILED",
+          message: "Generation \uFFFD failed.",
+        },
+      });
+      const serialized = serializeRunEnvelope({
+        ...envelope,
+        snapshot,
+        hashes: {
+          ...envelope.hashes,
+          snapshot: sha256(canonical(snapshot)),
+        },
+      });
+      await writeFile(
+        join(runsRoot, "run-invalid-utf8.json"),
+        replaceFirstUtf8ReplacementCharacterWithInvalidByte(serialized),
+      );
+
+      await expect(readRunEnvelope({ runsRoot, runId: "invalid-utf8" })).rejects.toMatchObject({
+        message: "The stored run is unavailable.",
+      });
+
+      const retryBytes = Buffer.from(reservation("retry-parent", "retry-child"), "utf8");
+      await writeFile(
+        join(runsRoot, "retry-retry-parent.json"),
+        Buffer.concat([retryBytes.subarray(0, retryBytes.byteLength - 1), Buffer.from([0xff])]),
+      );
+      await expect(
+        readRetryReservation({ runsRoot, parentRunId: "retry-parent" }),
+      ).rejects.toMatchObject({
+        message: "The stored retry reservation is unavailable.",
       });
     } finally {
       await rm(sandbox, { recursive: true, force: true });

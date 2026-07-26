@@ -37,6 +37,7 @@ const responseFromChunks = (chunks: readonly string[]): Response =>
         controller.close();
       },
     }),
+    { headers: { "content-type": "application/x-ndjson; charset=utf-8" } },
   );
 
 const byteResponseFromChunks = (chunks: readonly Uint8Array[], cancel?: () => void): Response => {
@@ -54,6 +55,7 @@ const byteResponseFromChunks = (chunks: readonly Uint8Array[], cancel?: () => vo
       },
       ...(cancel === undefined ? {} : { cancel }),
     }),
+    { headers: { "content-type": "application/x-ndjson; charset=utf-8" } },
   );
 };
 
@@ -189,6 +191,34 @@ it("maps pre-locked response streams to the fixed stream error", async () => {
     heldReader.releaseLock();
   }
 });
+
+it.each([
+  ["non-success status", 503, "application/x-ndjson; charset=utf-8"],
+  ["wrong content type", 200, "application/json"],
+] as const)(
+  "cancels the response body after early rejection for %s",
+  async (_name, status, contentType) => {
+    const cancelled = vi.fn();
+    let supplied = false;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (supplied) return;
+          supplied = true;
+          controller.enqueue(new TextEncoder().encode("{bad-json}\n"));
+        },
+        cancel: cancelled,
+      }),
+      { status, headers: { "content-type": contentType } },
+    );
+
+    await expect(readNdjson(response, () => {})).rejects.toEqual(
+      new Error("Workflow stream is unavailable."),
+    );
+    expect(cancelled).toHaveBeenCalledOnce();
+    expect(response.body?.locked).toBe(false);
+  },
+);
 
 it("releases the reader lock after clean completion", async () => {
   const response = responseFromChunks([`${JSON.stringify(events[0])}\n`]);

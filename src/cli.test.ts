@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   runImpactAnalysis as runImpactAnalysisReal,
@@ -24,6 +24,7 @@ const REQUEST = "Rename column customer_id to customer_key in dataset snowflake:
 const ENVIRONMENT = {
   DATAHUB_GMS_URL: "http://localhost:8080",
   DATAHUB_GMS_TOKEN: "secret-test-token",
+  DATAHUB_MCP_UVX_PATH: resolve("test-uvx"),
 };
 const SYNTHETIC_REDACTION_PATH = "C:\\synthetic-redaction-fixture";
 let cliSandbox: string;

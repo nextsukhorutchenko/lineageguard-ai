@@ -21,7 +21,17 @@ export async function readNdjson(
   response: Response,
   onEvent: (event: WorkflowEvent) => void,
 ): Promise<void> {
-  if (!response.ok || response.body === null) throw new Error("Workflow stream is unavailable.");
+  const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  if (!response.ok || response.body === null || mediaType !== "application/x-ndjson") {
+    if (response.body !== null) {
+      try {
+        await response.body.cancel();
+      } catch {
+        // The fixed availability error remains authoritative.
+      }
+    }
+    throw new Error("Workflow stream is unavailable.");
+  }
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let responseBytes = 0;
   let lineBytes = 0;

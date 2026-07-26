@@ -28,3 +28,32 @@ it("requires OpenAI and DataHub configuration for live mode without echoing valu
     }),
   ).toThrow("Live demo configuration is incomplete.");
 });
+
+const completeLiveEnvironment = {
+  LINEAGEGUARD_DEMO_MODE: "LIVE",
+  LINEAGEGUARD_RUNS_DIR: resolve("test-runs"),
+  OPENAI_API_KEY: "test-openai-key",
+  OPENAI_MODEL: "gpt-5.6-terra",
+  DATAHUB_GMS_URL: "http://localhost:8080",
+  DATAHUB_GMS_TOKEN: "test-datahub-token",
+};
+
+it("requires an explicit absolute uvx executable path in live mode", () => {
+  expect(() => loadWebConfig(completeLiveEnvironment)).toThrow(
+    "Live demo configuration is incomplete.",
+  );
+  expect(() => loadWebConfig({ ...completeLiveEnvironment, DATAHUB_MCP_UVX_PATH: "uvx" })).toThrow(
+    "Live demo configuration is incomplete.",
+  );
+});
+
+it("loads live mode with an absolute uvx executable path", () => {
+  const uvxPath = resolve("test-uvx");
+  expect(
+    loadWebConfig({ ...completeLiveEnvironment, DATAHUB_MCP_UVX_PATH: uvxPath }),
+  ).toMatchObject({
+    mode: "LIVE",
+    openaiModel: "gpt-5.6-terra",
+    uvxPath,
+  });
+});

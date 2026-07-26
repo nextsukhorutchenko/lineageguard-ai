@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { RunsRootPathSchema } from "./runtime-config.js";
+import { AbsoluteExecutablePathSchema, RunsRootPathSchema } from "./runtime-config.js";
 
 const baseSchema = z.object({
   LINEAGEGUARD_DEMO_MODE: z.enum(["LIVE", "REPLAY"]).default("REPLAY"),
@@ -32,7 +32,7 @@ export function loadWebConfig(
       OPENAI_API_KEY: z.string().min(1),
       DATAHUB_GMS_URL: z.url(),
       DATAHUB_GMS_TOKEN: z.string().min(1),
-      DATAHUB_MCP_UVX_PATH: z.string().min(1).default("uvx"),
+      DATAHUB_MCP_UVX_PATH: AbsoluteExecutablePathSchema,
     })
     .safeParse(environment);
   if (!live.success) throw new Error("Live demo configuration is incomplete.");

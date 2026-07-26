@@ -161,7 +161,7 @@ function fixtureEnvironment(): EnvironmentMap {
   return {
     DATAHUB_GMS_URL: "http://localhost:8080",
     DATAHUB_GMS_TOKEN: token,
-    DATAHUB_MCP_UVX_PATH: "uvx",
+    DATAHUB_MCP_UVX_PATH: resolve("test-uvx"),
     LINEAGEGUARD_RUNS_DIR: resolve("runs"),
   };
 }
