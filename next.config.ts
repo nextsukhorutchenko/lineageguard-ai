@@ -1,5 +1,5 @@
 import type { NextConfig } from "next";
-import { PUBLIC_BROWSER_HEADERS } from "./src/http/response-headers.js";
+import { PUBLIC_BROWSER_HEADERS } from "./src/http/response-headers";
 
 const nextConfig: NextConfig = {
   experimental: {

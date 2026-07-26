@@ -1,10 +1,15 @@
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, describe, it } from "vitest";
 import { removeOwnedRunsRoot } from "../e2e/global-teardown.js";
 import { __testOnly } from "../e2e/server-lifecycle.js";
+import {
+  __testOnly as publicReplayTestOnly,
+  type PublicReplayE2eServerHandle,
+} from "../e2e/public-replay-server-lifecycle.js";
 
 const REAL_PROCESS_TEST_TIMEOUT_MS = 10_000;
 const FOCUSED_TERMINATION_TIMEOUT_MS = 1_000;
@@ -344,6 +349,270 @@ describe.sequential("Playwright server lifecycle", () => {
           else process.env[key] = previous;
         }
         await rm(fixtureRoot, { recursive: true, force: true });
+      }
+    },
+    REAL_PROCESS_TEST_TIMEOUT_MS,
+  );
+});
+
+describe.sequential("public replay production lifecycle", () => {
+  it(
+    "passes a missing child root to the compiled bootstrap and waits for exact health",
+    async () => {
+      let parent = "";
+      let child: ChildProcess | undefined;
+      let capturedRoot = "";
+      let capturedBootstrap = "";
+      let capturedPort = "";
+      let healthChecks = 0;
+      let handle: PublicReplayE2eServerHandle | undefined;
+
+      try {
+        handle = await publicReplayTestOnly.startPublicReplayServer({
+          isEndpointOccupied: async () => false,
+          createTemporaryParent: async () => {
+            parent = await mkdtemp(join(tmpdir(), "lineageguard-public-replay-e2e-"));
+            return parent;
+          },
+          resolveBootstrap: () => join(process.cwd(), "dist", "hosting", "start-public-replay.js"),
+          spawnChild: (bootstrap, runsRoot, options) => {
+            capturedBootstrap = bootstrap;
+            capturedRoot = runsRoot;
+            capturedPort = options.env.PORT ?? "";
+            expect(existsSync(runsRoot)).toBe(false);
+            child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+              detached: false,
+              shell: false,
+              stdio: "ignore",
+              windowsHide: true,
+            });
+            return child;
+          },
+          probeHealth: async () => {
+            healthChecks += 1;
+            return healthChecks === 1
+              ? { status: 200, body: { status: "ok", mode: "REPLAY" } }
+              : { status: 200, body: { status: "ok", mode: "PUBLIC_REPLAY" } };
+          },
+          timeouts: {
+            startupMs: 500,
+            terminationMs: FOCUSED_TERMINATION_TIMEOUT_MS,
+            pollMs: 10,
+          },
+        });
+
+        expect(capturedBootstrap).toBe(
+          join(process.cwd(), "dist", "hosting", "start-public-replay.js"),
+        );
+        expect(capturedRoot).toBe(join(parent, "runs"));
+        expect(capturedPort).toBe("3110");
+        expect(healthChecks).toBeGreaterThan(1);
+        await expect(access(capturedRoot)).rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        if (handle !== undefined) await handle.stop();
+        if (child !== undefined) await forceClose(child);
+        if (parent !== "") await rm(parent, { recursive: true, force: true });
+      }
+    },
+    REAL_PROCESS_TEST_TIMEOUT_MS,
+  );
+
+  it("rejects an occupied port before creating an owned parent", async () => {
+    let created = false;
+
+    await expect(
+      publicReplayTestOnly.startPublicReplayServer({
+        isEndpointOccupied: async () => true,
+        createTemporaryParent: async () => {
+          created = true;
+          return await mkdtemp(join(tmpdir(), "lineageguard-public-replay-e2e-"));
+        },
+      }),
+    ).rejects.toThrow("The public replay test endpoint is already in use.");
+    expect(created).toBe(false);
+  });
+
+  it(
+    "reports one fixed startup error without child output or native paths",
+    async () => {
+      const privatePath = "D:\\private\\public-replay-secret";
+      let parent = "";
+      let caught: unknown;
+      try {
+        await publicReplayTestOnly.startPublicReplayServer({
+          isEndpointOccupied: async () => false,
+          createTemporaryParent: async () => {
+            parent = await mkdtemp(join(tmpdir(), "lineageguard-public-replay-e2e-"));
+            return parent;
+          },
+          resolveBootstrap: () => privatePath,
+          spawnChild: () =>
+            spawn(
+              process.execPath,
+              [
+                "-e",
+                `process.stdout.write(${JSON.stringify(privatePath)}); process.stderr.write("private stderr"); process.exit(9);`,
+              ],
+              {
+                shell: false,
+                stdio: ["ignore", "pipe", "pipe"],
+                windowsHide: true,
+              },
+            ),
+          probeHealth: async () => undefined,
+          timeouts: {
+            startupMs: 500,
+            terminationMs: FOCUSED_TERMINATION_TIMEOUT_MS,
+            pollMs: 10,
+          },
+        });
+      } catch (error) {
+        caught = error;
+      } finally {
+        if (parent !== "") await rm(parent, { recursive: true, force: true });
+      }
+
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toBe("The public replay test server failed to start.");
+      expect((caught as Error).message).not.toContain(privatePath);
+      expect((caught as Error).message).not.toContain("private stderr");
+    },
+    REAL_PROCESS_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "terminates the full child tree, confirms endpoint release, and removes its parent",
+    async () => {
+      let parent = "";
+      let child: ChildProcess | undefined;
+      let killedPid: number | undefined;
+      let endpointOccupied = false;
+      const handle = await publicReplayTestOnly.startPublicReplayServer({
+        isEndpointOccupied: async () => endpointOccupied,
+        createTemporaryParent: async () => {
+          parent = await mkdtemp(join(tmpdir(), "lineageguard-public-replay-e2e-"));
+          return parent;
+        },
+        resolveBootstrap: () => "unused",
+        spawnChild: () => {
+          child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+            shell: false,
+            stdio: "ignore",
+            windowsHide: true,
+          });
+          endpointOccupied = true;
+          child.once("close", () => {
+            endpointOccupied = false;
+          });
+          return child;
+        },
+        probeHealth: async () => ({
+          status: 200,
+          body: { status: "ok", mode: "PUBLIC_REPLAY" },
+        }),
+        spawnTreeKiller: (pid) => {
+          killedPid = pid;
+          child?.kill();
+          return spawn(process.execPath, ["-e", "process.exit(0)"], {
+            shell: false,
+            stdio: "ignore",
+            windowsHide: true,
+          });
+        },
+        platform: "win32",
+        timeouts: {
+          startupMs: 500,
+          terminationMs: FOCUSED_TERMINATION_TIMEOUT_MS,
+          pollMs: 10,
+        },
+      });
+
+      try {
+        await handle.stop();
+        expect(killedPid).toBe(child?.pid);
+        expect(endpointOccupied).toBe(false);
+        await expectMissing(parent);
+      } finally {
+        if (child !== undefined) await forceClose(child);
+        if (parent !== "") await rm(parent, { recursive: true, force: true });
+      }
+    },
+    REAL_PROCESS_TEST_TIMEOUT_MS,
+  );
+
+  it("refuses cleanup when the owned child is a reparse point", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "lineageguard-public-replay-e2e-"));
+    const runsRoot = join(parent, "runs");
+    await writeFile(runsRoot, "not a directory", "utf8");
+
+    try {
+      await expect(
+        publicReplayTestOnly.removeOwnedParent(parent, runsRoot, {
+          lstat: async (path) => {
+            const stats = await lstat(path);
+            return path === runsRoot
+              ? {
+                  isDirectory: () => true,
+                  isSymbolicLink: () => true,
+                }
+              : stats;
+          },
+        }),
+      ).rejects.toThrow("The public replay test root could not be removed.");
+      await expect(access(parent)).resolves.toBeUndefined();
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it(
+    "retains the owned parent when shutdown certainty is lost",
+    async () => {
+      let parent = "";
+      let child: ChildProcess | undefined;
+      let endpointOccupied = false;
+      const handle = await publicReplayTestOnly.startPublicReplayServer({
+        isEndpointOccupied: async () => endpointOccupied,
+        createTemporaryParent: async () => {
+          parent = await mkdtemp(join(tmpdir(), "lineageguard-public-replay-e2e-"));
+          return parent;
+        },
+        resolveBootstrap: () => "unused",
+        spawnChild: () => {
+          child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+            shell: false,
+            stdio: "ignore",
+            windowsHide: true,
+          });
+          endpointOccupied = true;
+          return child;
+        },
+        probeHealth: async () => ({
+          status: 200,
+          body: { status: "ok", mode: "PUBLIC_REPLAY" },
+        }),
+        spawnTreeKiller: () =>
+          spawn(process.execPath, ["-e", "process.exit(0)"], {
+            shell: false,
+            stdio: "ignore",
+            windowsHide: true,
+          }),
+        platform: "win32",
+        timeouts: {
+          startupMs: 500,
+          terminationMs: 100,
+          pollMs: 10,
+        },
+      });
+
+      try {
+        await expect(handle.stop()).rejects.toThrow(
+          "The public replay test server could not be stopped.",
+        );
+        await expect(access(parent)).resolves.toBeUndefined();
+      } finally {
+        if (child !== undefined) await forceClose(child);
+        if (parent !== "") await rm(parent, { recursive: true, force: true });
       }
     },
     REAL_PROCESS_TEST_TIMEOUT_MS,
