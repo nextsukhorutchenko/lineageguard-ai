@@ -7,10 +7,12 @@ export default tseslint.config(
     ignores: [
       ".next/",
       ".venv/",
+      ".worktrees/",
       "dist/",
       "node_modules/",
       "playwright-report/",
       "test-results/",
+      "tmp/",
       "venv/",
     ],
   },
