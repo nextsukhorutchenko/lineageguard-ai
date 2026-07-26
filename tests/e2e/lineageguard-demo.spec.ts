@@ -36,6 +36,19 @@ test.beforeEach(async ({ request }) => {
   expect(response.status()).toBe(204);
 });
 
+test("serves the repository-owned browser icon", async ({ page, request }) => {
+  await page.goto("/");
+
+  const icon = page.locator('link[rel="icon"]');
+  await expect(icon).toHaveCount(1);
+  const href = await icon.getAttribute("href");
+  expect(href).not.toBeNull();
+
+  const response = await request.get(href!);
+  expect(response.status()).toBe(200);
+  expect(response.headers()["content-type"]).toContain("image/svg+xml");
+});
+
 test("completes the golden grounded replay flow", async ({ page }) => {
   await page.goto("/");
   await expect(

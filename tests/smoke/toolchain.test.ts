@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import nextConfig from "../../next.config.js";
 
 describe("toolchain", () => {
   it("runs on the pinned Node major version", () => {
@@ -40,5 +41,16 @@ describe("toolchain", () => {
       "test:e2e": "playwright test",
       "test:runtime-mode": "vitest run tests/integration/runtime-mode-page.integration.test.ts",
     });
+  });
+
+  it("keeps the built output compatible with next start", async () => {
+    const packageJson = JSON.parse(
+      await readFile(resolve(process.cwd(), "package.json"), "utf8"),
+    ) as {
+      scripts: Record<string, string>;
+    };
+
+    expect(packageJson.scripts["start:web"]).toBe("next start");
+    expect(nextConfig.output).toBeUndefined();
   });
 });

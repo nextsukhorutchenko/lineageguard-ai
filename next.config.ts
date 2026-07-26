@@ -6,7 +6,6 @@ const nextConfig: NextConfig = {
       ".js": [".ts", ".tsx", ".js"],
     },
   },
-  output: "standalone",
   poweredByHeader: false,
 };
 
