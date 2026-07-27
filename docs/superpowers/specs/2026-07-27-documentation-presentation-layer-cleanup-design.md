@@ -4,7 +4,8 @@
 
 **Date:** 2026-07-27
 
-**Authority:** Project-owner approval of approach A for all thirteen implementation plans.
+**Authority:** Project-owner approval of approach A for all thirteen pre-existing implementation
+plans and final Amendment A for this cleanup plan's verified self-closure.
 
 ## Problem
 
@@ -77,6 +78,14 @@ Historical plan snippets are traceability evidence, not current copy-and-paste i
 12. `docs/superpowers/plans/2026-07-26-playwright-test-agents.md`
 13. `docs/superpowers/plans/2026-07-26-public-replay-deployment.md`
 
+## Final Amendment A: Verified Self-Closure
+
+After both cleanup tasks and all required verification complete, the cleanup implementation plan
+itself may receive the same exact lifecycle block. This self-closure does not broaden Task 1's
+thirteen-plan scope or change any historical checkbox. Final lifecycle coverage is fourteen plans:
+the thirteen pre-existing plans above plus
+`docs/superpowers/plans/2026-07-27-documentation-presentation-layer-cleanup.md`.
+
 ## Rejected Approaches
 
 ### Move plans into `docs/history/`
@@ -92,6 +101,8 @@ repeat the exact automation mistake this cleanup is intended to prevent.
 ## Verification
 
 - Confirm the exact lifecycle block appears once in each of the thirteen plans.
+- After verified self-closure, confirm the exact lifecycle block appears once in each of all
+  fourteen plans.
 - Confirm the unchecked-checkbox counts are unchanged.
 - Confirm `docs/README.md` links only to existing repository files.
 - Confirm no specification, submission checklist, code, test, workflow, manifest, or lockfile

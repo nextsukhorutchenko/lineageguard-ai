@@ -18,7 +18,7 @@ mark this cleanup plan historical only after its own implementation and verifica
 
 **Tech Stack:** Markdown, Prettier, repository submission validator, Git.
 
-**Authority:** Approved design
+**Authority:** Approved design, including Final Amendment A,
 `docs/superpowers/specs/2026-07-27-documentation-presentation-layer-cleanup-design.md`.
 
 ## Global Constraints
@@ -108,6 +108,9 @@ workflow. This map separates current guidance from historical execution records.
 - [Demo scenario](demo-scenario.md) — pinned environment, operator sequence, and 2:55 video script.
 
 ## Current Product Authority and Architecture
+
+Current behavior is established by the applicable approved specification or later approved amendment
+together with the implementation, tests, `package.json`, and CI.
 
 - [Engineering rules](../AGENTS.md) — repository process, safety, verification, and language rules.
 - [Next.js and OpenAI agent specification](specs/002-nextjs-openai-agent-demo/spec.md) — current
