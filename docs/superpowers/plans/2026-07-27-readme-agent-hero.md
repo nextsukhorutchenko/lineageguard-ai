@@ -47,7 +47,7 @@ validator, Git.
 - Produces: a root README whose first screen presents the agent product, public replay, golden
   result, four artifact links, and safety boundary while preserving all later content byte-for-byte.
 
-- [ ] **Step 1: Verify the immutable lower boundary**
+- [x] **Step 1: Verify the immutable lower boundary**
 
 Run:
 
@@ -65,7 +65,7 @@ if (-not (($readme[0..($boundary - 1)] -join "`n").Contains('CLI-first'))) {
 Expected: exit `0`; the architecture boundary and legacy introduction are both present before the
 replacement.
 
-- [ ] **Step 2: Replace only the README introduction**
+- [x] **Step 2: Replace only the README introduction**
 
 Use `apply_patch` to replace the content before `## Architecture and Safety Boundary` with this
 exact approved block:
@@ -99,7 +99,7 @@ impact result and risk decision; human approval remains mandatory.
 [Run the replay locally](#browser-demo--fixture-replay)
 ```
 
-- [ ] **Step 3: Prove the lower README content is unchanged**
+- [x] **Step 3: Prove the lower README content is unchanged**
 
 Run:
 
@@ -123,7 +123,7 @@ if (Compare-Object -ReferenceObject $beforeLower -DifferenceObject $afterLower -
 
 Expected: exit `0` with no output.
 
-- [ ] **Step 4: Verify every hero link target**
+- [x] **Step 4: Verify every hero link target**
 
 Run:
 
@@ -151,7 +151,7 @@ if (-not $readme.Contains('## Browser Demo — Fixture Replay')) {
 
 Expected: exit `0` with no output.
 
-- [ ] **Step 5: Run focused documentation validation**
+- [x] **Step 5: Run focused documentation validation**
 
 Run:
 
@@ -165,7 +165,7 @@ git diff --check
 Expected: README formatting passes; the submission-validator test file passes; submission assets
 report `OK`; Git reports no whitespace errors.
 
-- [ ] **Step 6: Inspect scope and commit**
+- [x] **Step 6: Inspect scope and commit**
 
 Run:
 
