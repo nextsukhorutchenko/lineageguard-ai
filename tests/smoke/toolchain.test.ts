@@ -231,6 +231,18 @@ describe("toolchain", () => {
     expect(output).toContain("Total: 1 test");
   });
 
+  it("disables trace capture for remote acceptance", async () => {
+    const remoteConfig = await readFile(
+      resolve(process.cwd(), "playwright.public-remote.config.ts"),
+      "utf8",
+    );
+    const traceSettings = [...remoteConfig.matchAll(/\btrace:\s*"([^"]+)"/gu)].map(
+      (match) => match[1],
+    );
+
+    expect(traceSettings).toEqual(["off"]);
+  });
+
   it("keeps the built output compatible with next start", async () => {
     const packageJson = JSON.parse(
       await readFile(resolve(process.cwd(), "package.json"), "utf8"),

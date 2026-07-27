@@ -74,7 +74,9 @@ function isCredentialHeaderName(value: string): boolean {
   const normalized = normalizeCredentialName(value);
   return (
     new Set(["authorization", "cookie", "proxyauthorization"]).has(normalized) ||
-    /api(?:key|token|secret)/u.test(normalized)
+    /(?:authorization|token|secret|credential|(?:api|access|auth|client|datahub)key)/u.test(
+      normalized,
+    )
   );
 }
 
@@ -111,7 +113,16 @@ function assertRequestAuditClassifierContract(): void {
   const expectedOrigin = "https://public-replay.example.test";
   const safe = classifyRequestMetadata({
     requestUrl: `${expectedOrigin}/api/runs?_rsc=fixture`,
-    headerNames: ["accept", "content-type"],
+    headerNames: [
+      "accept",
+      "content-type",
+      "access-control-request-method",
+      "sec-fetch-site",
+      "x-accessibility-mode",
+      "x-authoritative-region",
+      "x-client-version",
+      "x-datahub-version",
+    ],
     expectedOrigin,
   });
   requireRequestAuditContract(
@@ -150,6 +161,10 @@ function assertRequestAuditClassifierContract(): void {
     "Proxy-Authorization",
     "X-API-Key",
     "X-Provider-Api-Key",
+    "X-DataHub-Token",
+    "X-Access-Token",
+    "X-Auth-Token",
+    "X-Client-Secret",
   ]) {
     requireRequestAuditContract(
       classifyRequestMetadata({

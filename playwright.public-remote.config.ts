@@ -49,7 +49,7 @@ export default defineConfig({
   use: {
     baseURL,
     screenshot: "only-on-failure",
-    trace: "retain-on-failure",
+    trace: "off",
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
 });
