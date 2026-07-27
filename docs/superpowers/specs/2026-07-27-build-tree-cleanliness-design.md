@@ -1,6 +1,6 @@
 # Build Tree Cleanliness Design
 
-**Status:** Proposed — owner review required
+**Status:** Approved
 
 **Date:** 2026-07-27
 
