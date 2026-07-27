@@ -102,6 +102,7 @@ it(
         renderBuiltPage("unused", { LINEAGEGUARD_RUNS_DIR: runsRoot }, rootSafety, {
           spawnChild: () => {
             child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+              detached: process.platform !== "win32",
               shell: false,
               stdio: "ignore",
               windowsHide: true,
