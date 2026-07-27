@@ -872,7 +872,6 @@ services:
     healthCheckPath: /api/health
     autoDeployTrigger: off
     renderSubdomainPolicy: enabled
-    maxShutdownDelaySeconds: 30
     envVars:
       - key: NODE_VERSION
         value: 22.23.1
@@ -887,6 +886,9 @@ services:
       - key: NEXT_TELEMETRY_DISABLED
         value: "1"
 ```
+
+Correction C: The free service intentionally omits the provider-incompatible
+`maxShutdownDelaySeconds` field.
 
 Do not add `repo`, account IDs, generated values, secret placeholders, or a custom domain.
 

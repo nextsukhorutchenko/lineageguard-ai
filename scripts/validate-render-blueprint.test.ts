@@ -20,7 +20,6 @@ const CANONICAL_RENDER_BLUEPRINT = `services:
     healthCheckPath: /api/health
     autoDeployTrigger: off
     renderSubdomainPolicy: enabled
-    maxShutdownDelaySeconds: 30
     envVars:
       - key: NODE_VERSION
         value: 22.23.1
@@ -242,6 +241,20 @@ describe("validateRenderBlueprintText", () => {
         ),
       ),
     ).toEqual(["Render Blueprint differs from the approved contract."]);
+  });
+
+  it("rejects a shutdown delay on the free plan", () => {
+    const actual = validateRenderBlueprintText(
+      CANONICAL_RENDER_BLUEPRINT.replace(
+        "    envVars:",
+        "    maxShutdownDelaySeconds: 30\n    envVars:",
+      ),
+    );
+
+    expect(actual).toEqual([
+      "Render Blueprint must not configure a shutdown delay on the free plan.",
+      "Render Blueprint differs from the approved contract.",
+    ]);
   });
 });
 

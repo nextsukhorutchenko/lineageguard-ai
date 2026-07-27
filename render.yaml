@@ -9,7 +9,6 @@ services:
     healthCheckPath: /api/health
     autoDeployTrigger: off
     renderSubdomainPolicy: enabled
-    maxShutdownDelaySeconds: 30
     envVars:
       - key: NODE_VERSION
         value: 22.23.1

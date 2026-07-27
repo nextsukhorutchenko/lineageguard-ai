@@ -20,7 +20,6 @@ export const EXPECTED_RENDER_BLUEPRINT = `services:
     healthCheckPath: /api/health
     autoDeployTrigger: off
     renderSubdomainPolicy: enabled
-    maxShutdownDelaySeconds: 30
     envVars:
       - key: NODE_VERSION
         value: 22.23.1
@@ -99,6 +98,8 @@ export function validateRenderBlueprintText(value: string): readonly string[] {
     !value.includes("- key: LINEAGEGUARD_RUNS_DIR\n        value: /tmp/lineageguard-runs\n")
   ) {
     findings.push("Render Blueprint must use the approved ephemeral runs directory.");
+  } else if (value.includes("maxShutdownDelaySeconds:")) {
+    findings.push("Render Blueprint must not configure a shutdown delay on the free plan.");
   } else if (hasForbiddenResource(value)) {
     findings.push("Render Blueprint must declare exactly one web service.");
   } else if (value.includes("sync: false")) {
