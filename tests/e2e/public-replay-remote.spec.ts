@@ -41,6 +41,10 @@ type BrowserSafety = {
   hasCredentialHeaderName: boolean;
 };
 
+function normalizeClipboardLineEndings(value: string): string {
+  return value.replace(/\r\n/gu, "\n");
+}
+
 function normalizeCredentialName(value: string): string {
   return value
     .normalize("NFKC")
@@ -376,19 +380,15 @@ test("proves the opt-in public Render deployment", async ({ baseURL, context, pa
     await expect(panel).not.toHaveText("Loading artifact…");
     const preview = await panel.textContent();
     expect(preview).not.toBeNull();
+    if (preview === null) throw new Error("The active artifact preview is unavailable.");
     await page.getByRole("button", { name: "Copy" }).click();
     await expect(page.getByRole("status")).toHaveText("Artifact copied.");
     await expect
       .poll(
-        () =>
-          page.evaluate(async () => {
-            const activePanel = document.querySelector<HTMLElement>(
-              '[role="tabpanel"]:not([hidden])',
-            );
-            const expectedPreview = activePanel?.textContent;
-            if (expectedPreview === undefined || expectedPreview === null) return false;
-            return (await navigator.clipboard.readText()) === expectedPreview;
-          }),
+        async () =>
+          normalizeClipboardLineEndings(
+            await page.evaluate(async () => navigator.clipboard.readText()),
+          ) === preview,
         { message: "Clipboard content must equal the active validated preview." },
       )
       .toBe(true);
