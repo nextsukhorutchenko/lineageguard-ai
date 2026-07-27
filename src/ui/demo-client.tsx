@@ -1,7 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type * as React from "react";
 import { CLIENT_MAX_VIRTUAL_ARTIFACT_BYTES } from "./artifact-limits.js";
+import {
+  PUBLIC_REPLAY_REQUEST,
+  PublicReplayErrorSchema,
+  type DeploymentProfile,
+} from "../hosting/public-replay-contracts.js";
 import type { DemoMode, WorkflowSnapshot } from "../workflow/contracts.js";
 import { readNdjson } from "./read-ndjson.js";
 import { ActivityTimeline } from "./activity-timeline.js";
@@ -26,7 +32,81 @@ const requestText = (value: ChangeFormValue): string =>
 const artifactContentType = (filename: string): string =>
   filename.endsWith(".sql") ? "text/sql; charset=utf-8" : "text/markdown; charset=utf-8";
 
-async function readArtifact(response: Response, filename: string): Promise<string> {
+const WORKFLOW_STREAM_FALLBACK = "The workflow stream ended unexpectedly.";
+const MAX_PUBLIC_REPLAY_ERROR_BYTES = 1_024;
+const ARTIFACT_PREVIEW_UNAVAILABLE = "Artifact preview is unavailable.";
+const PUBLIC_REPLAY_ARTIFACT_EXPIRED = "Run expired; analyze again.";
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  if (response.body === null) return;
+  try {
+    await response.body.cancel();
+  } catch {
+    // The fixed workflow fallback remains authoritative.
+  }
+}
+
+export async function readPublicReplayFailureMessage(response: Response): Promise<string> {
+  const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  if (response.ok || response.body === null || mediaType !== "application/json") {
+    await cancelResponseBody(response);
+    return WORKFLOW_STREAM_FALLBACK;
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (
+        !(value instanceof Uint8Array) ||
+        value.byteLength > MAX_PUBLIC_REPLAY_ERROR_BYTES - length
+      ) {
+        throw new Error("Public replay error is invalid.");
+      }
+      chunks.push(value);
+      length += value.byteLength;
+    }
+
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const parsed = PublicReplayErrorSchema.safeParse(JSON.parse(raw));
+    if (!parsed.success) return WORKFLOW_STREAM_FALLBACK;
+    if (parsed.data.error.code === "DEMO_BUSY") {
+      return "Public replay is busy. Try again shortly.";
+    }
+    if (parsed.data.error.code === "DEMO_CAPACITY_REACHED") {
+      return "Public replay capacity was reached. Try again after the service restarts.";
+    }
+    return WORKFLOW_STREAM_FALLBACK;
+  } catch {
+    try {
+      await reader.cancel();
+    } catch {
+      // The fixed workflow fallback remains authoritative.
+    }
+    return WORKFLOW_STREAM_FALLBACK;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+export async function readArtifact(
+  response: Response,
+  filename: string,
+  deploymentProfile: DeploymentProfile,
+): Promise<string> {
+  const failureMessage =
+    deploymentProfile === "PUBLIC_REPLAY" && response.status === 404
+      ? PUBLIC_REPLAY_ARTIFACT_EXPIRED
+      : ARTIFACT_PREVIEW_UNAVAILABLE;
   if (!response.ok || response.headers.get("content-type") !== artifactContentType(filename)) {
     if (response.body !== null) {
       try {
@@ -35,9 +115,9 @@ async function readArtifact(response: Response, filename: string): Promise<strin
         // The fixed artifact error remains authoritative.
       }
     }
-    throw new Error("Artifact preview is unavailable.");
+    throw new Error(failureMessage);
   }
-  if (response.body === null) throw new Error("Artifact preview is unavailable.");
+  if (response.body === null) throw new Error(failureMessage);
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let length = 0;
@@ -49,7 +129,7 @@ async function readArtifact(response: Response, filename: string): Promise<strin
         !(value instanceof Uint8Array) ||
         value.byteLength > CLIENT_MAX_VIRTUAL_ARTIFACT_BYTES - length
       ) {
-        throw new Error("Artifact preview is unavailable.");
+        throw new Error(failureMessage);
       }
       chunks.push(value);
       length += value.byteLength;
@@ -67,13 +147,17 @@ async function readArtifact(response: Response, filename: string): Promise<strin
     } catch {
       // The fixed artifact error remains authoritative.
     }
-    throw new Error("Artifact preview is unavailable.");
+    throw new Error(failureMessage);
   } finally {
     reader.releaseLock();
   }
 }
 
-export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) {
+export function DemoClient(props: {
+  readonly initialMode: DemoMode;
+  readonly deploymentProfile: DeploymentProfile;
+}): React.JSX.Element {
+  const { initialMode, deploymentProfile } = props;
   const [value, setValue] = useState(initialValue);
   const [snapshot, setSnapshot] = useState<WorkflowSnapshot>();
   const [activity, setActivity] = useState<WorkflowSnapshot["activity"]>([]);
@@ -95,15 +179,21 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
               const response = await fetch(`/api/runs/${snapshot.runId}/artifacts/${filename}`, {
                 signal: controller.signal,
               });
-              return [filename, await readArtifact(response, filename)] as const;
+              return [filename, await readArtifact(response, filename, deploymentProfile)] as const;
             }),
         );
         if (active) setContent(Object.fromEntries(pairs));
-      } catch {
+      } catch (error) {
         controller.abort();
         if (active) {
           setContent({});
-          setOperationStatus("Artifact preview is unavailable.");
+          setOperationStatus(
+            error instanceof Error &&
+              (error.message === ARTIFACT_PREVIEW_UNAVAILABLE ||
+                error.message === PUBLIC_REPLAY_ARTIFACT_EXPIRED)
+              ? error.message
+              : ARTIFACT_PREVIEW_UNAVAILABLE,
+          );
         }
       }
     })();
@@ -111,10 +201,11 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
       active = false;
       controller.abort();
     };
-  }, [snapshot]);
+  }, [deploymentProfile, snapshot]);
 
   const consume = async (url: string, body?: unknown) => {
     const lease = requestOwner.current.begin();
+    let failureMessage = WORKFLOW_STREAM_FALLBACK;
     setBusy(true);
     setOperationStatus("");
     setSnapshot(undefined);
@@ -127,6 +218,10 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
         signal: lease.controller.signal,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
+      if (!response.ok) {
+        failureMessage = await readPublicReplayFailureMessage(response);
+        throw new Error("Workflow stream is unavailable.");
+      }
       await readNdjson(response, (event) => {
         if (!requestOwner.current.isCurrent(lease)) return;
         if (event.type === "activity") setActivity((current) => [...current, event.entry]);
@@ -153,7 +248,7 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
           validation: { outcome: "NOT_RUN", findingCount: 0, findingCodes: [] },
           failure: {
             code: "GENERATION_FAILED",
-            message: "The workflow stream ended unexpectedly.",
+            message: failureMessage,
           },
         });
       }
@@ -166,7 +261,10 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
 
   const run = () => {
     if (!requestOwner.current.isInFlight())
-      void consume("/api/runs", { mode: initialMode, request: requestText(value) });
+      void consume("/api/runs", {
+        mode: initialMode,
+        request: deploymentProfile === "PUBLIC_REPLAY" ? PUBLIC_REPLAY_REQUEST : requestText(value),
+      });
   };
   const regenerate = () => {
     if (!requestOwner.current.isInFlight() && snapshot !== undefined) {
@@ -181,7 +279,11 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
           <span className="brand-mark">LG</span>
           <strong>LineageGuard AI</strong>
           <span className="mode-badge">
-            {initialMode === "REPLAY" ? "Fixture replay" : "Live DataHub + OpenAI"}
+            {deploymentProfile === "PUBLIC_REPLAY"
+              ? "Public fixture replay"
+              : initialMode === "REPLAY"
+                ? "Fixture replay"
+                : "Live DataHub + OpenAI"}
           </span>
         </nav>
         <p className="eyebrow">Metadata-aware change intelligence</p>
@@ -196,6 +298,7 @@ export function DemoClient({ initialMode }: { readonly initialMode: DemoMode }) 
           <ChangeRequestForm
             value={value}
             busy={busy}
+            locked={deploymentProfile === "PUBLIC_REPLAY"}
             onChange={setValue}
             onSubmit={run}
             onCancel={() => requestOwner.current.cancel()}

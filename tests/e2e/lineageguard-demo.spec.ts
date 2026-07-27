@@ -43,6 +43,7 @@ test("serves the repository-owned browser icon", { tag: "@shell" }, async ({ pag
   await expect(icon).toHaveCount(1);
   const href = await icon.getAttribute("href");
   expect(href).not.toBeNull();
+  expect(href).toBe("/icon.svg");
 
   const response = await request.get(href!);
   expect(response.status()).toBe(200);

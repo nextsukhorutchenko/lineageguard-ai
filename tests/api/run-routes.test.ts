@@ -1,4 +1,4 @@
-import { link, lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -34,6 +34,11 @@ import type {
   EntityContext,
   EntityContextIncompleteReasonCode,
 } from "../../src/domain/evidence.js";
+import {
+  createPublicReplayAdmission,
+  type PublicReplayAdmission,
+} from "../../src/hosting/public-replay-admission.js";
+import { PUBLIC_REPLAY_REQUEST } from "../../src/hosting/public-replay-contracts.js";
 import type { VirtualArtifactFilename } from "../../src/runs/run-envelope.js";
 import { persistCompletedRun } from "../../src/runs/run-store.js";
 import { readNdjson } from "../../src/ui/read-ndjson.js";
@@ -128,6 +133,7 @@ type LiveWebConfig = Extract<WebConfig, { readonly mode: "LIVE" }>;
 const liveConfig = (root: string): LiveWebConfig => ({
   mode: "LIVE",
   runsRoot: root,
+  deploymentProfile: "LOCAL",
   openaiApiKey: "test-openai-key",
   openaiModel: "gpt-5.6-sol",
   datahubGmsUrl: "http://localhost:8080",
@@ -135,7 +141,66 @@ const liveConfig = (root: string): LiveWebConfig => ({
   uvxPath: resolve("test-uvx"),
 });
 
-const replayConfig = (root: string): WebConfig => ({ mode: "REPLAY", runsRoot: root });
+const replayConfig = (root: string): WebConfig => ({
+  mode: "REPLAY",
+  runsRoot: root,
+  deploymentProfile: "LOCAL",
+});
+
+const publicReplayConfig = (root: string): WebConfig => ({
+  mode: "REPLAY",
+  runsRoot: root,
+  deploymentProfile: "PUBLIC_REPLAY",
+});
+
+function completedRouteSnapshot(runId: string): WorkflowSnapshot {
+  return WorkflowSnapshotSchema.parse({
+    ...safeUnexpectedFailureSnapshot(runId, "REPLAY"),
+    status: "COMPLETED",
+    validation: { outcome: "PASSED", findingCount: 0, findingCodes: [] },
+    failure: undefined,
+  });
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function observeLeaseReleases(delegate: PublicReplayAdmission): {
+  readonly admission: PublicReplayAdmission;
+  readonly releaseCount: () => number;
+} {
+  let count = 0;
+  return {
+    admission: {
+      async acquire(root) {
+        const decision = await delegate.acquire(root);
+        if (decision.kind === "rejected") return decision;
+        let released = false;
+        return {
+          kind: "accepted",
+          lease: {
+            release() {
+              if (!released) {
+                released = true;
+                count += 1;
+              }
+              decision.lease.release();
+            },
+          },
+        };
+      },
+    },
+    releaseCount: () => count,
+  };
+}
 
 class LiveFixtureProvider implements AgentProvider {
   readonly identity = createOpenAIAgentProviderIdentity("test-live-model");
@@ -240,6 +305,10 @@ it("streams NDJSON and ends with one validated terminal snapshot", async () => {
   const response = await startRun(runRequest({ mode: "REPLAY", request: REQUEST }));
   expect(response.status).toBe(200);
   expect(response.headers.get("content-type")).toBe("application/x-ndjson; charset=utf-8");
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+  expect(response.headers.get("x-frame-options")).toBe("DENY");
 
   const events = await collectEvents(response);
   const terminal = events.filter(
@@ -458,6 +527,10 @@ it("reloads sanitized snapshots, regenerates without DataHub, and downloads only
   });
   const parent = WorkflowSnapshotSchema.parse(await reload.json());
   expect(JSON.stringify(parent)).not.toContain(runsRoot);
+  expect(reload.headers.get("cache-control")).toBe("no-store");
+  expect(reload.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(reload.headers.get("x-content-type-options")).toBe("nosniff");
+  expect(reload.headers.get("x-frame-options")).toBe("DENY");
 
   const regenerationRequest = new Request(`http://localhost/api/runs/${runId}/regenerate`, {
     method: "POST",
@@ -466,6 +539,10 @@ it("reloads sanitized snapshots, regenerates without DataHub, and downloads only
   const regenerated = await regenerateRun(regenerationRequest, {
     params: Promise.resolve({ runId }),
   });
+  expect(regenerated.headers.get("cache-control")).toBe("no-store");
+  expect(regenerated.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(regenerated.headers.get("x-content-type-options")).toBe("nosniff");
+  expect(regenerated.headers.get("x-frame-options")).toBe("DENY");
   const regenerationEvents = await collectEvents(regenerated);
   const child = regenerationEvents.at(-1);
   if (child?.type !== "snapshot") throw new Error("Expected a terminal child snapshot.");
@@ -492,7 +569,9 @@ it("reloads sanitized snapshots, regenerates without DataHub, and downloads only
       filename.endsWith(".sql") ? "text/sql; charset=utf-8" : "text/markdown; charset=utf-8",
     );
     expect(download.headers.get("cache-control")).toBe("no-store");
+    expect(download.headers.get("referrer-policy")).toBe("no-referrer");
     expect(download.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(download.headers.get("x-frame-options")).toBe("DENY");
   }
 
   for (const filename of ["secret.txt", "../migration-up.sql", "%2e%2e"] as const) {
@@ -511,6 +590,17 @@ it("does not fall back when a final envelope is missing or tampered", async () =
   });
   expect(missing.status).toBe(404);
   expect(await missing.json()).toEqual({ error: "Run not found." });
+  expect(missing.headers.get("cache-control")).toBe("no-store");
+  expect(missing.headers.get("x-content-type-options")).toBe("nosniff");
+
+  const missingArtifact = await downloadArtifact(
+    new Request("http://localhost/api/runs/missing/artifacts/migration-up.sql"),
+    { params: Promise.resolve({ runId: "missing", filename: "migration-up.sql" }) },
+  );
+  expect(missingArtifact.status).toBe(404);
+  expect(await missingArtifact.json()).toEqual({ error: "Artifact not found." });
+  expect(missingArtifact.headers.get("cache-control")).toBe("no-store");
+  expect(missingArtifact.headers.get("x-content-type-options")).toBe("nosniff");
 
   const { runId } = await createCompletedRun();
   const envelopePath = join(runsRoot, `run-${runId}.json`);
@@ -1064,4 +1154,451 @@ it("rejects a regeneration request body", async () => {
   );
   expect(response.status).toBe(400);
   expect(await response.json()).toEqual({ error: "Invalid regeneration request." });
+});
+
+it("rejects a non-golden public request before storage, admission, run ID, or persistence", async () => {
+  const assertRunsRoot = vi.fn();
+  const publicAdmission: PublicReplayAdmission = { acquire: vi.fn() };
+  const createId = vi.fn();
+  const createDependencies = vi.fn();
+  const runWorkflow = vi.fn();
+  const persistFailure = vi.fn();
+  const handler = createPostRunsHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    assertRunsRoot,
+    publicAdmission,
+    createId,
+    createDependencies,
+    runWorkflow,
+    persistFailure,
+  });
+
+  const response = await handler(
+    runRequest({
+      mode: "REPLAY",
+      request: "Rename column another_column to another_name in dataset another.dataset",
+    }),
+  );
+
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({
+    error: {
+      code: "INVALID_REQUEST",
+      message: "Only the certified public replay request is supported.",
+    },
+  });
+  expect(assertRunsRoot).not.toHaveBeenCalled();
+  expect(publicAdmission.acquire).not.toHaveBeenCalled();
+  expect(createId).not.toHaveBeenCalled();
+  expect(createDependencies).not.toHaveBeenCalled();
+  expect(runWorkflow).not.toHaveBeenCalled();
+  expect(persistFailure).not.toHaveBeenCalled();
+  expect(await readdir(runsRoot)).toEqual([]);
+});
+
+it.each([
+  ["leading non-breaking space", `\u00a0${PUBLIC_REPLAY_REQUEST}`],
+  ["trailing em space", `${PUBLIC_REPLAY_REQUEST}\u2003`],
+] as const)(
+  "rejects the golden public request with %s before normalized downstream use",
+  async (_name, rawRequest) => {
+    const assertRunsRoot = vi.fn(async () => runsRoot);
+    const admissionDelegate = createPublicReplayAdmission({ countPublished: async () => 0 });
+    const acquire = vi.fn((root: string) => admissionDelegate.acquire(root));
+    const publicAdmission: PublicReplayAdmission = { acquire };
+    const createId = vi.fn(() => "unicode-whitespace-must-not-run");
+    const runWorkflow = vi.fn(async ({ runId }) => completedRouteSnapshot(runId));
+    const handler = createPostRunsHandler({
+      loadConfig: () => publicReplayConfig(runsRoot),
+      assertRunsRoot,
+      publicAdmission,
+      createId,
+      runWorkflow,
+    });
+
+    const response = await handler(runRequest({ mode: "REPLAY", request: rawRequest }));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: { code: "INVALID_REQUEST" },
+    });
+    expect(assertRunsRoot).not.toHaveBeenCalled();
+    expect(acquire).not.toHaveBeenCalled();
+    expect(createId).not.toHaveBeenCalled();
+    expect(runWorkflow).not.toHaveBeenCalled();
+  },
+);
+
+it("returns DEMO_BUSY before allocating or persisting a third concurrent public root run", async () => {
+  const publicAdmission = createPublicReplayAdmission({ countPublished: async () => 0 });
+  const workflows: Array<ReturnType<typeof deferred<WorkflowSnapshot>>> = [];
+  let runNumber = 0;
+  const createId = vi.fn(() => `concurrent-root-${(runNumber += 1)}`);
+  const handler = createPostRunsHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    publicAdmission,
+    createId,
+    runWorkflow: () => {
+      const workflow = deferred<WorkflowSnapshot>();
+      workflows.push(workflow);
+      return workflow.promise;
+    },
+    persistFailure: async () => {},
+  });
+
+  const first = await handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+  const second = await handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+  const rejected = await handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+
+  expect(rejected.status).toBe(429);
+  expect(await rejected.json()).toEqual({
+    error: {
+      code: "DEMO_BUSY",
+      message: "Public replay is busy. Try again shortly.",
+    },
+  });
+  expect(createId).toHaveBeenCalledTimes(2);
+  expect(workflows).toHaveLength(2);
+
+  workflows[0]?.resolve(completedRouteSnapshot("concurrent-root-1"));
+  workflows[1]?.resolve(completedRouteSnapshot("concurrent-root-2"));
+  await Promise.all([collectEvents(first), collectEvents(second)]);
+  expect(await readdir(runsRoot)).toEqual([]);
+});
+
+it("keeps a cancelled public root slot until the underlying workflow settles", async () => {
+  const publicAdmission = createPublicReplayAdmission({ countPublished: async () => 0 });
+  const workflows: Array<ReturnType<typeof deferred<WorkflowSnapshot>>> = [];
+  let runNumber = 0;
+  const handler = createPostRunsHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    publicAdmission,
+    createId: () => `cancel-pending-root-${(runNumber += 1)}`,
+    runWorkflow: () => {
+      const workflow = deferred<WorkflowSnapshot>();
+      workflows.push(workflow);
+      return workflow.promise;
+    },
+    persistFailure: async () => {},
+  });
+
+  const first = await handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+  const second = await handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+  await first.body?.cancel();
+
+  const whileCancelledWorkflowIsPending = await handler(
+    runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }),
+  );
+  expect(whileCancelledWorkflowIsPending.status).toBe(429);
+  expect(await whileCancelledWorkflowIsPending.json()).toMatchObject({
+    error: { code: "DEMO_BUSY" },
+  });
+
+  workflows[0]?.resolve(completedRouteSnapshot("cancel-pending-root-1"));
+  await workflows[0]?.promise;
+  const afterSettlement = await handler(
+    runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }),
+  );
+  expect(afterSettlement.status).toBe(200);
+
+  workflows[1]?.resolve(completedRouteSnapshot("cancel-pending-root-2"));
+  workflows[2]?.resolve(completedRouteSnapshot("cancel-pending-root-3"));
+  await Promise.all([collectEvents(second), collectEvents(afterSettlement)]);
+});
+
+it("keeps a cancelled public regeneration slot until regeneration settles", async () => {
+  const publicAdmission = createPublicReplayAdmission({ countPublished: async () => 0 });
+  const rootWorkflows: Array<ReturnType<typeof deferred<WorkflowSnapshot>>> = [];
+  const regenerationWorkflow = deferred<WorkflowSnapshot>();
+  let rootRunNumber = 0;
+  const rootHandler = createPostRunsHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    publicAdmission,
+    createId: () => `cancel-pending-shared-root-${(rootRunNumber += 1)}`,
+    runWorkflow: () => {
+      const workflow = deferred<WorkflowSnapshot>();
+      rootWorkflows.push(workflow);
+      return workflow.promise;
+    },
+    persistFailure: async () => {},
+  });
+  const regenerationHandler = createRegenerateRunHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    publicAdmission,
+    createId: () => "cancel-pending-child",
+    regenerate: () => regenerationWorkflow.promise,
+  });
+
+  const root = await rootHandler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+  const regeneration = await regenerationHandler(
+    new Request("http://localhost/api/runs/parent/regenerate", { method: "POST" }),
+    { params: Promise.resolve({ runId: "parent" }) },
+  );
+  await regeneration.body?.cancel();
+
+  const whileRegenerationIsPending = await rootHandler(
+    runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }),
+  );
+  expect(whileRegenerationIsPending.status).toBe(429);
+  expect(await whileRegenerationIsPending.json()).toMatchObject({
+    error: { code: "DEMO_BUSY" },
+  });
+
+  regenerationWorkflow.resolve(completedRouteSnapshot("cancel-pending-child"));
+  await regenerationWorkflow.promise;
+  const afterSettlement = await rootHandler(
+    runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }),
+  );
+  expect(afterSettlement.status).toBe(200);
+
+  rootWorkflows[0]?.resolve(completedRouteSnapshot("cancel-pending-shared-root-1"));
+  rootWorkflows[1]?.resolve(completedRouteSnapshot("cancel-pending-shared-root-2"));
+  await Promise.all([collectEvents(root), collectEvents(afterSettlement)]);
+});
+
+it("shares the default two-slot public controller between root and regeneration workflows", async () => {
+  const rootWorkflow = deferred<WorkflowSnapshot>();
+  const regenerationWorkflow = deferred<WorkflowSnapshot>();
+  const rootCreateId = vi.fn(() => "shared-root");
+  const childCreateId = vi.fn(() => "shared-child");
+  const rootHandler = createPostRunsHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    createId: rootCreateId,
+    runWorkflow: () => rootWorkflow.promise,
+    persistFailure: async () => {},
+  });
+  const regenerationHandler = createRegenerateRunHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    createId: childCreateId,
+    regenerate: () => regenerationWorkflow.promise,
+  });
+
+  const rootResponse = await rootHandler(
+    runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }),
+  );
+  const regenerationResponse = await regenerationHandler(
+    new Request("http://localhost/api/runs/parent/regenerate", { method: "POST" }),
+    { params: Promise.resolve({ runId: "parent" }) },
+  );
+  const rejected = await rootHandler(
+    runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }),
+  );
+
+  expect(rejected.status).toBe(429);
+  expect(await rejected.json()).toEqual({
+    error: {
+      code: "DEMO_BUSY",
+      message: "Public replay is busy. Try again shortly.",
+    },
+  });
+  expect(rootCreateId).toHaveBeenCalledOnce();
+  expect(childCreateId).toHaveBeenCalledOnce();
+
+  rootWorkflow.resolve(completedRouteSnapshot("shared-root"));
+  regenerationWorkflow.resolve(completedRouteSnapshot("shared-child"));
+  await Promise.all([collectEvents(rootResponse), collectEvents(regenerationResponse)]);
+});
+
+it("returns DEMO_CAPACITY_REACHED before a sixty-fifth public run ID or persistence entry", async () => {
+  const publicAdmission = createPublicReplayAdmission({
+    envelopeLimit: 64,
+    countPublished: async () => 63,
+  });
+  const createId = vi.fn(() => "last-public-envelope");
+  const persistFailure = vi.fn();
+  const handler = createPostRunsHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    publicAdmission,
+    createId,
+    runWorkflow: async ({ runId }) => completedRouteSnapshot(runId),
+    persistFailure,
+  });
+
+  const accepted = await handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+  await collectEvents(accepted);
+  const rejected = await handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+
+  expect(rejected.status).toBe(503);
+  expect(await rejected.json()).toEqual({
+    error: {
+      code: "DEMO_CAPACITY_REACHED",
+      message: "Public replay capacity was reached. Try again after the service restarts.",
+    },
+  });
+  expect(createId).toHaveBeenCalledOnce();
+  expect(persistFailure).not.toHaveBeenCalled();
+  expect(await readdir(runsRoot)).toEqual([]);
+});
+
+it("releases public root admission when run ID allocation fails before stream ownership", async () => {
+  const publicAdmission = createPublicReplayAdmission({
+    concurrencyLimit: 1,
+    envelopeLimit: 4,
+    countPublished: async () => 0,
+  });
+  let createAttempt = 0;
+  const handler = createPostRunsHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    publicAdmission,
+    createId: () => {
+      createAttempt += 1;
+      if (createAttempt === 1) throw new Error("run ID allocation failed");
+      return "root-after-pre-stream-failure";
+    },
+    runWorkflow: async ({ runId }) => completedRouteSnapshot(runId),
+    persistFailure: async () => {},
+  });
+
+  await expect(
+    handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST })),
+  ).rejects.toThrow();
+
+  const afterFailure = await handler(
+    runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }),
+  );
+  expect(afterFailure.status).toBe(200);
+  expect(terminalSnapshots(await collectEvents(afterFailure))).toEqual([
+    expect.objectContaining({ runId: "root-after-pre-stream-failure", status: "COMPLETED" }),
+  ]);
+});
+
+it("releases public regeneration admission when route params reject before stream ownership", async () => {
+  const publicAdmission = createPublicReplayAdmission({
+    concurrencyLimit: 1,
+    envelopeLimit: 4,
+    countPublished: async () => 0,
+  });
+  const handler = createRegenerateRunHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    publicAdmission,
+    createId: () => "child-after-param-failure",
+    regenerate: async ({ runId }) => completedRouteSnapshot(runId),
+  });
+  const paramsFailure = new Error("route params failed");
+  const rejectingParams = {
+    then(
+      _resolve: (value: { readonly runId: string }) => void,
+      reject: (reason: unknown) => void,
+    ): void {
+      reject(paramsFailure);
+    },
+  } as unknown as Promise<{ readonly runId: string }>;
+
+  await expect(
+    handler(new Request("http://localhost/api/runs/parent/regenerate", { method: "POST" }), {
+      params: rejectingParams,
+    }),
+  ).rejects.toThrow();
+
+  const afterFailure = await handler(
+    new Request("http://localhost/api/runs/parent/regenerate", { method: "POST" }),
+    { params: Promise.resolve({ runId: "parent" }) },
+  );
+  expect(afterFailure.status).toBe(200);
+  expect(terminalSnapshots(await collectEvents(afterFailure))).toEqual([
+    expect.objectContaining({ runId: "child-after-param-failure", status: "COMPLETED" }),
+  ]);
+});
+
+it("releases public regeneration admission when child run ID allocation fails", async () => {
+  const publicAdmission = createPublicReplayAdmission({
+    concurrencyLimit: 1,
+    envelopeLimit: 4,
+    countPublished: async () => 0,
+  });
+  let createAttempt = 0;
+  const handler = createRegenerateRunHandler({
+    loadConfig: () => publicReplayConfig(runsRoot),
+    publicAdmission,
+    createId: () => {
+      createAttempt += 1;
+      if (createAttempt === 1) throw new Error("child run ID allocation failed");
+      return "child-after-id-failure";
+    },
+    regenerate: async ({ runId }) => completedRouteSnapshot(runId),
+  });
+
+  await expect(
+    handler(new Request("http://localhost/api/runs/parent/regenerate", { method: "POST" }), {
+      params: Promise.resolve({ runId: "parent" }),
+    }),
+  ).rejects.toThrow();
+
+  const afterFailure = await handler(
+    new Request("http://localhost/api/runs/parent/regenerate", { method: "POST" }),
+    { params: Promise.resolve({ runId: "parent" }) },
+  );
+  expect(afterFailure.status).toBe(200);
+  expect(terminalSnapshots(await collectEvents(afterFailure))).toEqual([
+    expect.objectContaining({ runId: "child-after-id-failure", status: "COMPLETED" }),
+  ]);
+});
+
+it.each(["success", "failure", "cancellation"] as const)(
+  "releases only the concurrency slot after public workflow %s",
+  async (outcome) => {
+    const observed = observeLeaseReleases(
+      createPublicReplayAdmission({
+        concurrencyLimit: 1,
+        envelopeLimit: 2,
+        countPublished: async () => 0,
+      }),
+    );
+    let runNumber = 0;
+    const createId = vi.fn(() => `${outcome}-${(runNumber += 1)}`);
+    const handler = createPostRunsHandler({
+      loadConfig: () => publicReplayConfig(runsRoot),
+      publicAdmission: observed.admission,
+      createId,
+      persistFailure: async () => {},
+      runWorkflow:
+        outcome === "success"
+          ? async ({ runId }) => completedRouteSnapshot(runId)
+          : outcome === "failure"
+            ? async () => {
+                throw new Error("classified route test failure");
+              }
+            : ({ signal }) => waitForAbort(signal),
+    });
+
+    for (let reservation = 1; reservation <= 2; reservation += 1) {
+      const response = await handler(
+        runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }),
+      );
+      if (outcome === "cancellation") await response.body?.cancel();
+      else await collectEvents(response);
+      await vi.waitFor(() => expect(observed.releaseCount()).toBe(reservation));
+    }
+
+    const rejected = await handler(runRequest({ mode: "REPLAY", request: PUBLIC_REPLAY_REQUEST }));
+    expect(rejected.status).toBe(503);
+    expect(await rejected.json()).toEqual({
+      error: {
+        code: "DEMO_CAPACITY_REACHED",
+        message: "Public replay capacity was reached. Try again after the service restarts.",
+      },
+    });
+    expect(createId).toHaveBeenCalledTimes(2);
+  },
+);
+
+it("keeps local REPLAY outside the public admission boundary", async () => {
+  const publicAdmission: PublicReplayAdmission = {
+    acquire: vi.fn(async () => {
+      throw new Error("Local replay must not acquire public admission.");
+    }),
+  };
+  const handler = createPostRunsHandler({
+    loadConfig: () => replayConfig(runsRoot),
+    publicAdmission,
+    createId: () => "local-bypass",
+    runWorkflow: async ({ runId }) => completedRouteSnapshot(runId),
+  });
+
+  const response = await handler(runRequest({ mode: "REPLAY", request: REQUEST }));
+  expect(response.status).toBe(200);
+  expect(terminalSnapshots(await collectEvents(response))).toEqual([
+    expect.objectContaining({ runId: "local-bypass", status: "COMPLETED" }),
+  ]);
+  expect(publicAdmission.acquire).not.toHaveBeenCalled();
 });

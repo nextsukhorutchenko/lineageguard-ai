@@ -2,14 +2,56 @@ import { resolve } from "node:path";
 import { expect, it } from "vitest";
 import { loadWebConfig } from "./web-config.js";
 
+const runsRoot = resolve("test-runs");
+
 it("loads replay without DataHub or OpenAI secrets", () => {
-  const runsRoot = resolve("test-runs");
   expect(
     loadWebConfig({ LINEAGEGUARD_DEMO_MODE: "REPLAY", LINEAGEGUARD_RUNS_DIR: runsRoot }),
   ).toMatchObject({
     mode: "REPLAY",
     runsRoot,
   });
+});
+
+it("defaults the deployment profile to LOCAL", () => {
+  expect(
+    loadWebConfig({
+      LINEAGEGUARD_DEMO_MODE: "REPLAY",
+      LINEAGEGUARD_RUNS_DIR: runsRoot,
+    }),
+  ).toEqual({
+    mode: "REPLAY",
+    runsRoot,
+    deploymentProfile: "LOCAL",
+  });
+});
+
+it("accepts a credential-free PUBLIC_REPLAY profile", () => {
+  expect(
+    loadWebConfig({
+      LINEAGEGUARD_DEMO_MODE: "REPLAY",
+      LINEAGEGUARD_DEPLOYMENT_PROFILE: "PUBLIC_REPLAY",
+      LINEAGEGUARD_RUNS_DIR: runsRoot,
+    }),
+  ).toEqual({
+    mode: "REPLAY",
+    runsRoot,
+    deploymentProfile: "PUBLIC_REPLAY",
+  });
+});
+
+it.each([
+  { LINEAGEGUARD_DEMO_MODE: "LIVE" },
+  { LINEAGEGUARD_DEMO_MODE: "REPLAY", OPENAI_API_KEY: "forbidden" },
+  { LINEAGEGUARD_DEMO_MODE: "REPLAY", DATAHUB_GMS_TOKEN: "forbidden" },
+])("rejects unsafe PUBLIC_REPLAY configuration %#", (unsafe) => {
+  expect(() =>
+    loadWebConfig({
+      LINEAGEGUARD_DEPLOYMENT_PROFILE: "PUBLIC_REPLAY",
+      LINEAGEGUARD_RUNS_DIR: runsRoot,
+      ...unsafe,
+    }),
+  ).toThrow("Demo service configuration is invalid.");
 });
 
 it.each([

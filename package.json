@@ -19,9 +19,11 @@
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "prepare:pr-impact": "tsx scripts/prepare-pr-impact.ts",
+    "render:check": "tsx scripts/validate-render-blueprint.ts",
     "security:scan": "tsx scripts/scan-repository-secrets.ts",
     "security:scan:history": "tsx scripts/scan-repository-secrets.ts --history",
     "start": "node dist/cli.js",
+    "start:public-replay": "node dist/hosting/start-public-replay.js",
     "start:web": "next start",
     "submission:check": "tsx scripts/validate-submission-assets.ts",
     "summary:pr-impact": "tsx scripts/append-pr-impact-summary.ts",
@@ -30,10 +32,12 @@
     "test:exploratory": "tsx scripts/run-midscene-exploratory.ts",
     "test:integration": "vitest run tests/integration/datahub-mcp.integration.test.ts",
     "test:openai": "vitest run tests/integration/openai-agent.integration.test.ts",
+    "test:public-deployment": "playwright test --config playwright.public-remote.config.ts",
+    "test:public-replay": "vitest run tests/api/run-routes.test.ts && playwright test --config playwright.public-replay.config.ts",
     "test:runtime-mode": "vitest run tests/integration/runtime-mode-page.integration.test.ts",
     "test:submission": "vitest run scripts/validate-submission-assets.test.ts scripts/scan-repository-secrets.test.ts",
     "typecheck": "tsc --noEmit",
-    "verify:offline": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm test:runtime-mode && pnpm test:e2e --project=chromium"
+    "verify:offline": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm render:check && pnpm build && pnpm test:runtime-mode && pnpm test:public-replay && pnpm test:e2e --project=chromium"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

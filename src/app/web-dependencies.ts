@@ -12,6 +12,18 @@ import {
   MAX_RUN_REQUEST_BYTES,
   readBoundedUtf8Body,
 } from "../http/bounded-body.js";
+import { noStoreHeaders } from "../http/response-headers.js";
+import {
+  createPublicReplayAdmission,
+  type PublicReplayAdmission,
+  type PublicReplayAdmissionDecision,
+  type PublicReplayLease,
+} from "../hosting/public-replay-admission.js";
+import { PUBLIC_REPLAY_REQUEST } from "../hosting/public-replay-contracts.js";
+import {
+  publicReplayErrorResponse,
+  publicReplayInvalidRequestResponse,
+} from "../hosting/public-replay-http.js";
 import { createRunId } from "../runs/create-run-id.js";
 import { loadRunSnapshot, persistFailedRun, readCompletedPackageFile } from "../runs/run-store.js";
 import { DEADLINES_MS } from "../runtime/deadlines.js";
@@ -26,6 +38,32 @@ import {
 import { isTerminalWorkflowStatus } from "../workflow/state-machine.js";
 import { regeneratePackage } from "./regenerate-package.js";
 import { runAgentWorkflow, type RunAgentWorkflowDependencies } from "./run-agent-workflow.js";
+
+const sharedPublicReplayAdmission = createPublicReplayAdmission();
+const localReplayLease: PublicReplayLease = Object.freeze({ release() {} });
+
+function withNoStoreHeaders(response: Response): Response {
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: noStoreHeaders(Object.fromEntries(response.headers)),
+  });
+}
+
+async function acquireWorkflowLease(
+  config: WebConfig,
+  runsRoot: string,
+  publicAdmission: PublicReplayAdmission,
+): Promise<PublicReplayAdmissionDecision> {
+  if (config.deploymentProfile !== "PUBLIC_REPLAY") {
+    return { kind: "accepted", lease: localReplayLease };
+  }
+  try {
+    return await publicAdmission.acquire(runsRoot);
+  } catch {
+    return { kind: "rejected", code: "DEMO_CAPACITY_REACHED" };
+  }
+}
 
 export interface WebWorkflowDependencyInput {
   readonly config: WebConfig;
@@ -150,6 +188,7 @@ export function safeCancellationSnapshot(runId: string, mode: WebConfig["mode"])
 export interface PostRunsHandlerOverrides {
   readonly loadConfig?: typeof loadWebConfig;
   readonly assertRunsRoot?: typeof assertTrustedRunsRoot;
+  readonly publicAdmission?: PublicReplayAdmission;
   readonly createDependencies?: typeof createWebWorkflowDependencies;
   readonly runWorkflow?: typeof runAgentWorkflow;
   readonly persistFailure?: typeof persistFailedRun;
@@ -159,6 +198,7 @@ export interface PostRunsHandlerOverrides {
 export function createPostRunsHandler(overrides: PostRunsHandlerOverrides = {}) {
   const loadConfig = overrides.loadConfig ?? loadWebConfig;
   const assertRunsRoot = overrides.assertRunsRoot ?? assertTrustedRunsRoot;
+  const publicAdmission = overrides.publicAdmission ?? sharedPublicReplayAdmission;
   const createDependencies = overrides.createDependencies ?? createWebWorkflowDependencies;
   const runWorkflow = overrides.runWorkflow ?? runAgentWorkflow;
   const persistFailure = overrides.persistFailure ?? persistFailedRun;
@@ -166,113 +206,152 @@ export function createPostRunsHandler(overrides: PostRunsHandlerOverrides = {}) 
 
   return async function postRuns(request: Request): Promise<Response> {
     let input: RunRequest;
+    let rawRequest: string;
     try {
       const rawBody = await readBoundedUtf8Body(request, MAX_RUN_REQUEST_BYTES);
-      input = RunRequestSchema.parse(JSON.parse(rawBody));
+      const rawInput: unknown = JSON.parse(rawBody);
+      input = RunRequestSchema.parse(rawInput);
+      if (
+        typeof rawInput !== "object" ||
+        rawInput === null ||
+        !("request" in rawInput) ||
+        typeof rawInput.request !== "string"
+      ) {
+        throw new Error("Invalid rename request.");
+      }
+      rawRequest = rawInput.request;
     } catch {
-      return Response.json({ error: "Invalid rename request." }, { status: 400 });
+      return Response.json(
+        { error: "Invalid rename request." },
+        { status: 400, headers: noStoreHeaders() },
+      );
     }
     let config: WebConfig;
     try {
       config = loadConfig(process.env);
     } catch {
-      return Response.json({ error: "Demo service is not configured." }, { status: 503 });
+      return Response.json(
+        { error: "Demo service is not configured." },
+        { status: 503, headers: noStoreHeaders() },
+      );
+    }
+    if (config.deploymentProfile === "PUBLIC_REPLAY" && rawRequest !== PUBLIC_REPLAY_REQUEST) {
+      return withNoStoreHeaders(publicReplayInvalidRequestResponse());
     }
     let trustedRunsRoot: string;
     try {
       trustedRunsRoot = await assertRunsRoot(config.runsRoot);
     } catch {
-      return Response.json({ error: "Demo service storage is unavailable." }, { status: 503 });
-    }
-    if (input.mode !== config.mode) {
       return Response.json(
-        { error: "Requested mode does not match server mode." },
-        { status: 409 },
+        { error: "Demo service storage is unavailable." },
+        { status: 503, headers: noStoreHeaders() },
       );
     }
+    const admission = await acquireWorkflowLease(config, trustedRunsRoot, publicAdmission);
+    if (admission.kind === "rejected") {
+      return withNoStoreHeaders(publicReplayErrorResponse(admission.code));
+    }
+    let leaseReleased = false;
+    let streamOwnsLease = false;
+    const releaseLease = (): void => {
+      if (leaseReleased) return;
+      leaseReleased = true;
+      admission.lease.release();
+    };
+    try {
+      if (input.mode !== config.mode) {
+        return Response.json(
+          { error: "Requested mode does not match server mode." },
+          { status: 409, headers: noStoreHeaders() },
+        );
+      }
 
-    const runId = createId(new Date());
-    const abortController = new AbortController();
-    const abort = () => abortController.abort();
-    if (request.signal.aborted) abort();
-    else request.signal.addEventListener("abort", abort, { once: true });
+      const runId = createId(new Date());
+      const abortController = new AbortController();
+      const abort = () => abortController.abort();
+      if (request.signal.aborted) abort();
+      else request.signal.addEventListener("abort", abort, { once: true });
 
-    const stream = new ReadableStream<Uint8Array>({
-      async start(controller) {
-        let terminalSnapshotSent = false;
-        const safeEnqueue = (event: WorkflowEvent): boolean => {
-          try {
-            controller.enqueue(encodeWorkflowEvent(event));
-            if (event.type === "snapshot" && isTerminalWorkflowStatus(event.snapshot.status)) {
-              terminalSnapshotSent = true;
-            }
-            return true;
-          } catch {
-            return false;
-          }
-        };
-        try {
-          const snapshot = await runWorkflow(
-            createDependencies({
-              config,
-              runsRoot: trustedRunsRoot,
-              request: input.request,
-              runId,
-              signal: abortController.signal,
-              onEvent: (event) => void safeEnqueue(event),
-            }),
-          );
-          if (!terminalSnapshotSent) safeEnqueue({ type: "snapshot", snapshot });
-        } catch {
-          if (!terminalSnapshotSent) {
-            let snapshot: WorkflowSnapshot | undefined;
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          let terminalSnapshotSent = false;
+          const safeEnqueue = (event: WorkflowEvent): boolean => {
             try {
-              const persisted = await loadRunSnapshot({
-                runsRoot: trustedRunsRoot,
-                runId,
-              });
-              if (persisted.status === "COMPLETED") snapshot = persisted;
+              controller.enqueue(encodeWorkflowEvent(event));
+              if (event.type === "snapshot" && isTerminalWorkflowStatus(event.snapshot.status)) {
+                terminalSnapshotSent = true;
+              }
+              return true;
             } catch {
-              // Only an already-published completion supersedes the closed fallback.
+              return false;
             }
-            if (snapshot === undefined) {
-              snapshot = abortController.signal.aborted
-                ? safeCancellationSnapshot(runId, config.mode)
-                : safeUnexpectedFailureSnapshot(runId, config.mode);
+          };
+          try {
+            const snapshot = await runWorkflow(
+              createDependencies({
+                config,
+                runsRoot: trustedRunsRoot,
+                request: input.request,
+                runId,
+                signal: abortController.signal,
+                onEvent: (event) => void safeEnqueue(event),
+              }),
+            );
+            if (!terminalSnapshotSent) safeEnqueue({ type: "snapshot", snapshot });
+          } catch {
+            if (!terminalSnapshotSent) {
+              let snapshot: WorkflowSnapshot | undefined;
               try {
-                await persistFailure({
+                const persisted = await loadRunSnapshot({
                   runsRoot: trustedRunsRoot,
                   runId,
-                  snapshot,
-                  secrets:
-                    config.mode === "LIVE" ? [config.openaiApiKey, config.datahubGmsToken] : [],
                 });
+                if (persisted.status === "COMPLETED") snapshot = persisted;
               } catch {
-                // The same closed fallback is safe to stream when persistence is unavailable.
+                // Only an already-published completion supersedes the closed fallback.
               }
+              if (snapshot === undefined) {
+                snapshot = abortController.signal.aborted
+                  ? safeCancellationSnapshot(runId, config.mode)
+                  : safeUnexpectedFailureSnapshot(runId, config.mode);
+                try {
+                  await persistFailure({
+                    runsRoot: trustedRunsRoot,
+                    runId,
+                    snapshot,
+                    secrets:
+                      config.mode === "LIVE" ? [config.openaiApiKey, config.datahubGmsToken] : [],
+                  });
+                } catch {
+                  // The same closed fallback is safe to stream when persistence is unavailable.
+                }
+              }
+              safeEnqueue({ type: "snapshot", snapshot });
             }
-            safeEnqueue({ type: "snapshot", snapshot });
+          } finally {
+            releaseLease();
+            request.signal.removeEventListener("abort", abort);
+            try {
+              controller.close();
+            } catch {
+              // A disconnected client is expected to have cancelled the stream.
+            }
           }
-        } finally {
-          request.signal.removeEventListener("abort", abort);
-          try {
-            controller.close();
-          } catch {
-            // A disconnected client is expected to have cancelled the stream.
-          }
-        }
-      },
-      cancel() {
-        abortController.abort();
-      },
-    });
-    return new Response(stream, {
-      headers: {
-        "Cache-Control": "no-store",
-        "Content-Type": "application/x-ndjson; charset=utf-8",
-        "X-Content-Type-Options": "nosniff",
-      },
-    });
+        },
+        cancel() {
+          abortController.abort();
+        },
+      });
+      const response = new Response(stream, {
+        headers: noStoreHeaders({
+          "Content-Type": "application/x-ndjson; charset=utf-8",
+        }),
+      });
+      streamOwnsLease = true;
+      return response;
+    } finally {
+      if (!streamOwnsLease) releaseLease();
+    }
   };
 }
 
@@ -300,9 +379,9 @@ export function createReloadRunHandler(overrides: ReloadRunHandlerOverrides = {}
       const config = loadConfig(process.env);
       const runsRoot = await assertRunsRoot(config.runsRoot);
       const snapshot = await loadSnapshot({ runsRoot, runId });
-      return Response.json(snapshot, { headers: { "Cache-Control": "no-store" } });
+      return Response.json(snapshot, { headers: noStoreHeaders() });
     } catch {
-      return Response.json({ error: "Run not found." }, { status: 404 });
+      return Response.json({ error: "Run not found." }, { status: 404, headers: noStoreHeaders() });
     }
   };
 }
@@ -343,17 +422,18 @@ export function createDownloadArtifactHandler(overrides: DownloadArtifactHandler
       const runsRoot = await assertRunsRoot(config.runsRoot);
       const body = await readArtifact({ runsRoot, runId, filename });
       return new Response(body, {
-        headers: {
-          "Cache-Control": "no-store",
+        headers: noStoreHeaders({
           "Content-Disposition": `attachment; filename="${filename}"`,
           "Content-Type": filename.endsWith(".sql")
             ? "text/sql; charset=utf-8"
             : "text/markdown; charset=utf-8",
-          "X-Content-Type-Options": "nosniff",
-        },
+        }),
       });
     } catch {
-      return Response.json({ error: "Artifact not found." }, { status: 404 });
+      return Response.json(
+        { error: "Artifact not found." },
+        { status: 404, headers: noStoreHeaders() },
+      );
     }
   };
 }
@@ -363,6 +443,7 @@ type RegenerateRouteContext = { readonly params: Promise<{ readonly runId: strin
 export interface RegenerateRunHandlerOverrides {
   readonly loadConfig?: typeof loadWebConfig;
   readonly assertRunsRoot?: typeof assertTrustedRunsRoot;
+  readonly publicAdmission?: PublicReplayAdmission;
   readonly createDependencies?: typeof createWebRegenerationDependencies;
   readonly regenerate?: typeof regeneratePackage;
   readonly createId?: typeof createRunId;
@@ -371,6 +452,7 @@ export interface RegenerateRunHandlerOverrides {
 export function createRegenerateRunHandler(overrides: RegenerateRunHandlerOverrides = {}) {
   const loadConfig = overrides.loadConfig ?? loadWebConfig;
   const assertRunsRoot = overrides.assertRunsRoot ?? assertTrustedRunsRoot;
+  const publicAdmission = overrides.publicAdmission ?? sharedPublicReplayAdmission;
   const createDependencies = overrides.createDependencies ?? createWebRegenerationDependencies;
   const regenerate = overrides.regenerate ?? regeneratePackage;
   const createId = overrides.createId ?? createRunId;
@@ -382,82 +464,106 @@ export function createRegenerateRunHandler(overrides: RegenerateRunHandlerOverri
     try {
       await assertEmptyRequestBody(request);
     } catch {
-      return Response.json({ error: "Invalid regeneration request." }, { status: 400 });
+      return Response.json(
+        { error: "Invalid regeneration request." },
+        { status: 400, headers: noStoreHeaders() },
+      );
     }
 
     let config: WebConfig;
     try {
       config = loadConfig(process.env);
     } catch {
-      return Response.json({ error: "Demo service is not configured." }, { status: 503 });
+      return Response.json(
+        { error: "Demo service is not configured." },
+        { status: 503, headers: noStoreHeaders() },
+      );
     }
     let runsRoot: string;
     try {
       runsRoot = await assertRunsRoot(config.runsRoot);
     } catch {
-      return Response.json({ error: "Demo service storage is unavailable." }, { status: 503 });
+      return Response.json(
+        { error: "Demo service storage is unavailable." },
+        { status: 503, headers: noStoreHeaders() },
+      );
     }
+    const admission = await acquireWorkflowLease(config, runsRoot, publicAdmission);
+    if (admission.kind === "rejected") {
+      return withNoStoreHeaders(publicReplayErrorResponse(admission.code));
+    }
+    let leaseReleased = false;
+    let streamOwnsLease = false;
+    const releaseLease = (): void => {
+      if (leaseReleased) return;
+      leaseReleased = true;
+      admission.lease.release();
+    };
+    try {
+      const { runId: parentRunId } = await context.params;
+      const runId = createId(new Date());
+      const abortController = new AbortController();
+      const abort = () => abortController.abort();
+      if (request.signal.aborted) abort();
+      else request.signal.addEventListener("abort", abort, { once: true });
 
-    const { runId: parentRunId } = await context.params;
-    const runId = createId(new Date());
-    const abortController = new AbortController();
-    const abort = () => abortController.abort();
-    if (request.signal.aborted) abort();
-    else request.signal.addEventListener("abort", abort, { once: true });
-
-    const stream = new ReadableStream<Uint8Array>({
-      async start(controller) {
-        let terminalSnapshotSent = false;
-        const safeEnqueue = (event: WorkflowEvent): boolean => {
-          try {
-            controller.enqueue(encodeWorkflowEvent(event));
-            if (event.type === "snapshot" && isTerminalWorkflowStatus(event.snapshot.status)) {
-              terminalSnapshotSent = true;
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          let terminalSnapshotSent = false;
+          const safeEnqueue = (event: WorkflowEvent): boolean => {
+            try {
+              controller.enqueue(encodeWorkflowEvent(event));
+              if (event.type === "snapshot" && isTerminalWorkflowStatus(event.snapshot.status)) {
+                terminalSnapshotSent = true;
+              }
+              return true;
+            } catch {
+              return false;
             }
-            return true;
-          } catch {
-            return false;
-          }
-        };
-        try {
-          const snapshot = await regenerate(
-            createDependencies({
-              config,
-              runsRoot,
-              parentRunId,
-              runId,
-              signal: abortController.signal,
-              onEvent: (event) => void safeEnqueue(event),
-            }),
-          );
-          if (!terminalSnapshotSent) safeEnqueue({ type: "snapshot", snapshot });
-        } catch {
-          if (!terminalSnapshotSent) {
-            const snapshot = abortController.signal.aborted
-              ? safeCancellationSnapshot(runId, config.mode)
-              : safeUnexpectedFailureSnapshot(runId, config.mode);
-            safeEnqueue({ type: "snapshot", snapshot });
-          }
-        } finally {
-          request.signal.removeEventListener("abort", abort);
+          };
           try {
-            controller.close();
+            const snapshot = await regenerate(
+              createDependencies({
+                config,
+                runsRoot,
+                parentRunId,
+                runId,
+                signal: abortController.signal,
+                onEvent: (event) => void safeEnqueue(event),
+              }),
+            );
+            if (!terminalSnapshotSent) safeEnqueue({ type: "snapshot", snapshot });
           } catch {
-            // A disconnected client is expected to have cancelled the stream.
+            if (!terminalSnapshotSent) {
+              const snapshot = abortController.signal.aborted
+                ? safeCancellationSnapshot(runId, config.mode)
+                : safeUnexpectedFailureSnapshot(runId, config.mode);
+              safeEnqueue({ type: "snapshot", snapshot });
+            }
+          } finally {
+            releaseLease();
+            request.signal.removeEventListener("abort", abort);
+            try {
+              controller.close();
+            } catch {
+              // A disconnected client is expected to have cancelled the stream.
+            }
           }
-        }
-      },
-      cancel() {
-        abortController.abort();
-      },
-    });
+        },
+        cancel() {
+          abortController.abort();
+        },
+      });
 
-    return new Response(stream, {
-      headers: {
-        "Cache-Control": "no-store",
-        "Content-Type": "application/x-ndjson; charset=utf-8",
-        "X-Content-Type-Options": "nosniff",
-      },
-    });
+      const response = new Response(stream, {
+        headers: noStoreHeaders({
+          "Content-Type": "application/x-ndjson; charset=utf-8",
+        }),
+      });
+      streamOwnsLease = true;
+      return response;
+    } finally {
+      if (!streamOwnsLease) releaseLease();
+    }
   };
 }

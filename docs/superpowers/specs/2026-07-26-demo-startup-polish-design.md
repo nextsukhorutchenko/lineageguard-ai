@@ -22,8 +22,8 @@ standalone build output.
 
 1. Remove `output: "standalone"` from `next.config.ts`.
 2. Keep the existing `start:web` command as `next start`.
-3. Add a repository-owned SVG application icon through the Next.js App Router metadata-file
-   convention.
+3. Serve a repository-owned SVG application icon from `public/icon.svg` and declare its stable
+   `/icon.svg` metadata URL.
 4. Preserve all existing build flags, ESM and TypeScript conventions, runtime modes, API routes,
    security boundaries, and dependency versions.
 
@@ -32,12 +32,18 @@ deployment configuration will be added.
 
 ## Branding Asset
 
-The favicon will be a small English-free visual mark stored as `app/icon.svg`. It will use the
+The favicon will be a small English-free visual mark stored as `public/icon.svg`. It will use the
 existing LineageGuard `LG` identity and a simple high-contrast treatment suitable for browser-tab
 sizes. The SVG must contain no scripts, external references, embedded data, or dynamic content.
 
-Next.js must publish an icon link in the rendered document, and the referenced icon URL must return
-HTTP 200.
+The rendered document must declare exactly one icon link with href `/icon.svg`, and that public
+asset must return HTTP 200.
+
+## Correction D — Stable public icon URL
+
+Render rejected the generated query-suffixed URL produced by the App Router icon file convention.
+The unchanged SVG therefore moves to `public/icon.svg`, and explicit metadata publishes exactly
+`/icon.svg`.
 
 ## Testing
 

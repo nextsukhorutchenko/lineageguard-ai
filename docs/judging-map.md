@@ -6,6 +6,11 @@ The judging story is causal: DataHub evidence changes the migration decision and
 package. Fixture replay is the deterministic judging path; Live DataHub + OpenAI proof remains
 separately governed by `docs/live-verification.md`.
 
+The public deterministic replay is available at <https://lineageguard-ai-replay.onrender.com>.
+Sanitized commit-bound acceptance evidence is recorded in
+[`docs/public-deployment-verification.md`](public-deployment-verification.md); it records only the
+verified public replay outcome and recovery boundary.
+
 | Official criterion                            | Repository evidence                                                                                                     | Visible demo moment                                                                                                                                                                                                                  | Test or live check                                                                                                                                                      |
 | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Use of DataHub                                | `README.md`, `docs/architecture/agent-demo.md`, and `examples/002-nextjs-openai-agent-demo/rollout-plan.md`             | Resolve the golden DataHub asset and schema; show table and column lineage, ownership and Context Coverage; show four read-only operation summaries; connect 24 downstream / 11 column-confirmed / score 90 to `BLOCK_DIRECT_RENAME` | `pnpm test:integration` for the opt-in pinned live contract; `pnpm verify:offline` for certified replay                                                                 |

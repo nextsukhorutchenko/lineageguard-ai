@@ -7,6 +7,7 @@ export interface ChangeFormValue {
 export function ChangeRequestForm(props: {
   readonly value: ChangeFormValue;
   readonly busy: boolean;
+  readonly locked: boolean;
   readonly onChange: (value: ChangeFormValue) => void;
   readonly onSubmit: () => void;
   readonly onCancel: () => void;
@@ -18,6 +19,8 @@ export function ChangeRequestForm(props: {
         value={props.value[key]}
         onChange={(event) => props.onChange({ ...props.value, [key]: event.target.value })}
         disabled={props.busy}
+        readOnly={props.locked}
+        aria-readonly={props.locked}
         required
       />
     </label>

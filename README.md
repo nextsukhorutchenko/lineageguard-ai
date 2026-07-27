@@ -219,6 +219,14 @@ application account, and retained across restarts; application runtime code neve
 removes it. Replay is deterministic, offline, and explicitly labeled; it does not call DataHub or
 OpenAI.
 
+### Public Fixture Replay
+
+Project URL: <https://lineageguard-ai-replay.onrender.com>
+
+The hosted replay uses the same deterministic fixture scenario and requires no DataHub or OpenAI
+credentials. The first load may take approximately one minute after inactivity. Hosted runs are ephemeral.
+If the page displays `Run expired; analyze again.`, rerun the deterministic scenario.
+
 ## Browser Demo — Live DataHub + OpenAI
 
 Start the pinned DataHub stack and load the documented showcase datapack first.

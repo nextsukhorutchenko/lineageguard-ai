@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { PUBLIC_BROWSER_HEADERS } from "./src/http/response-headers";
 
 const nextConfig: NextConfig = {
   experimental: {
@@ -7,6 +8,9 @@ const nextConfig: NextConfig = {
     },
   },
   poweredByHeader: false,
+  async headers() {
+    return [{ source: "/:path*", headers: [...PUBLIC_BROWSER_HEADERS] }];
+  },
 };
 
 export default nextConfig;
