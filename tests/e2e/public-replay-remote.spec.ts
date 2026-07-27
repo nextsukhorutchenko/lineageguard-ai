@@ -339,6 +339,7 @@ test("proves the opt-in public Render deployment", async ({ baseURL, context, pa
   await expect(favicon).toHaveCount(1);
   const faviconHref = await favicon.getAttribute("href");
   expect(faviconHref).not.toBeNull();
+  expect(faviconHref).toBe("/icon.svg");
   const faviconResponsePromise = page.waitForResponse(
     (response) => response.url() === new URL(faviconHref!, expectedOrigin).href,
   );

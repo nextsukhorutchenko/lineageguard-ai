@@ -8,8 +8,8 @@
 without the incompatible standalone-output warning.
 
 **Architecture:** Keep the approved local Next.js runtime and existing `start:web` command. Remove
-only the incompatible standalone build output, add one static App Router metadata icon, and protect
-both changes with focused configuration and browser boundary tests.
+only the incompatible standalone build output, serve one static public icon through explicit
+metadata, and protect both changes with focused configuration and browser boundary tests.
 
 **Tech Stack:** TypeScript 6.0.3, Next.js 16.2.11 App Router, React 19.2.8, Vitest 4.1.10,
 Playwright 1.61.1, pnpm 10.10.0, Node.js 22.23.1.
@@ -145,12 +145,13 @@ git commit -m "fix: align demo output with next start"
 **Files:**
 
 - Modify: `tests/e2e/lineageguard-demo.spec.ts`
-- Create: `app/icon.svg`
+- Create: `public/icon.svg`
+- Modify: `app/layout.tsx`
 
 **Interfaces:**
 
-- Consumes: Next.js App Router metadata-file discovery and the existing Playwright base URL.
-- Produces: one rendered `link[rel="icon"]` whose repository-owned SVG target returns HTTP 200
+- Consumes: explicit Next.js metadata, the public asset directory, and the existing Playwright base URL.
+- Produces: one rendered `link[rel="icon"]` with href `/icon.svg` whose repository-owned SVG target returns HTTP 200
   with an SVG content type.
 
 - [ ] **Step 1: Add the failing browser boundary test**
@@ -165,6 +166,7 @@ test("serves the repository-owned browser icon", async ({ page, request }) => {
   await expect(icon).toHaveCount(1);
   const href = await icon.getAttribute("href");
   expect(href).not.toBeNull();
+  expect(href).toBe("/icon.svg");
 
   const response = await request.get(href!);
   expect(response.status()).toBe(200);
@@ -172,8 +174,8 @@ test("serves the repository-owned browser icon", async ({ page, request }) => {
 });
 ```
 
-The production mutation this test catches is removing or breaking the icon metadata file so the
-document no longer points to a successfully served repository asset.
+The production mutation this test catches is restoring generated or missing icon metadata so the
+document no longer points exactly to the successfully served public repository asset.
 
 - [ ] **Step 2: Run the focused browser test and verify RED**
 
@@ -185,9 +187,10 @@ pnpm test:e2e --project=chromium --grep "serves the repository-owned browser ico
 
 Expected: FAIL because the rendered document has no `link[rel="icon"]`.
 
-- [ ] **Step 3: Add the minimal script-free SVG icon**
+- [ ] **Step 3: Serve the unchanged minimal script-free SVG icon**
 
-Create `app/icon.svg` with:
+Move the unchanged SVG to `public/icon.svg` and add `icons: { icon: "/icon.svg" }` to the exported
+metadata in `app/layout.tsx`:
 
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
@@ -240,7 +243,7 @@ Run:
 
 ```powershell
 git diff --check
-git diff -- app/icon.svg tests/e2e/lineageguard-demo.spec.ts
+git diff -- public/icon.svg app/layout.tsx tests/e2e/lineageguard-demo.spec.ts
 git status --short
 ```
 
@@ -250,10 +253,15 @@ earlier commits.
 - [ ] **Step 7: Commit Task 2**
 
 ```powershell
-git add -- app/icon.svg tests/e2e/lineageguard-demo.spec.ts
+git add -- public/icon.svg app/layout.tsx tests/e2e/lineageguard-demo.spec.ts
 git diff --cached --check
 git commit -m "fix: serve the LineageGuard browser icon"
 ```
+
+#### Correction D — Stable public icon URL
+
+Render rejected the generated query-suffixed App Router icon URL. The unchanged SVG moves from
+`app/icon.svg` to `public/icon.svg`, and explicit metadata must render exactly `/icon.svg`.
 
 ---
 

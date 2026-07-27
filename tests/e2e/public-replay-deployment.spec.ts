@@ -150,6 +150,7 @@ test("proves the local public replay production deployment", async ({ page }) =>
   await expect(favicon).toHaveCount(1);
   const faviconHref = await favicon.getAttribute("href");
   expect(faviconHref).not.toBeNull();
+  expect(faviconHref).toBe("/icon.svg");
   const faviconResponsePromise = page.waitForResponse(
     (response) => response.url() === new URL(faviconHref!, LOCAL_ORIGIN).href,
   );

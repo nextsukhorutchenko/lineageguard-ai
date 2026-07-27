@@ -1021,7 +1021,7 @@ The local spec must assert:
 - the golden flow completes with 24, 11, 90, `BLOCK_DIRECT_RENAME`, and
   `NON_EXECUTABLE_TEMPLATE`;
 - exactly four artifact tabs and downloads exist;
-- favicon returns HTTP 200 with `image/svg+xml`;
+- exactly one favicon link has href `/icon.svg`, which returns HTTP 200 with `image/svg+xml`;
 - browser console has zero errors and zero warnings;
 - all browser requests stay on `127.0.0.1:3110`;
 - expired-artifact recovery shows `Run expired; analyze again.`.
@@ -1029,6 +1029,12 @@ The local spec must assert:
 Run the Task 2 API contract suite immediately before this browser spec as part of
 `test:public-replay`; that suite supplies the local concurrency and capacity proof without adding
 a production-only test override or public control route.
+
+#### Correction D — Stable public icon URL
+
+Render rejected the generated query-suffixed App Router icon URL. Local and remote favicon
+acceptance must require exactly one `link[rel="icon"]` with href `/icon.svg`, served from the
+unchanged `public/icon.svg` asset.
 
 - [ ] **Step 5: Run local public acceptance and capture RED**
 
