@@ -1,5 +1,12 @@
 # Safe DataHub Fixture Recapture Implementation Plan
 
+> **Lifecycle:** Implemented — historical execution record.
+>
+> The implementation outcome is present in the repository. Unchecked boxes preserve the original
+> execution sequence; they are not an outstanding-work tracker. Earlier snippets may be superseded
+> by later approved amendments and the current implementation. Use `docs/README.md` to find current
+> authority, operator guidance, and verification evidence.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the documented DataHub fixture capture command produce a safe, reviewable five-fixture candidate without modifying committed fixtures, and document the existing `INCOMPLETE_EVIDENCE` behavior accurately.
