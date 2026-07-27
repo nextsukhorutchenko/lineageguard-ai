@@ -256,6 +256,21 @@ describe("validateRenderBlueprintText", () => {
       "Render Blueprint differs from the approved contract.",
     ]);
   });
+
+  it("reports a shutdown delay alongside another malformed required marker", () => {
+    const actual = validateRenderBlueprintText(
+      CANONICAL_RENDER_BLUEPRINT.replace("plan: free", "plan: starter").replace(
+        "    envVars:",
+        "    maxShutdownDelaySeconds: 30\n    envVars:",
+      ),
+    );
+
+    expect(actual).toEqual([
+      "Render Blueprint must use the free plan.",
+      "Render Blueprint must not configure a shutdown delay on the free plan.",
+      "Render Blueprint differs from the approved contract.",
+    ]);
+  });
 });
 
 describe("validateRenderBlueprint", () => {

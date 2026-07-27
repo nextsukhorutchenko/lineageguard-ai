@@ -98,8 +98,6 @@ export function validateRenderBlueprintText(value: string): readonly string[] {
     !value.includes("- key: LINEAGEGUARD_RUNS_DIR\n        value: /tmp/lineageguard-runs\n")
   ) {
     findings.push("Render Blueprint must use the approved ephemeral runs directory.");
-  } else if (value.includes("maxShutdownDelaySeconds:")) {
-    findings.push("Render Blueprint must not configure a shutdown delay on the free plan.");
   } else if (hasForbiddenResource(value)) {
     findings.push("Render Blueprint must declare exactly one web service.");
   } else if (value.includes("sync: false")) {
@@ -110,6 +108,10 @@ export function validateRenderBlueprintText(value: string): readonly string[] {
     findings.push("Render Blueprint must not declare provider credential environment variables.");
   } else if (hasSecretLikeKey(value)) {
     findings.push("Render Blueprint must not declare secret-like environment variables.");
+  }
+
+  if (value.includes("maxShutdownDelaySeconds:")) {
+    findings.push("Render Blueprint must not configure a shutdown delay on the free plan.");
   }
 
   return [...findings, GENERIC_DIFFERENCE];
