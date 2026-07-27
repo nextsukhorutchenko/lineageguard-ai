@@ -73,15 +73,15 @@ Reviewed runtime commit: ${reviewedRuntimeCommit}
 Verified date (UTC): 2026-07-27T05:42:44Z
 Verified date (Europe/Kyiv): 2026-07-27T08:42:44+03:00
 
-| Check | Sanitized outcome |
-| --- | --- |
-| Health | PASSED |
-| Private-browser access | PASSED |
-| Golden result | 24 / 11 / 90; BLOCK_DIRECT_RENAME; PASSED |
-| Four artifacts | PASSED |
-| Headers | PASSED |
-| Console | PASSED |
-| Request host | ${publicProjectUrl}; PASSED |
+| Check | Evidence | Outcome |
+| --- | --- | --- |
+| Health | The public replay health endpoint was reachable. | PASSED |
+| Private-browser access | The replay opened without a login, provider credential, or paid account. | PASSED |
+| Golden result | 24 / 11 / 90; BLOCK_DIRECT_RENAME | PASSED |
+| Four artifacts | All four allowlisted artifacts were available through the replay. | PASSED |
+| Headers | Required cache and browser-security headers were present. | PASSED |
+| Console | The browser console had no errors or warnings. | PASSED |
+| Request host | ${publicProjectUrl} | PASSED |
 
 Public fixture replay. No DataHub or OpenAI credentials. Ephemeral runs.
 `;
@@ -139,13 +139,8 @@ it.each([
   `Reviewed runtime commit: ${reviewedRuntimeCommit}`,
   "Verified date (UTC): 2026-07-27T05:42:44Z",
   "Verified date (Europe/Kyiv): 2026-07-27T08:42:44+03:00",
-  "Health | PASSED",
-  "Private-browser access | PASSED",
   "24 / 11 / 90",
   "BLOCK_DIRECT_RENAME",
-  "Four artifacts | PASSED",
-  "Headers | PASSED",
-  "Console | PASSED",
   "Public fixture replay",
   "No DataHub or OpenAI credentials",
   "Ephemeral runs",
@@ -158,7 +153,10 @@ it.each([
 
 it("accepts Prettier-aligned public deployment evidence rows", async () => {
   const findings = await validateWithPublicDeploymentMutation((content) =>
-    content.replace("| Health | PASSED |", "| Health                 | PASSED |"),
+    content.replace(
+      "| Health | The public replay health endpoint was reachable. | PASSED |",
+      "| Health                 | The public replay health endpoint was reachable. | PASSED |",
+    ),
   );
   expect(findings).not.toContain("missing public deployment evidence: Health | PASSED");
 });
@@ -178,8 +176,8 @@ it.each([
     "the golden result outcome",
     (content: string) =>
       content.replace(
-        "Golden result | 24 / 11 / 90; BLOCK_DIRECT_RENAME; PASSED",
-        "Golden result | 24 / 11 / 90; BLOCK_DIRECT_RENAME; VERIFIED",
+        "Golden result | 24 / 11 / 90; BLOCK_DIRECT_RENAME | PASSED",
+        "Golden result | 24 / 11 / 90; BLOCK_DIRECT_RENAME | VERIFIED",
       ),
     "missing public deployment evidence row: Golden result",
   ],
@@ -187,8 +185,8 @@ it.each([
     "the exact request host",
     (content: string) =>
       content.replace(
-        `Request host | ${publicProjectUrl}; PASSED`,
-        "Request host | https://public-replay.example.invalid; PASSED",
+        `Request host | ${publicProjectUrl} | PASSED`,
+        "Request host | https://public-replay.example.invalid | PASSED",
       ),
     "missing public deployment evidence row: Request host",
   ],
@@ -196,12 +194,57 @@ it.each([
     "the request-host outcome",
     (content: string) =>
       content.replace(
-        `Request host | ${publicProjectUrl}; PASSED`,
-        `Request host | ${publicProjectUrl}; VERIFIED`,
+        `Request host | ${publicProjectUrl} | PASSED`,
+        `Request host | ${publicProjectUrl} | VERIFIED`,
       ),
     "missing public deployment evidence row: Request host",
   ],
 ] as const)("requires %s in its evidence-table association", async (_name, mutate, finding) => {
+  const findings = await validateWithPublicDeploymentMutation(mutate);
+  expect(findings).toContain(finding);
+});
+
+it.each([
+  [
+    "the numeric golden-result suffix",
+    (content: string) => content.replace("24 / 11 / 90", "24 / 11 / 900"),
+    "missing public deployment evidence row: Golden result",
+  ],
+  [
+    "the extended golden decision",
+    (content: string) => content.replace("BLOCK_DIRECT_RENAME", "BLOCK_DIRECT_RENAME_EXTRA"),
+    "missing public deployment evidence row: Golden result",
+  ],
+  [
+    "the negated golden outcome",
+    (content: string) =>
+      content.replace(
+        "Golden result | 24 / 11 / 90; BLOCK_DIRECT_RENAME | PASSED",
+        "Golden result | 24 / 11 / 90; BLOCK_DIRECT_RENAME | NOT PASSED",
+      ),
+    "missing public deployment evidence row: Golden result",
+  ],
+  [
+    "the extended request host",
+    (content: string) =>
+      content.replace(
+        `Request host | ${publicProjectUrl} | PASSED`,
+        `Request host | ${publicProjectUrl}.evil | PASSED`,
+      ),
+    "missing public deployment evidence row: Request host",
+  ],
+  [
+    "the negated request-host outcome",
+    (content: string) =>
+      content.replace(
+        `Request host | ${publicProjectUrl} | PASSED`,
+        `Request host | ${publicProjectUrl} | NOT PASSED`,
+      ),
+    "missing public deployment evidence row: Request host",
+  ],
+] as const)("rejects %s in an exact evidence-table cell", async (_name, mutate, finding) => {
+  const baselineFindings = await validateWithPublicDeploymentMutation((content) => content);
+  expect(baselineFindings).not.toContain(finding);
   const findings = await validateWithPublicDeploymentMutation(mutate);
   expect(findings).toContain(finding);
 });
@@ -271,6 +314,11 @@ it.each([
   'Response body: {"status":"ok"}',
   "C:\\private\\lineageguard\\run.json",
   "/var/lib/lineageguard/run.json",
+  "Trace output: provider envelope",
+  'Response bodies: [{"status":"ok"}]',
+  "Raw dump:\nrequest payload\nresponse payload",
+  "```text\nRaw log\nrequest payload\n```",
+  "\\\\server\\share\\run.json",
 ] as const)("rejects a raw public-deployment disclosure: %s", async (unsafeMarker) => {
   const findings = await validateWithPublicDeploymentMutation(
     (content) => `${content}\n${unsafeMarker}\n`,

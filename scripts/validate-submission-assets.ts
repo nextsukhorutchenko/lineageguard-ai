@@ -76,32 +76,57 @@ const requiredPublicDeploymentEvidence = [
 ] as const;
 
 const requiredPublicDeploymentEvidenceRows = [
-  ["missing public deployment evidence: Health | PASSED", /\|\s*Health\s*\|\s*PASSED\b/u],
+  [
+    "missing public deployment evidence: Health | PASSED",
+    "Health",
+    "The public replay health endpoint was reachable.",
+    "PASSED",
+  ],
   [
     "missing public deployment evidence: Private-browser access | PASSED",
-    /\|\s*Private-browser access\s*\|\s*PASSED\b/u,
+    "Private-browser access",
+    "The replay opened without a login, provider credential, or paid account.",
+    "PASSED",
   ],
   [
     "missing public deployment evidence row: Golden result",
-    /\|\s*Golden result\s*\|(?=[^|\r\n]*\bPASSED\b)(?=[^|\r\n]*24 \/ 11 \/ 90)(?=[^|\r\n]*BLOCK_DIRECT_RENAME)[^|\r\n]*\|/u,
+    "Golden result",
+    "24 / 11 / 90; BLOCK_DIRECT_RENAME",
+    "PASSED",
   ],
   [
     "missing public deployment evidence: Four artifacts | PASSED",
-    /\|\s*Four artifacts\s*\|\s*PASSED\b/u,
+    "Four artifacts",
+    "All four allowlisted artifacts were available through the replay.",
+    "PASSED",
   ],
-  ["missing public deployment evidence: Headers | PASSED", /\|\s*Headers\s*\|\s*PASSED\b/u],
-  ["missing public deployment evidence: Console | PASSED", /\|\s*Console\s*\|\s*PASSED\b/u],
+  [
+    "missing public deployment evidence: Headers | PASSED",
+    "Headers",
+    "Required cache and browser-security headers were present.",
+    "PASSED",
+  ],
+  [
+    "missing public deployment evidence: Console | PASSED",
+    "Console",
+    "The browser console had no errors or warnings.",
+    "PASSED",
+  ],
   [
     "missing public deployment evidence row: Request host",
-    /\|\s*Request host\s*\|(?=[^|\r\n]*\bPASSED\b)(?=[^|\r\n]*https:\/\/lineageguard-ai-replay\.onrender\.com)[^|\r\n]*\|/u,
+    "Request host",
+    publicProjectUrl,
+    "PASSED",
   ],
 ] as const;
 
 const unsafePublicDeploymentDisclosurePatterns = [
-  /\braw\s+logs?\s*[:=]/iu,
-  /\btrace\s*[:=]/iu,
-  /\bresponse\s+body\s*[:=]/iu,
+  /\braw\s+(?:logs?|dump)\s*[:=]/iu,
+  /\btraces?(?:\s+output)?\s*[:=]/iu,
+  /\bresponse\s+bod(?:y|ies)\s*[:=]/iu,
+  /```[^\r\n]*\r?\n[\s\S]*?\b(?:raw\s+logs?|traces?(?:\s+output)?|response\s+bod(?:y|ies))\b[\s\S]*?```/iu,
   /\b[A-Za-z]:(?:\\|\/(?!\/))/u,
+  /\\\\[^\\/\r\n]+\\[^\\/\r\n]+/u,
   /(?:^|[\s("'`])\/(?:[A-Za-z0-9._-]+\/)+[A-Za-z0-9._-]+/mu,
 ] as const;
 
@@ -988,6 +1013,7 @@ function validatePublicDeploymentDocumentation(files: ReadonlyMap<string, string
   const readme = files.get("README.md") ?? "";
   const resources = files.get("docs/resources-and-attribution.md") ?? "";
   const judgingMap = files.get("docs/judging-map.md") ?? "";
+  const evidenceRows = parseMarkdownTableRows(verification);
   const findings: string[] = [];
 
   for (const marker of requiredPublicDeploymentEvidence) {
@@ -995,8 +1021,12 @@ function validatePublicDeploymentDocumentation(files: ReadonlyMap<string, string
       findings.push(`missing public deployment evidence: ${marker}`);
     }
   }
-  for (const [finding, pattern] of requiredPublicDeploymentEvidenceRows) {
-    if (!pattern.test(verification)) {
+  for (const [finding, check, evidence, outcome] of requiredPublicDeploymentEvidenceRows) {
+    const isPresent = evidenceRows.some(
+      ({ cells }) =>
+        cells.length === 3 && cells[0] === check && cells[1] === evidence && cells[2] === outcome,
+    );
+    if (!isPresent) {
       findings.push(finding);
     }
   }
