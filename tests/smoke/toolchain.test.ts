@@ -72,6 +72,16 @@ describe("toolchain", () => {
     expect(packageJson.scripts.typecheck).toBe("next typegen && tsc --noEmit");
   });
 
+  it("enforces a zero-warning budget in the shared lint command", async () => {
+    const packageJson = JSON.parse(
+      await readFile(resolve(process.cwd(), "package.json"), "utf8"),
+    ) as {
+      scripts: Record<string, string>;
+    };
+
+    expect(packageJson.scripts.lint).toBe("eslint . --max-warnings 0");
+  });
+
   it("runs on the pinned Node major version", () => {
     expect(Number.parseInt(process.versions.node, 10)).toBe(22);
   });
