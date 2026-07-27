@@ -7,6 +7,15 @@ import nextConfig from "../../next.config.js";
 import playwrightConfig from "../../playwright.config.js";
 
 const REMOTE_CONFIGURATION_ERROR = "Public deployment acceptance configuration is invalid.";
+const EXPECTED_NEXT_ENV_DECLARATION = [
+  '/// <reference types="next" />',
+  '/// <reference types="next/image-types/global" />',
+  'import "./.next/types/routes.d.ts";',
+  "",
+  "// NOTE: This file should not be edited",
+  "// see https://nextjs.org/docs/app/api-reference/config/typescript for more information.",
+  "",
+].join("\n");
 const TEST_RENDER_HOST = ["lineageguard-ai", "onrender", "com"].join(".");
 const TEST_RENDER_ORIGIN = `https://${TEST_RENDER_HOST}`;
 const VALID_REMOTE_ACCEPTANCE_ENVIRONMENT = {
@@ -45,6 +54,12 @@ function listRemoteTests(environment: Readonly<Record<string, string | undefined
 }
 
 describe("toolchain", () => {
+  it("keeps the pinned Next.js declaration file canonical", async () => {
+    const declaration = await readFile(resolve(process.cwd(), "next-env.d.ts"), "utf8");
+
+    expect(declaration).toBe(EXPECTED_NEXT_ENV_DECLARATION);
+  });
+
   it("runs on the pinned Node major version", () => {
     expect(Number.parseInt(process.versions.node, 10)).toBe(22);
   });
