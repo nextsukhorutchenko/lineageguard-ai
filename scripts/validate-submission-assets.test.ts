@@ -73,6 +73,8 @@ Reviewed runtime commit: ${reviewedRuntimeCommit}
 Verified date (UTC): 2026-07-27T05:42:44Z
 Verified date (Europe/Kyiv): 2026-07-27T08:42:44+03:00
 
+## Sanitized Acceptance Evidence
+
 | Check | Evidence | Outcome |
 | --- | --- | --- |
 | Health | The public replay health endpoint was reachable. | PASSED |
@@ -109,6 +111,12 @@ async function validateWithPublicDeploymentMutation(
     await rm(root, { recursive: true, force: true });
   }
 }
+
+it("accepts the canonical public deployment verification fixture", async () => {
+  const findings = await validateWithPublicDeploymentMutation((content) => content);
+  expect(findings).not.toContain("invalid public deployment verification structure");
+  expect(findings).not.toContain("unsafe public deployment documentation disclosure");
+});
 
 it("requires the public deployment verification record", async () => {
   const root = await mkdtemp(join(tmpdir(), "lineageguard-missing-public-deployment-"));
