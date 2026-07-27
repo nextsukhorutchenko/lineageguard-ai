@@ -161,7 +161,10 @@ $files = @(rg --files docs | Where-Object {
 $bannerCount = 0
 $unchecked = 0
 foreach ($file in $files) {
-  $bannerCount += [int](rg -c '^\> \*\*Lifecycle:\*\* Implemented — historical execution record\.$' $file)
+  $header = Get-Content -LiteralPath $file -TotalCount 10
+  $bannerCount += [int]@($header | Where-Object {
+    $_ -ceq '> **Lifecycle:** Implemented — historical execution record.'
+  }).Count
   $unchecked += [int](rg -c '^- \[ \]' $file)
 }
 "plans=$($files.Count) banners=$bannerCount unchecked=$unchecked"
@@ -250,7 +253,10 @@ Run:
 $allPlans = @(rg --files docs | Where-Object { $_ -match '(\\plan\.md$|\\plans\\.*\.md$)' })
 $bannerCount = 0
 foreach ($file in $allPlans) {
-  $bannerCount += [int](rg -c '^\> \*\*Lifecycle:\*\* Implemented — historical execution record\.$' $file)
+  $header = Get-Content -LiteralPath $file -TotalCount 10
+  $bannerCount += [int]@($header | Where-Object {
+    $_ -ceq '> **Lifecycle:** Implemented — historical execution record.'
+  }).Count
 }
 "plans=$($allPlans.Count) banners=$bannerCount"
 ```
