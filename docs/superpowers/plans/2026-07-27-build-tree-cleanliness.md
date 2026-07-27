@@ -664,6 +664,10 @@ cycle and repeat the affected verification before publishing the branch.
 
 ### Task 6: Make the CI Failure Path Quiet and Fail-Closed
 
+> **Approved correction A2.1:** Next.js augments `NodeJS.ProcessEnv` with a required `NODE_ENV`.
+> The isolated fixture environment must set the fixed test-only value `NODE_ENV: "test"`; it must
+> not inherit the caller's value.
+
 **Files:**
 
 - Modify: `tests/smoke/ci-tree-cleanliness.test.ts`
@@ -788,6 +792,7 @@ function isolatedGitEnvironment(): NodeJS.ProcessEnv {
     GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_TERMINAL_PROMPT: "0",
+    NODE_ENV: "test",
   };
 
   for (const key of PORTABLE_GIT_ENVIRONMENT_KEYS) {
