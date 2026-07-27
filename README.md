@@ -1,14 +1,29 @@
 # LineageGuard AI
 
-LineageGuard AI is a deterministic, CLI-first impact-analysis proof for DataHub. It answers one deliberately constrained question: before renaming a column, which downstream assets are visible within two lineage hops, how strong is the available column evidence, and what explainable risk score follows from those facts?
+**A DataHub-grounded AI agent for safe schema-change planning.** It turns a proposed column rename
+into an explainable impact decision and a validated, review-ready migration package.
 
-This vertical slice supports only requests in this form:
+[**Try the public replay →**](https://lineageguard-ai-replay.onrender.com)
 
-```text
-Rename column <source> to <target> in dataset <platform>:<dataset-name>
-```
+> **Public demo:** deterministic fixture replay; no DataHub, OpenAI, API key, or paid account
+> required. Live DataHub + OpenAI runs locally.
 
-The pinned demo analyzes `customer_id` to `customer_key` on the official DataHub `showcase-ecommerce` sample. A verified output is committed at [examples/001-customer-id-rename/impact-report.md](examples/001-customer-id-rename/impact-report.md).
+**Golden result:** `24 downstream` · `11 column-confirmed` · `risk 90 (critical)` ·
+`BLOCK_DIRECT_RENAME`
+
+**Four validated artifacts:**
+[`migration-up.sql`](examples/002-nextjs-openai-agent-demo/migration-up.sql) ·
+[`migration-down.sql`](examples/002-nextjs-openai-agent-demo/migration-down.sql) ·
+[`validation.sql`](examples/002-nextjs-openai-agent-demo/validation.sql) ·
+[`rollout-plan.md`](examples/002-nextjs-openai-agent-demo/rollout-plan.md)
+
+**Safety boundary:** DataHub access is read-only. LineageGuard does not execute SQL, mutate DataHub,
+perform GitHub operations, or approve breaking changes. Deterministic application logic owns the
+impact result and risk decision; human approval remains mandatory.
+
+[How it works](docs/architecture/agent-demo.md) ·
+[Deployment evidence](docs/public-deployment-verification.md) ·
+[Run the replay locally](#browser-demo--fixture-replay)
 
 ## Architecture and Safety Boundary
 
