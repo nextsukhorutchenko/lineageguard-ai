@@ -7,21 +7,21 @@ import nextConfig from "../../next.config.js";
 import playwrightConfig from "../../playwright.config.js";
 
 const REMOTE_CONFIGURATION_ERROR = "Public deployment acceptance configuration is invalid.";
-const EXPECTED_NEXT_ENV_DECLARATION = [
-  '/// <reference types="next" />',
-  '/// <reference types="next/image-types/global" />',
-  'import "./.next/types/routes.d.ts";',
-  "",
-  "// NOTE: This file should not be edited",
-  "// see https://nextjs.org/docs/app/api-reference/config/typescript for more information.",
-  "",
-].join("\n");
 const TEST_RENDER_HOST = ["lineageguard-ai", "onrender", "com"].join(".");
 const TEST_RENDER_ORIGIN = `https://${TEST_RENDER_HOST}`;
 const VALID_REMOTE_ACCEPTANCE_ENVIRONMENT = {
   RUN_PUBLIC_REPLAY_ACCEPTANCE: "1",
   LINEAGEGUARD_PUBLIC_URL: TEST_RENDER_ORIGIN,
 } as const;
+
+function git(args: readonly string[]) {
+  return spawnSync("git", [...args], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    shell: false,
+    windowsHide: true,
+  });
+}
 
 function listRemoteTests(environment: Readonly<Record<string, string | undefined>>) {
   const playwrightCli = createRequire(import.meta.url).resolve("@playwright/test/cli");
@@ -54,10 +54,22 @@ function listRemoteTests(environment: Readonly<Record<string, string | undefined
 }
 
 describe("toolchain", () => {
-  it("keeps the pinned Next.js declaration file canonical", async () => {
-    const declaration = await readFile(resolve(process.cwd(), "next-env.d.ts"), "utf8");
+  it("keeps the generated Next.js declaration bootstrap outside version control", () => {
+    const ignored = git(["check-ignore", "--quiet", "--", "next-env.d.ts"]);
+    const tracked = git(["ls-files", "--error-unmatch", "--", "next-env.d.ts"]);
 
-    expect(declaration).toBe(EXPECTED_NEXT_ENV_DECLARATION);
+    expect(ignored.status, `${ignored.stdout}${ignored.stderr}`).toBe(0);
+    expect(tracked.status, `${tracked.stdout}${tracked.stderr}`).toBe(1);
+  });
+
+  it("generates Next.js route types before strict TypeScript checking", async () => {
+    const packageJson = JSON.parse(
+      await readFile(resolve(process.cwd(), "package.json"), "utf8"),
+    ) as {
+      scripts: Record<string, string>;
+    };
+
+    expect(packageJson.scripts.typecheck).toBe("next typegen && tsc --noEmit");
   });
 
   it("runs on the pinned Node major version", () => {
