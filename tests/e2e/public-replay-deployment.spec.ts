@@ -1,11 +1,15 @@
-import { readFile, unlink } from "node:fs/promises";
+import { unlink } from "node:fs/promises";
 import { join } from "node:path";
-import { expect, test, type Page, type Response } from "@playwright/test";
 import {
-  RunEnvelopeSchema,
-  SafeRunIdSchema,
-  type RunEnvelope,
-} from "../../src/runs/run-envelope.js";
+  expect,
+  test,
+  type APIResponse,
+  type Download,
+  type Page,
+  type Response,
+} from "@playwright/test";
+import { readRunEnvelope } from "../../src/artifacts/run-envelope-files.js";
+import { SafeRunIdSchema, type RunEnvelope } from "../../src/runs/run-envelope.js";
 
 const LOCAL_ORIGIN = "http://127.0.0.1:3110";
 const ARTIFACTS = [
@@ -20,6 +24,7 @@ const REQUIRED_HEADERS = {
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
 } as const;
+const MAX_DOWNLOAD_BYTES = 524_288;
 type CompletedRunEnvelope = Extract<RunEnvelope, { readonly kind: "completed" }>;
 
 function captureBrowserSafety(page: Page): {
@@ -48,6 +53,36 @@ async function expectRequiredHeaders(response: Response): Promise<void> {
   }
 }
 
+async function readDownloadedUtf8(download: Download): Promise<string> {
+  expect(await download.failure()).toBeNull();
+  const stream = await download.createReadStream();
+  expect(stream).not.toBeNull();
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  for await (const chunk of stream!) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += bytes.byteLength;
+    if (totalBytes > MAX_DOWNLOAD_BYTES) {
+      stream!.destroy();
+      throw new Error("The downloaded artifact exceeds its test boundary.");
+    }
+    chunks.push(bytes);
+  }
+  return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+}
+
+async function expectDownloadResponse(response: APIResponse, filename: string): Promise<void> {
+  expect(response.status()).toBe(200);
+  const headers = response.headers();
+  for (const [name, value] of Object.entries(REQUIRED_HEADERS)) {
+    expect(headers[name]).toBe(value);
+  }
+  expect(headers["content-disposition"]).toBe(`attachment; filename="${filename}"`);
+  expect(headers["content-type"]).toBe(
+    filename.endsWith(".sql") ? "text/sql; charset=utf-8" : "text/markdown; charset=utf-8",
+  );
+}
+
 async function expectPublicShell(page: Page): Promise<void> {
   await expect(page.locator(".mode-badge")).toHaveText("Public fixture replay");
   const fields = [
@@ -65,9 +100,7 @@ async function readCompletedEnvelope(rawRunId: string | null): Promise<Completed
   const runsRoot = process.env.LINEAGEGUARD_PUBLIC_REPLAY_E2E_RUNS_DIR;
   if (runsRoot === undefined) throw new Error("The public replay test root is unavailable.");
   const runId = SafeRunIdSchema.parse(rawRunId);
-  const envelope = RunEnvelopeSchema.parse(
-    JSON.parse(await readFile(join(runsRoot, `run-${runId}.json`), "utf8")),
-  );
+  const envelope = await readRunEnvelope({ runsRoot, runId });
   if (envelope.kind !== "completed") {
     throw new Error("The completed public replay envelope is missing.");
   }
@@ -156,14 +189,31 @@ test("proves the local public replay production deployment", async ({ page }) =>
     await expectRequiredHeaders(response);
   }
 
-  const downloaded: string[] = [];
   for (const filename of ARTIFACTS) {
     await page.getByRole("tab", { name: filename }).click();
+    const panel = page.locator('[role="tabpanel"]:not([hidden])');
+    await expect(panel).not.toHaveText("Loading artifact…");
+    const preview = await panel.textContent();
+    expect(preview).not.toBeNull();
+    const expectedPath = `/api/runs/${runSnapshot.runId}/artifacts/${filename}`;
+    const matchingResponse = await page.request.get(expectedPath);
+    const matchingUrl = new URL(matchingResponse.url());
+    expect(matchingUrl.origin).toBe(LOCAL_ORIGIN);
+    expect(matchingUrl.pathname).toBe(expectedPath);
+    await expectDownloadResponse(matchingResponse, filename);
     const downloadPromise = page.waitForEvent("download");
     await page.getByRole("link", { name: "Download" }).click();
-    downloaded.push((await downloadPromise).suggestedFilename());
+    const download = await downloadPromise;
+    const downloadUrl = new URL(download.url());
+    expect(downloadUrl.origin).toBe(LOCAL_ORIGIN);
+    expect(downloadUrl.pathname).toBe(expectedPath);
+    expect(download.suggestedFilename()).toBe(filename);
+    const content = await readDownloadedUtf8(download);
+    expect(content).toBe(preview);
+    expect(content).toBe(runEnvelope.package.files[filename]);
+    expect(content).not.toContain(process.cwd());
+    expect(content).not.toMatch(/[A-Za-z]:\\/u);
   }
-  expect(downloaded).toEqual([...ARTIFACTS]);
 
   const regenerationResponsePromise = page.waitForResponse(
     (response) =>
@@ -191,14 +241,32 @@ test("proves the local public replay production deployment", async ({ page }) =>
 test("shows truthful recovery copy when an artifact expires", async ({ page }) => {
   const runsRoot = process.env.LINEAGEGUARD_PUBLIC_REPLAY_E2E_RUNS_DIR;
   if (runsRoot === undefined) throw new Error("The public replay test root is unavailable.");
+  const safety = captureBrowserSafety(page);
 
-  let releaseArtifacts: (() => void) | undefined;
-  const artifactBarrier = new Promise<void>((resolveBarrier) => {
-    releaseArtifacts = resolveBarrier;
-  });
-  await page.route("**/api/runs/*/artifacts/*", async (route) => {
-    await artifactBarrier;
-    await route.continue();
+  await page.addInitScript(() => {
+    const originalFetch = window.fetch.bind(window);
+    let releaseArtifacts: (() => void) | undefined;
+    const artifactBarrier = new Promise<void>((resolveBarrier) => {
+      releaseArtifacts = resolveBarrier;
+    });
+    const controlledWindow = window as Window & {
+      __releasePublicReplayArtifacts?: () => void;
+    };
+    controlledWindow.__releasePublicReplayArtifacts = () => releaseArtifacts?.();
+    window.fetch = async (...args: Parameters<typeof fetch>): Promise<globalThis.Response> => {
+      const input = args[0];
+      const rawUrl =
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const url = new URL(rawUrl, window.location.origin);
+      if (/^\/api\/runs\/[^/]+\/artifacts\/[^/]+$/u.test(url.pathname)) {
+        await artifactBarrier;
+        return new globalThis.Response("", {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return await originalFetch(...args);
+    };
   });
 
   await page.goto("/");
@@ -207,7 +275,28 @@ test("shows truthful recovery copy when an artifact expires", async ({ page }) =
   const rawRunId = await page.locator("[data-run-id]").getAttribute("data-run-id");
   const runId = SafeRunIdSchema.parse(rawRunId);
   await unlink(join(runsRoot, `run-${runId}.json`));
-  releaseArtifacts?.();
+  const expiredResponse = await page.request.get(`/api/runs/${runId}/artifacts/migration-up.sql`);
+  expect(expiredResponse.status()).toBe(404);
+  const expiredHeaders = expiredResponse.headers();
+  for (const [name, value] of Object.entries(REQUIRED_HEADERS)) {
+    expect(expiredHeaders[name]).toBe(value);
+  }
+  expect(expiredHeaders["content-type"]).toContain("application/json");
+  expect(await expiredResponse.json()).toEqual({ error: "Artifact not found." });
+  await page.evaluate(() => {
+    (
+      window as Window & {
+        __releasePublicReplayArtifacts?: () => void;
+      }
+    ).__releasePublicReplayArtifacts?.();
+  });
 
   await expect(page.getByRole("status")).toHaveText("Run expired; analyze again.");
+  expect(safety.consoleErrors).toEqual([]);
+  expect(safety.consoleWarnings).toEqual([]);
+  expect(safety.pageErrors).toEqual([]);
+  expect(safety.requests.length).toBeGreaterThan(0);
+  for (const requestUrl of safety.requests) {
+    expect(new URL(requestUrl).origin).toBe(LOCAL_ORIGIN);
+  }
 });

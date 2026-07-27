@@ -129,6 +129,48 @@ describe("toolchain", () => {
       },
     ],
     [
+      "Render apex",
+      {
+        ...VALID_REMOTE_ACCEPTANCE_ENVIRONMENT,
+        LINEAGEGUARD_PUBLIC_URL: "https://onrender.com",
+      },
+    ],
+    [
+      "deep Render subdomain",
+      {
+        ...VALID_REMOTE_ACCEPTANCE_ENVIRONMENT,
+        LINEAGEGUARD_PUBLIC_URL: `https://deep.${TEST_RENDER_HOST}`,
+      },
+    ],
+    [
+      "punycode service label",
+      {
+        ...VALID_REMOTE_ACCEPTANCE_ENVIRONMENT,
+        LINEAGEGUARD_PUBLIC_URL: "https://xn--lineageguard-9db.onrender.com",
+      },
+    ],
+    [
+      "Unicode service label",
+      {
+        ...VALID_REMOTE_ACCEPTANCE_ENVIRONMENT,
+        LINEAGEGUARD_PUBLIC_URL: "https://lïneageguard.onrender.com",
+      },
+    ],
+    [
+      "trailing dot",
+      {
+        ...VALID_REMOTE_ACCEPTANCE_ENVIRONMENT,
+        LINEAGEGUARD_PUBLIC_URL: `${TEST_RENDER_ORIGIN}.`,
+      },
+    ],
+    [
+      "encoded hostname separator",
+      {
+        ...VALID_REMOTE_ACCEPTANCE_ENVIRONMENT,
+        LINEAGEGUARD_PUBLIC_URL: "https://lineageguard-ai%2eonrender.com",
+      },
+    ],
+    [
       "URL credentials",
       {
         ...VALID_REMOTE_ACCEPTANCE_ENVIRONMENT,

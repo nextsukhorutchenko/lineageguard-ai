@@ -51,6 +51,33 @@ async function bestEffortDirectKill(observed: ObservedChild, timeoutMs: number):
   await completeWithin(observed.close, timeoutMs);
 }
 
+function processGroupExists(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      (error as { readonly code?: unknown }).code === "ESRCH"
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function waitForProcessGroupExit(pid: number, deadline: number): Promise<boolean> {
+  while (Date.now() < deadline) {
+    if (!processGroupExists(pid)) return true;
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))),
+    );
+  }
+  return !processGroupExists(pid);
+}
+
 export async function requestProcessTreeTermination(
   observed: ObservedChild,
   options: {
@@ -96,17 +123,28 @@ export async function requestProcessTreeTermination(
 
     if (killer.exitCode !== 0) {
       await bestEffortDirectKill(observed, options.timeoutMs);
+      throw new Error("tree");
     }
     return;
   }
 
+  const deadline = Date.now() + options.timeoutMs;
   try {
     process.kill(-pid, "SIGTERM");
-  } catch {
-    await bestEffortDirectKill(observed, options.timeoutMs);
-    return;
+  } catch (error) {
+    if (!processGroupExists(pid)) return;
+    throw error;
   }
-  if (!(await completeWithin(observed.close, options.timeoutMs)).completed) {
+  const termDeadline = Math.min(
+    deadline,
+    Date.now() + Math.max(1, Math.floor(options.timeoutMs / 2)),
+  );
+  if (await waitForProcessGroupExit(pid, termDeadline)) return;
+  try {
     process.kill(-pid, "SIGKILL");
+  } catch (error) {
+    if (!processGroupExists(pid)) return;
+    throw error;
   }
+  if (!(await waitForProcessGroupExit(pid, deadline))) throw new Error("tree");
 }

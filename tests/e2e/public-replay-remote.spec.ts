@@ -1,4 +1,12 @@
-import { expect, test, type Page, type Response } from "@playwright/test";
+import {
+  expect,
+  test,
+  type APIResponse,
+  type Download,
+  type Page,
+  type Response,
+} from "@playwright/test";
+import { SafeRunIdSchema } from "../../src/runs/run-envelope.js";
 
 const ARTIFACTS = [
   "migration-up.sql",
@@ -12,6 +20,7 @@ const REQUIRED_HEADERS = {
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
 } as const;
+const MAX_DOWNLOAD_BYTES = 524_288;
 
 function captureBrowserSafety(page: Page): {
   readonly consoleErrors: string[];
@@ -37,6 +46,36 @@ async function expectRequiredHeaders(response: Response): Promise<void> {
   for (const [name, value] of Object.entries(REQUIRED_HEADERS)) {
     expect(headers[name]).toBe(value);
   }
+}
+
+async function readDownloadedUtf8(download: Download): Promise<string> {
+  expect(await download.failure()).toBeNull();
+  const stream = await download.createReadStream();
+  expect(stream).not.toBeNull();
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  for await (const chunk of stream!) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += bytes.byteLength;
+    if (totalBytes > MAX_DOWNLOAD_BYTES) {
+      stream!.destroy();
+      throw new Error("The downloaded artifact exceeds its test boundary.");
+    }
+    chunks.push(bytes);
+  }
+  return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+}
+
+async function expectDownloadResponse(response: APIResponse, filename: string): Promise<void> {
+  expect(response.status()).toBe(200);
+  const headers = response.headers();
+  for (const [name, value] of Object.entries(REQUIRED_HEADERS)) {
+    expect(headers[name]).toBe(value);
+  }
+  expect(headers["content-disposition"]).toBe(`attachment; filename="${filename}"`);
+  expect(headers["content-type"]).toBe(
+    filename.endsWith(".sql") ? "text/sql; charset=utf-8" : "text/markdown; charset=utf-8",
+  );
 }
 
 async function expectPublicShell(page: Page): Promise<void> {
@@ -129,14 +168,32 @@ test("proves the opt-in public Render deployment", async ({ baseURL, page }) => 
     await expectRequiredHeaders(response);
   }
 
-  const downloaded: string[] = [];
+  const runId = SafeRunIdSchema.parse(
+    await page.locator("[data-run-id]").getAttribute("data-run-id"),
+  );
   for (const filename of ARTIFACTS) {
     await page.getByRole("tab", { name: filename }).click();
+    const panel = page.locator('[role="tabpanel"]:not([hidden])');
+    await expect(panel).not.toHaveText("Loading artifact…");
+    const preview = await panel.textContent();
+    expect(preview).not.toBeNull();
+    const expectedPath = `/api/runs/${runId}/artifacts/${filename}`;
+    const matchingResponse = await page.request.get(expectedPath);
+    const matchingUrl = new URL(matchingResponse.url());
+    expect(matchingUrl.origin).toBe(expectedOrigin);
+    expect(matchingUrl.pathname).toBe(expectedPath);
+    await expectDownloadResponse(matchingResponse, filename);
     const downloadPromise = page.waitForEvent("download");
     await page.getByRole("link", { name: "Download" }).click();
-    downloaded.push((await downloadPromise).suggestedFilename());
+    const download = await downloadPromise;
+    const downloadUrl = new URL(download.url());
+    expect(downloadUrl.origin).toBe(expectedOrigin);
+    expect(downloadUrl.pathname).toBe(expectedPath);
+    expect(download.suggestedFilename()).toBe(filename);
+    const content = await readDownloadedUtf8(download);
+    expect(content).toBe(preview);
+    expect(content).not.toMatch(/[A-Za-z]:\\/u);
   }
-  expect(downloaded).toEqual([...ARTIFACTS]);
 
   expect(safety.consoleErrors).toEqual([]);
   expect(safety.consoleWarnings).toEqual([]);

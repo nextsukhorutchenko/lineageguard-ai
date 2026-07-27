@@ -8,10 +8,17 @@ function loadPublicUrl(environment: Readonly<NodeJS.ProcessEnv>): string {
     const configuredUrl = environment.LINEAGEGUARD_PUBLIC_URL;
     if (configuredUrl === undefined) throw new Error("url");
     const url = new URL(configuredUrl);
+    const hostnameLabels = url.hostname.split(".");
+    const serviceLabel = hostnameLabels[0] ?? "";
+    const validServiceLabel =
+      /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(serviceLabel) &&
+      !serviceLabel.startsWith("xn--");
     if (
       url.protocol !== "https:" ||
-      !url.hostname.endsWith(".onrender.com") ||
-      url.hostname.length <= ".onrender.com".length ||
+      hostnameLabels.length !== 3 ||
+      hostnameLabels[1] !== "onrender" ||
+      hostnameLabels[2] !== "com" ||
+      !validServiceLabel ||
       url.username !== "" ||
       url.password !== "" ||
       url.port !== "" ||
