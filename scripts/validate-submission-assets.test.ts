@@ -32,12 +32,17 @@ async function validateWithMutation(
   const root = await mkdtemp(join(tmpdir(), "lineageguard-submission-"));
   try {
     await Promise.all(
-      requiredFiles.map(async (file) => {
-        const destination = join(root, file);
-        await mkdir(dirname(destination), { recursive: true });
-        await copyFile(join(process.cwd(), file), destination);
-      }),
+      requiredFiles
+        .filter((file) => file !== publicDeploymentVerificationPath)
+        .map(async (file) => {
+          const destination = join(root, file);
+          await mkdir(dirname(destination), { recursive: true });
+          await copyFile(join(process.cwd(), file), destination);
+        }),
     );
+    const verificationPath = join(root, publicDeploymentVerificationPath);
+    await mkdir(dirname(verificationPath), { recursive: true });
+    await writeFile(verificationPath, publicDeploymentVerificationFixture, "utf8");
     const target = join(root, relativePath);
     const original = await readFile(target, "utf8");
     await writeFile(target, mutate(original), "utf8");
@@ -46,6 +51,177 @@ async function validateWithMutation(
     await rm(root, { recursive: true, force: true });
   }
 }
+
+const publicDeploymentVerificationPath = "docs/public-deployment-verification.md";
+const publicProjectUrl = "https://lineageguard-ai-replay.onrender.com";
+const reviewedRuntimeCommit = "7f9a534983ff58d0f6df66da0708cc5e34c0f4cd";
+const officialRenderDocumentationUrls = [
+  "https://render.com/docs/blueprint-spec",
+  "https://render.com/docs/deploy-nextjs-app",
+  "https://render.com/docs/free",
+  "https://render.com/docs/health-checks",
+] as const;
+
+const publicDeploymentVerificationFixture = `# Public Deployment Verification
+
+Status: PASSED
+Mode: PUBLIC_REPLAY
+Access: No login, DataHub, OpenAI, API key, or paid account required
+Storage: Ephemeral runs; rerun the deterministic replay after restart
+Project URL: ${publicProjectUrl}
+Reviewed runtime commit: ${reviewedRuntimeCommit}
+Verified date (UTC): 2026-07-27T05:42:44Z
+Verified date (Europe/Kyiv): 2026-07-27T08:42:44+03:00
+
+| Check | Sanitized outcome |
+| --- | --- |
+| Health | PASSED |
+| Private-browser access | PASSED |
+| Golden result | 24 / 11 / 90; BLOCK_DIRECT_RENAME; PASSED |
+| Four artifacts | PASSED |
+| Headers | PASSED |
+| Console | PASSED |
+| Request host | ${publicProjectUrl}; PASSED |
+
+Public fixture replay. No DataHub or OpenAI credentials. Ephemeral runs.
+`;
+
+async function validateWithPublicDeploymentMutation(
+  mutate: (content: string) => string,
+): Promise<string[]> {
+  const root = await mkdtemp(join(tmpdir(), "lineageguard-public-deployment-"));
+  try {
+    await Promise.all(
+      requiredFiles
+        .filter((file) => file !== publicDeploymentVerificationPath)
+        .map(async (file) => {
+          const destination = join(root, file);
+          await mkdir(dirname(destination), { recursive: true });
+          await copyFile(join(process.cwd(), file), destination);
+        }),
+    );
+    const target = join(root, publicDeploymentVerificationPath);
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, mutate(publicDeploymentVerificationFixture), "utf8");
+    return await validateSubmissionAssets(root);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+it("requires the public deployment verification record", async () => {
+  const root = await mkdtemp(join(tmpdir(), "lineageguard-missing-public-deployment-"));
+  try {
+    await Promise.all(
+      requiredFiles
+        .filter((file) => file !== publicDeploymentVerificationPath)
+        .map(async (file) => {
+          const destination = join(root, file);
+          await mkdir(dirname(destination), { recursive: true });
+          await copyFile(join(process.cwd(), file), destination);
+        }),
+    );
+    await expect(validateSubmissionAssets(root)).resolves.toContain(
+      `missing required submission file: ${publicDeploymentVerificationPath}`,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it.each([
+  "# Public Deployment Verification",
+  "Status: PASSED",
+  "Mode: PUBLIC_REPLAY",
+  "Access: No login, DataHub, OpenAI, API key, or paid account required",
+  "Storage: Ephemeral runs; rerun the deterministic replay after restart",
+  `Project URL: ${publicProjectUrl}`,
+  `Reviewed runtime commit: ${reviewedRuntimeCommit}`,
+  "Verified date (UTC): 2026-07-27T05:42:44Z",
+  "Verified date (Europe/Kyiv): 2026-07-27T08:42:44+03:00",
+  "Health | PASSED",
+  "Private-browser access | PASSED",
+  "24 / 11 / 90",
+  "BLOCK_DIRECT_RENAME",
+  "Four artifacts | PASSED",
+  "Headers | PASSED",
+  "Console | PASSED",
+  "Request host |",
+  "Public fixture replay",
+  "No DataHub or OpenAI credentials",
+  "Ephemeral runs",
+] as const)("requires public deployment evidence: %s", async (marker) => {
+  const findings = await validateWithPublicDeploymentMutation((content) =>
+    content.replaceAll(marker, ""),
+  );
+  expect(findings).toContain(`missing public deployment evidence: ${marker}`);
+});
+
+it("accepts Prettier-aligned public deployment evidence rows", async () => {
+  const findings = await validateWithPublicDeploymentMutation((content) =>
+    content.replace("| Health | PASSED |", "| Health                 | PASSED |"),
+  );
+  expect(findings).not.toContain("missing public deployment evidence: Health | PASSED");
+});
+
+it.each([
+  publicProjectUrl,
+  "approximately one minute",
+  "runs are ephemeral",
+  "Run expired; analyze again.",
+  "rerun the deterministic scenario",
+] as const)("requires README public replay guidance: %s", async (marker) => {
+  const findings = await validateWithMutation("README.md", (content) =>
+    content.replaceAll(marker, ""),
+  );
+  expect(findings).toContain(`missing README public replay guidance: ${marker}`);
+});
+
+it.each(officialRenderDocumentationUrls)(
+  "requires official Render documentation: %s",
+  async (url) => {
+    const findings = await validateWithMutation("docs/resources-and-attribution.md", (content) =>
+      content.replace(url, ""),
+    );
+    expect(findings).toContain(`missing official Render resource: ${url}`);
+  },
+);
+
+it.each(["Deployment infrastructure", "No code or prose copied"] as const)(
+  "requires Render attribution classification: %s",
+  async (marker) => {
+    const findings = await validateWithMutation("docs/resources-and-attribution.md", (content) =>
+      content.replaceAll(marker, ""),
+    );
+    expect(findings).toContain(`missing Render attribution requirement: ${marker}`);
+  },
+);
+
+it.each([publicProjectUrl, "docs/public-deployment-verification.md"] as const)(
+  "requires judging-map public deployment evidence: %s",
+  async (marker) => {
+    const findings = await validateWithMutation("docs/judging-map.md", (content) =>
+      content.replaceAll(marker, ""),
+    );
+    expect(findings).toContain(`missing judging-map public deployment evidence: ${marker}`);
+  },
+);
+
+it.each([
+  ["TODO", "unresolved public deployment planning marker"],
+  ["https://fabricated-host.onrender.com", "fabricated public deployment hostname"],
+  ["Account ID: 123456", "unsafe public deployment documentation marker"],
+  ["Token: not-a-secret", "unsafe public deployment documentation marker"],
+  [
+    "https://render.com/docs/free?token=not-a-secret",
+    "unsafe public deployment documentation marker",
+  ],
+] as const)("rejects unsafe public deployment documentation: %s", async (unsafeMarker, finding) => {
+  const findings = await validateWithPublicDeploymentMutation(
+    (content) => `${content}\n${unsafeMarker}\n`,
+  );
+  expect(findings).toContain(finding);
+});
 
 it("accepts the complete English hackathon package and read-only skill", async () => {
   await expect(validateSubmissionAssets(process.cwd())).resolves.toEqual([]);

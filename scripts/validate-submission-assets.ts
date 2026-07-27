@@ -9,6 +9,7 @@ export const requiredFiles = [
   "docs/resources-and-attribution.md",
   "docs/submission-checklist.md",
   "docs/judging-map.md",
+  "docs/public-deployment-verification.md",
   "docs/demo-scenario.md",
   "docs/architecture/agent-demo.md",
   "docs/live-verification.md",
@@ -52,6 +53,50 @@ const requiredSubmissionPhrases = [
   "Mutations are disabled",
   "PR Review Summary",
   "Reviewer Gates",
+] as const;
+
+const publicProjectUrl = "https://lineageguard-ai-replay.onrender.com";
+const reviewedRuntimeCommit = "7f9a534983ff58d0f6df66da0708cc5e34c0f4cd";
+
+const requiredPublicDeploymentEvidence = [
+  "# Public Deployment Verification",
+  "Status: PASSED",
+  "Mode: PUBLIC_REPLAY",
+  "Access: No login, DataHub, OpenAI, API key, or paid account required",
+  "Storage: Ephemeral runs; rerun the deterministic replay after restart",
+  `Project URL: ${publicProjectUrl}`,
+  `Reviewed runtime commit: ${reviewedRuntimeCommit}`,
+  "Verified date (UTC): 2026-07-27T05:42:44Z",
+  "Verified date (Europe/Kyiv): 2026-07-27T08:42:44+03:00",
+  "24 / 11 / 90",
+  "BLOCK_DIRECT_RENAME",
+  "Public fixture replay",
+  "No DataHub or OpenAI credentials",
+  "Ephemeral runs",
+] as const;
+
+const requiredPublicDeploymentEvidenceRows = [
+  ["Health", "Health | PASSED"],
+  ["Private-browser access", "Private-browser access | PASSED"],
+  ["Four artifacts", "Four artifacts | PASSED"],
+  ["Headers", "Headers | PASSED"],
+  ["Console", "Console | PASSED"],
+  ["Request host", "Request host |"],
+] as const;
+
+const requiredReadmePublicReplayGuidance = [
+  publicProjectUrl,
+  "approximately one minute",
+  "runs are ephemeral",
+  "Run expired; analyze again.",
+  "rerun the deterministic scenario",
+] as const;
+
+const requiredRenderDocumentationUrls = [
+  "https://render.com/docs/blueprint-spec",
+  "https://render.com/docs/deploy-nextjs-app",
+  "https://render.com/docs/free",
+  "https://render.com/docs/health-checks",
 ] as const;
 
 export const requiredLiveDocumentationMarkers = [
@@ -917,6 +962,64 @@ export function validateDemoScenario(markdown: string): string[] {
   return findings;
 }
 
+function validatePublicDeploymentDocumentation(files: ReadonlyMap<string, string>): string[] {
+  const verification = files.get("docs/public-deployment-verification.md") ?? "";
+  const readme = files.get("README.md") ?? "";
+  const resources = files.get("docs/resources-and-attribution.md") ?? "";
+  const judgingMap = files.get("docs/judging-map.md") ?? "";
+  const findings: string[] = [];
+
+  for (const marker of requiredPublicDeploymentEvidence) {
+    if (!verification.includes(marker)) {
+      findings.push(`missing public deployment evidence: ${marker}`);
+    }
+  }
+  for (const [label, findingMarker] of requiredPublicDeploymentEvidenceRows) {
+    const pattern = new RegExp(`\\|\\s*${label}\\s*\\|\\s*PASSED`, "u");
+    if (!pattern.test(verification)) {
+      findings.push(`missing public deployment evidence: ${findingMarker}`);
+    }
+  }
+  for (const marker of requiredReadmePublicReplayGuidance) {
+    if (!readme.includes(marker)) {
+      findings.push(`missing README public replay guidance: ${marker}`);
+    }
+  }
+  for (const url of requiredRenderDocumentationUrls) {
+    if (!resources.includes(url)) {
+      findings.push(`missing official Render resource: ${url}`);
+    }
+  }
+  for (const marker of ["Deployment infrastructure", "No code or prose copied"] as const) {
+    if (!resources.includes(marker)) {
+      findings.push(`missing Render attribution requirement: ${marker}`);
+    }
+  }
+  for (const marker of [publicProjectUrl, "docs/public-deployment-verification.md"] as const) {
+    if (!judgingMap.includes(marker)) {
+      findings.push(`missing judging-map public deployment evidence: ${marker}`);
+    }
+  }
+
+  if (/\b(?:TODO|TBD|TBC)\b/iu.test(verification)) {
+    findings.push("unresolved public deployment planning marker");
+  }
+  for (const match of verification.matchAll(/https:\/\/[a-z0-9-]+\.onrender\.com/giu)) {
+    if (match[0] !== publicProjectUrl) {
+      findings.push("fabricated public deployment hostname");
+      break;
+    }
+  }
+  if (
+    /(?:account\s*(?:id|identifier)|(?:token|api[ _-]?key|secret)\s*[:=])/iu.test(verification) ||
+    /https?:\/\/[^\s)]+[?&](?:token|api(?:_|-)?key|secret)=[^\s)]+/iu.test(verification)
+  ) {
+    findings.push("unsafe public deployment documentation marker");
+  }
+
+  return findings;
+}
+
 export async function validateSubmissionAssets(root: string): Promise<string[]> {
   const { files, findings: loadFindings } = await loadRequiredSubmissionFiles(root);
   const findings = [
@@ -924,6 +1027,7 @@ export async function validateSubmissionAssets(root: string): Promise<string[]> 
     ...validateAgentResourceDelta(files),
     ...validateSubmissionPhraseCoverage(files),
     ...validateDestinationDocuments(files),
+    ...validatePublicDeploymentDocumentation(files),
     ...validateDemoScenario(files.get("docs/demo-scenario.md") ?? ""),
     ...validateRolloutPlan(
       files.get("examples/002-nextjs-openai-agent-demo/rollout-plan.md") ?? "",

@@ -24,6 +24,15 @@ diagram asset, screenshot, or code sample was copied into this repository.
 The four rows supplied in the latest review contain three new unique sources because the Skills
 guide was already in the original nine-resource review.
 
+## Official Render Documentation Coverage
+
+| Official source                             | Version or review                         | Project classification    | Use in LineageGuard                                                              | Code or prose copied    |
+| ------------------------------------------- | ----------------------------------------- | ------------------------- | -------------------------------------------------------------------------------- | ----------------------- |
+| <https://render.com/docs/blueprint-spec>    | Render documentation; reviewed 2026-07-27 | Deployment infrastructure | Reference the repository-owned Blueprint contract for the public replay service. | No code or prose copied |
+| <https://render.com/docs/deploy-nextjs-app> | Render documentation; reviewed 2026-07-27 | Deployment infrastructure | Reference the Native Node deployment model for the existing Next.js application. | No code or prose copied |
+| <https://render.com/docs/free>              | Render documentation; reviewed 2026-07-27 | Deployment infrastructure | Document free-tier cold starts and ephemeral replay recovery.                    | No code or prose copied |
+| <https://render.com/docs/health-checks>     | Render documentation; reviewed 2026-07-27 | Deployment infrastructure | Reference the public replay health-check boundary.                               | No code or prose copied |
+
 ## Pinned Software and Reference Inventory
 
 | Resource                                                                                                   | Pinned version or commit                                                                                                                                                   | License or terms                                            | Project use                                                             | Copy decision           |
