@@ -76,12 +76,33 @@ const requiredPublicDeploymentEvidence = [
 ] as const;
 
 const requiredPublicDeploymentEvidenceRows = [
-  ["Health", "Health | PASSED"],
-  ["Private-browser access", "Private-browser access | PASSED"],
-  ["Four artifacts", "Four artifacts | PASSED"],
-  ["Headers", "Headers | PASSED"],
-  ["Console", "Console | PASSED"],
-  ["Request host", "Request host |"],
+  ["missing public deployment evidence: Health | PASSED", /\|\s*Health\s*\|\s*PASSED\b/u],
+  [
+    "missing public deployment evidence: Private-browser access | PASSED",
+    /\|\s*Private-browser access\s*\|\s*PASSED\b/u,
+  ],
+  [
+    "missing public deployment evidence row: Golden result",
+    /\|\s*Golden result\s*\|(?=[^|\r\n]*\bPASSED\b)(?=[^|\r\n]*24 \/ 11 \/ 90)(?=[^|\r\n]*BLOCK_DIRECT_RENAME)[^|\r\n]*\|/u,
+  ],
+  [
+    "missing public deployment evidence: Four artifacts | PASSED",
+    /\|\s*Four artifacts\s*\|\s*PASSED\b/u,
+  ],
+  ["missing public deployment evidence: Headers | PASSED", /\|\s*Headers\s*\|\s*PASSED\b/u],
+  ["missing public deployment evidence: Console | PASSED", /\|\s*Console\s*\|\s*PASSED\b/u],
+  [
+    "missing public deployment evidence row: Request host",
+    /\|\s*Request host\s*\|(?=[^|\r\n]*\bPASSED\b)(?=[^|\r\n]*https:\/\/lineageguard-ai-replay\.onrender\.com)[^|\r\n]*\|/u,
+  ],
+] as const;
+
+const unsafePublicDeploymentDisclosurePatterns = [
+  /\braw\s+logs?\s*[:=]/iu,
+  /\btrace\s*[:=]/iu,
+  /\bresponse\s+body\s*[:=]/iu,
+  /\b[A-Za-z]:(?:\\|\/(?!\/))/u,
+  /(?:^|[\s("'`])\/(?:[A-Za-z0-9._-]+\/)+[A-Za-z0-9._-]+/mu,
 ] as const;
 
 const requiredReadmePublicReplayGuidance = [
@@ -974,10 +995,9 @@ function validatePublicDeploymentDocumentation(files: ReadonlyMap<string, string
       findings.push(`missing public deployment evidence: ${marker}`);
     }
   }
-  for (const [label, findingMarker] of requiredPublicDeploymentEvidenceRows) {
-    const pattern = new RegExp(`\\|\\s*${label}\\s*\\|\\s*PASSED`, "u");
+  for (const [finding, pattern] of requiredPublicDeploymentEvidenceRows) {
     if (!pattern.test(verification)) {
-      findings.push(`missing public deployment evidence: ${findingMarker}`);
+      findings.push(finding);
     }
   }
   for (const marker of requiredReadmePublicReplayGuidance) {
@@ -1015,6 +1035,9 @@ function validatePublicDeploymentDocumentation(files: ReadonlyMap<string, string
     /https?:\/\/[^\s)]+[?&](?:token|api(?:_|-)?key|secret)=[^\s)]+/iu.test(verification)
   ) {
     findings.push("unsafe public deployment documentation marker");
+  }
+  if (unsafePublicDeploymentDisclosurePatterns.some((pattern) => pattern.test(verification))) {
+    findings.push("unsafe public deployment documentation disclosure");
   }
 
   return findings;

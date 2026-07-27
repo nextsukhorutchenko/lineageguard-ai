@@ -146,7 +146,6 @@ it.each([
   "Four artifacts | PASSED",
   "Headers | PASSED",
   "Console | PASSED",
-  "Request host |",
   "Public fixture replay",
   "No DataHub or OpenAI credentials",
   "Ephemeral runs",
@@ -162,6 +161,49 @@ it("accepts Prettier-aligned public deployment evidence rows", async () => {
     content.replace("| Health | PASSED |", "| Health                 | PASSED |"),
   );
   expect(findings).not.toContain("missing public deployment evidence: Health | PASSED");
+});
+
+it.each([
+  [
+    "the exact golden result",
+    (content: string) => content.replace("24 / 11 / 90", "24 / 11 / 91"),
+    "missing public deployment evidence row: Golden result",
+  ],
+  [
+    "the exact golden decision",
+    (content: string) => content.replace("BLOCK_DIRECT_RENAME", "ALLOW_DIRECT_RENAME"),
+    "missing public deployment evidence row: Golden result",
+  ],
+  [
+    "the golden result outcome",
+    (content: string) =>
+      content.replace(
+        "Golden result | 24 / 11 / 90; BLOCK_DIRECT_RENAME; PASSED",
+        "Golden result | 24 / 11 / 90; BLOCK_DIRECT_RENAME; VERIFIED",
+      ),
+    "missing public deployment evidence row: Golden result",
+  ],
+  [
+    "the exact request host",
+    (content: string) =>
+      content.replace(
+        `Request host | ${publicProjectUrl}; PASSED`,
+        "Request host | https://public-replay.example.invalid; PASSED",
+      ),
+    "missing public deployment evidence row: Request host",
+  ],
+  [
+    "the request-host outcome",
+    (content: string) =>
+      content.replace(
+        `Request host | ${publicProjectUrl}; PASSED`,
+        `Request host | ${publicProjectUrl}; VERIFIED`,
+      ),
+    "missing public deployment evidence row: Request host",
+  ],
+] as const)("requires %s in its evidence-table association", async (_name, mutate, finding) => {
+  const findings = await validateWithPublicDeploymentMutation(mutate);
+  expect(findings).toContain(finding);
 });
 
 it.each([
@@ -221,6 +263,19 @@ it.each([
     (content) => `${content}\n${unsafeMarker}\n`,
   );
   expect(findings).toContain(finding);
+});
+
+it.each([
+  "Raw log: request completed",
+  "Trace: provider envelope",
+  'Response body: {"status":"ok"}',
+  "C:\\private\\lineageguard\\run.json",
+  "/var/lib/lineageguard/run.json",
+] as const)("rejects a raw public-deployment disclosure: %s", async (unsafeMarker) => {
+  const findings = await validateWithPublicDeploymentMutation(
+    (content) => `${content}\n${unsafeMarker}\n`,
+  );
+  expect(findings).toContain("unsafe public deployment documentation disclosure");
 });
 
 it("accepts the complete English hackathon package and read-only skill", async () => {
