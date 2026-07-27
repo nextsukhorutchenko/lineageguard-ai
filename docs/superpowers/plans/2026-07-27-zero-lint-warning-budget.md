@@ -4,6 +4,10 @@
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
 
+**Last amended:** 2026-07-28 — Correction A1 approved: isolate executable warning-budget semantics
+from the repository's heavy Next.js and TypeScript ESLint configuration while retaining the pinned
+CLI, exact warning budget, bounds, and temporary-fixture cleanup.
+
 **Goal:** Remove the repository's existing ESLint warning and make every shared local and CI lint
 run fail when ESLint reports any warning.
 
@@ -245,6 +249,100 @@ git commit -m "ci: enforce zero lint warnings"
 
 Expected: one implementation commit contains only the shared warning budget, the warning cleanup,
 and focused positive and negative coverage.
+
+---
+
+### Approved Correction A1: Isolate Executable Warning-Budget Semantics
+
+Task 2 reproduced two different timeouts in pre-existing secret-scan tests across two normal-user
+`pnpm verify:offline` runs. The Task 1 executable cases each loaded the full repository Next.js and
+TypeScript ESLint configuration for 10–13 seconds while Vitest ran files in parallel. A diagnostic
+run proved that the pinned CLI with `--no-config-lookup` and one core warning rule completes each
+boundary in 0.8–0.9 seconds.
+
+The approved specification requires executable positive and negative warning-budget coverage; it
+does not require that semantic boundary test to reload the repository configuration. The real
+`pnpm lint` command remains responsible for applying the complete repository configuration and
+must still exit successfully with zero warnings.
+
+**Files:**
+
+- Modify: `tests/smoke/lint-warning-budget.test.ts`
+- Do not modify: `package.json`, `prettier.config.mjs`, `pnpm-lock.yaml`,
+  `.github/workflows/ci.yml`, or application code.
+
+- [ ] **Step 1: Retain the full-gate RED evidence**
+
+Use the two recorded normal-user `pnpm verify:offline` failures as the regression reproduction:
+each passed format, zero-warning lint, and typecheck, then timed out in a different existing
+`scripts/scan-repository-secrets.test.ts` case while the heavy ESLint subprocess tests competed
+with the full suite.
+
+- [ ] **Step 2: Apply the smallest isolated CLI correction**
+
+Add this fixed argument list beside the existing test constants:
+
+```ts
+const WARNING_RULE_ARGUMENTS = ["--no-config-lookup", "--rule", "no-debugger: warn"] as const;
+```
+
+Change the positive invocation to:
+
+```ts
+const result = lint([...WARNING_RULE_ARGUMENTS, "prettier.config.mjs", "--max-warnings", "0"]);
+```
+
+Change only the negative fixture name and content:
+
+```ts
+const fixture = resolve(root, "warning-budget.js");
+await writeFile(fixture, "debugger;\n", "utf8");
+```
+
+Change the negative invocation to:
+
+```ts
+const result = lint([
+  ...WARNING_RULE_ARGUMENTS,
+  fixture,
+  "--no-ignore",
+  "--format",
+  "json",
+  "--max-warnings",
+  "0",
+]);
+```
+
+Keep `ESLINT_TIMEOUT_MS` at `20_000`, the output cap at `64 * 1024`, `shell: false`, the
+allowlisted environment, ignored `tmp/` storage, cleanup after every test path, the 25-second
+per-test bounds, and the assertions requiring exit `1`, zero errors, and exactly one warning.
+
+- [ ] **Step 3: Run focused GREEN**
+
+Run:
+
+```powershell
+pnpm test tests/smoke/toolchain.test.ts tests/smoke/lint-warning-budget.test.ts
+pnpm lint
+```
+
+Expected: 32 focused tests pass; the positive and negative executable cases complete without a
+Vitest timeout; `pnpm lint` exits `0` with zero errors and zero warnings.
+
+- [ ] **Step 4: Verify and commit the correction**
+
+Run:
+
+```powershell
+pnpm exec prettier --check tests/smoke/lint-warning-budget.test.ts
+git diff --check
+git diff --exit-code -- package.json prettier.config.mjs pnpm-lock.yaml .github/workflows/ci.yml
+git add -- tests/smoke/lint-warning-budget.test.ts
+git diff --cached --check
+git commit -m "test: isolate lint warning budget fixtures"
+```
+
+Expected: the correction commit changes only `tests/smoke/lint-warning-budget.test.ts`.
 
 ---
 
