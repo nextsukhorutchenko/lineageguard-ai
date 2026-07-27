@@ -239,13 +239,12 @@ describe("preparePublicReplayEnvironment", () => {
     },
   );
 
-  it("passes only allowlisted operating-system and Node values plus exact application keys", async () => {
+  it("passes only allowlisted operating-system values plus exact application keys", async () => {
     const sandbox = await freshSandbox();
     const runsRoot = join(sandbox, "runs");
     const prepared = await preparePublicReplayEnvironment(
       publicEnvironment(runsRoot, {
         PATH: "approved-path",
-        NODE_OPTIONS: "--max-old-space-size=256",
         OPENAI_API_KEY: "",
         DATAHUB_GMS_TOKEN: "",
         GITHUB_TOKEN: "unrelated-secret",
@@ -255,7 +254,6 @@ describe("preparePublicReplayEnvironment", () => {
 
     expect(prepared.childEnvironment).toEqual({
       PATH: "approved-path",
-      NODE_OPTIONS: "--max-old-space-size=256",
       NODE_ENV: "production",
       PORT: "3000",
       LINEAGEGUARD_DEMO_MODE: "REPLAY",
@@ -266,6 +264,20 @@ describe("preparePublicReplayEnvironment", () => {
     expect(prepared.childEnvironment).not.toHaveProperty("GITHUB_TOKEN");
     expect(prepared.childEnvironment).not.toHaveProperty("UNRELATED_SENTINEL");
   });
+
+  it.each(["NODE_OPTIONS", "NODE_EXTRA_CA_CERTS"] as const)(
+    "does not propagate execution-affecting %s to the child environment",
+    async (key) => {
+      const sandbox = await freshSandbox();
+      const prepared = await preparePublicReplayEnvironment(
+        publicEnvironment(join(sandbox, "runs"), {
+          [key]: "untrusted-runtime-configuration",
+        }),
+      );
+
+      expect(prepared.childEnvironment).not.toHaveProperty(key);
+    },
+  );
 
   it("accepts only EEXIST from root creation", async () => {
     const sandbox = await freshSandbox();
