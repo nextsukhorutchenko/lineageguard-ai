@@ -161,6 +161,33 @@ it("accepts Prettier-aligned public deployment evidence rows", async () => {
   expect(findings).not.toContain("missing public deployment evidence: Health | PASSED");
 });
 
+it("rejects the legacy two-cell public deployment evidence table", async () => {
+  const findings = await validateWithPublicDeploymentMutation((content) =>
+    content.replace(
+      `| Check | Evidence | Outcome |
+| --- | --- | --- |
+| Health | The public replay health endpoint was reachable. | PASSED |
+| Private-browser access | The replay opened without a login, provider credential, or paid account. | PASSED |
+| Golden result | 24 / 11 / 90; BLOCK_DIRECT_RENAME | PASSED |
+| Four artifacts | All four allowlisted artifacts were available through the replay. | PASSED |
+| Headers | Required cache and browser-security headers were present. | PASSED |
+| Console | The browser console had no errors or warnings. | PASSED |
+| Request host | ${publicProjectUrl} | PASSED |`,
+      `| Check | Sanitized verified fact |
+| --- | --- |
+| Health | PASSED — The public replay health endpoint was reachable. |
+| Private-browser access | PASSED — The replay opened without a login, provider credential, or paid account. |
+| Golden result | PASSED — The deterministic replay produced 24 / 11 / 90 and \`BLOCK_DIRECT_RENAME\`. |
+| Four artifacts | PASSED — All four allowlisted artifacts were available through the replay. |
+| Headers | PASSED — Required cache and browser-security headers were present. |
+| Console | PASSED — The browser console had no errors or warnings. |
+| Request host | PASSED — Requests stayed on ${publicProjectUrl}. |`,
+    ),
+  );
+  expect(findings).toContain("missing public deployment evidence row: Golden result");
+  expect(findings).toContain("missing public deployment evidence row: Request host");
+});
+
 it.each([
   [
     "the exact golden result",
