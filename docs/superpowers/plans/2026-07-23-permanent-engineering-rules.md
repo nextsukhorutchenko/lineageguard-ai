@@ -1,5 +1,12 @@
 # Permanent Repository Engineering Rules Implementation Plan
 
+> **Lifecycle:** Implemented — historical execution record.
+>
+> The implementation outcome is present in the repository. Unchecked boxes preserve the original
+> execution sequence; they are not an outstanding-work tracker. Earlier snippets may be superseded
+> by later approved amendments and the current implementation. Use `docs/README.md` to find current
+> authority, operator guidance, and verification evidence.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a compact, permanent hybrid engineering baseline and definition of done to the root `AGENTS.md`.
