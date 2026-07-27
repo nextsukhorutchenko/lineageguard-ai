@@ -46,6 +46,7 @@ function isolatedGitEnvironment(): NodeJS.ProcessEnv {
     GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_TERMINAL_PROMPT: "0",
+    NODE_ENV: "test",
   };
 
   for (const key of PORTABLE_GIT_ENVIRONMENT_KEYS) {
