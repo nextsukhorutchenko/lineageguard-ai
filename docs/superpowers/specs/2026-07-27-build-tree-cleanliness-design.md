@@ -4,8 +4,9 @@
 
 **Date:** 2026-07-27
 
-**Last amended:** 2026-07-27 — Amendment A1 approved: treat `next-env.d.ts` as generated
-Next.js output and make type generation an explicit part of strict type checking.
+**Last amended:** 2026-07-27 — Amendments A1 and A2 approved: treat `next-env.d.ts` as generated
+Next.js output, make type generation an explicit part of strict type checking, and make the CI
+cleanliness failure path quiet, fail-closed, and test-environment independent.
 
 **Authority:** This design is a narrow corrective amendment to approved specification
 `002-nextjs-openai-agent-demo` and the existing CI contract. It does not change product behavior,
@@ -40,6 +41,8 @@ pass CI unnoticed.
    - any tracked working-tree mutation;
    - any staged mutation; or
    - any untracked file that is not excluded by `.gitignore`.
+     The step must suppress raw Git diff, status, path, and dependency-error output, fail closed when
+     a Git observation itself fails, and emit only fixed repository-owned error messages.
 6. Keep the ordinary local `pnpm build` and `pnpm verify:offline` entry points unchanged.
    `pnpm typecheck` retains strict checking and now performs the required generated-type bootstrap.
    Developers may continue to build from a working tree containing intentional local changes; the
@@ -65,19 +68,38 @@ occurs inside that command.
 
 ## CI Cleanliness Contract
 
-The post-verification step will use Git itself as the authority:
+The post-verification step will use Git itself as the authority without printing untrusted
+repository content:
 
 ```bash
-git diff --exit-code
-git diff --cached --exit-code
-test -z "$(git status --porcelain --untracked-files=all)"
+if ! git diff --quiet --no-ext-diff 2>/dev/null; then
+  echo "::error::Tracked working-tree mutation or Git diff failure detected after offline verification."
+  exit 1
+fi
+if ! git diff --cached --quiet --no-ext-diff 2>/dev/null; then
+  echo "::error::Staged mutation or Git index check failure detected after offline verification."
+  exit 1
+fi
+if ! residue="$(git status --porcelain=v1 --untracked-files=all 2>/dev/null)"; then
+  echo "::error::Git status check failed after offline verification."
+  exit 1
+fi
+if [ -n "$residue" ]; then
+  echo "::error::Non-ignored repository residue detected after offline verification."
+  exit 1
+fi
 ```
 
 Ignored build output such as `.next/`, `dist/`, Playwright output, temporary run data, and local
 environment files remains outside the check according to the existing `.gitignore` policy.
 
 The check must not reset, delete, restore, or otherwise modify the checkout. It reports failure and
-leaves the mutation available for diagnosis.
+leaves the mutation available for local diagnosis. CI logs must not contain the mutation's diff,
+file names, raw Git errors, or terminal control sequences.
+
+Executable gate tests must run Git with system and global configuration disabled, an allowlisted
+process environment, and terminal prompting disabled. The tests must reject an unexpected Git exit
+status as an observation failure rather than accepting it as proof of repository residue.
 
 ## Testing
 
@@ -89,9 +111,12 @@ Implementation will follow RED-GREEN TDD:
 2. Stop tracking the generated file, ignore only its root path, and update `typecheck`.
 3. Rerun the focused smoke test and observe the amended contract pass.
 4. Retain the existing executable positive and negative repository-cleanliness tests.
-5. Run the complete offline gate from a clean checkout and immediately apply the same full-tree
-   cleanliness commands used by CI.
-6. Run repository-required formatting, diff, and secret-scanning gates.
+5. Add RED coverage proving inherited global excludes cannot hide residue and an unexpected Git
+   observation failure cannot satisfy a negative residue test.
+6. Apply the quiet fail-closed workflow contract and isolate the Git subprocess environment.
+7. Run the complete offline gate from a clean checkout and immediately apply the same quiet
+   full-tree cleanliness commands used by CI.
+8. Run repository-required formatting, diff, and secret-scanning gates.
 
 ## Acceptance Criteria
 
@@ -101,7 +126,12 @@ Implementation will follow RED-GREEN TDD:
 - Production-build and development-server verification may generate different
   `next-env.d.ts` contents without creating repository residue.
 - CI fails after the offline gate when any tracked, staged, or non-ignored untracked residue exists.
+- CI also fails when a Git observation cannot execute successfully.
+- CI emits only fixed repository-owned messages on cleanliness failure and never prints raw diff,
+  status, file-name, or Git dependency-error content.
 - CI remains green when only ignored build and test outputs are generated.
+- Executable cleanliness tests ignore system and global Git configuration, inherited Git override
+  variables, hooks, signing settings, and global excludes.
 - Local `pnpm build` and `pnpm verify:offline` entry points remain unchanged; strict type checking
   remains mandatory.
 - The existing CI permission model, immutable action pins, frozen lockfile installation, and

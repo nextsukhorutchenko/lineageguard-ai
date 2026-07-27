@@ -11,7 +11,8 @@ tracked, staged, or non-ignored untracked repository residue after the offline g
 types explicitly before strict TypeScript checking, and keep the file outside version control.
 Protect that ownership boundary with a focused smoke contract and retain the CI-only full-tree
 cleanliness step after `pnpm verify:offline`. Use real Git operations to prove both the generated
-file boundary and the accepting and rejecting behavior of the enforcement commands.
+file boundary and the accepting and rejecting behavior of the enforcement commands. Keep the CI
+failure path quiet and fail-closed, and isolate executable Git fixtures from host configuration.
 
 **Tech Stack:** TypeScript `6.0.3`, Next.js `16.2.11`, Vitest `4.1.10`, pnpm `10.10.0`, Node.js
 `22.23.1`, GitHub Actions on `ubuntu-latest`, Git.
@@ -30,6 +31,10 @@ file boundary and the accepting and rejecting behavior of the enforcement comman
 - Keep GitHub Actions permissions read-only, checkout credentials disabled, third-party actions
   pinned to existing full commit SHAs, and installs frozen.
 - The CI gate must report residue without resetting, restoring, deleting, or modifying it.
+- The CI gate must suppress raw Git output, fail closed when a Git observation fails, and emit only
+  fixed repository-owned error messages.
+- Executable Git fixtures must disable system/global configuration and reject unexpected command
+  exit statuses.
 - Ignored `.next/`, `dist/`, Playwright, run, temporary, and local environment output must not cause
   false failures.
 - Keep code, tests, documentation, commits, and repository artifacts in English.
@@ -534,6 +539,10 @@ bootstrap, tracked-file deletion, and focused regression tests; `pnpm-lock.yaml`
 
 ### Task 5: Prove the Amended Complete Branch Contract
 
+> **Historical verification note:** Task 5 completed successfully before the final review approved
+> Amendment A2. Its original verbose local Git observations are superseded by the quiet fail-closed
+> commands below and by Tasks 6–7.
+
 **Files:**
 
 - Inspect: `.gitignore`
@@ -577,23 +586,26 @@ acceptance all exit `0` without DataHub, OpenAI, or credentials.
 Run:
 
 ```powershell
-git diff --exit-code
+git diff --quiet --no-ext-diff 2>$null
 if ($LASTEXITCODE -ne 0) {
-  throw "Offline verification mutated a tracked working-tree file."
+  throw "Tracked working-tree mutation or Git diff failure detected after offline verification."
 }
-git diff --cached --exit-code
+git diff --cached --quiet --no-ext-diff 2>$null
 if ($LASTEXITCODE -ne 0) {
-  throw "Offline verification created a staged mutation."
+  throw "Staged mutation or Git index check failure detected after offline verification."
 }
-$residue = @(git status --porcelain --untracked-files=all)
+$residue = @(git status --porcelain=v1 --untracked-files=all 2>$null)
+if ($LASTEXITCODE -ne 0) {
+  throw "Git status check failed after offline verification."
+}
 if ($residue.Count -ne 0) {
-  $residue
-  throw "Offline verification left repository residue."
+  throw "Non-ignored repository residue detected after offline verification."
 }
 ```
 
-Expected: both diff commands exit `0`; status is empty; mode-specific ignored
-`next-env.d.ts` generation creates no repository residue.
+Expected: both quiet diff commands and guarded status exit `0`; status is empty; no raw diff,
+status, path, or Git-error content is printed; mode-specific ignored `next-env.d.ts` generation
+creates no repository residue.
 
 - [ ] **Step 4: Run repository secret scans**
 
@@ -647,3 +659,290 @@ Use `superpowers:requesting-code-review` against `origin/main...HEAD`. The revie
 
 Expected: no Critical or Important findings. Correct any confirmed finding through a new RED-GREEN
 cycle and repeat the affected verification before publishing the branch.
+
+---
+
+### Task 6: Make the CI Failure Path Quiet and Fail-Closed
+
+**Files:**
+
+- Modify: `tests/smoke/ci-tree-cleanliness.test.ts`
+- Modify: `.github/workflows/ci.yml`
+
+**Interfaces:**
+
+- Consumes: the reviewed full-tree gate, Git diff/status exit semantics, GitHub Actions Bash, and
+  real temporary Git repositories.
+- Produces: a quiet CI gate that fails on residue or observation failure with fixed messages, plus
+  host-independent executable tests that distinguish expected dirty states from Git errors.
+
+- [ ] **Step 1: Write the failing Amendment A2 tests**
+
+Replace `CLEANLINESS_STEP` with the exact approved quiet block:
+
+```ts
+const CLEANLINESS_STEP = `      - name: Verify repository remains clean
+        shell: bash
+        run: |
+          if ! git diff --quiet --no-ext-diff 2>/dev/null; then
+            echo "::error::Tracked working-tree mutation or Git diff failure detected after offline verification."
+            exit 1
+          fi
+          if ! git diff --cached --quiet --no-ext-diff 2>/dev/null; then
+            echo "::error::Staged mutation or Git index check failure detected after offline verification."
+            exit 1
+          fi
+          if ! residue="$(git status --porcelain=v1 --untracked-files=all 2>/dev/null)"; then
+            echo "::error::Git status check failed after offline verification."
+            exit 1
+          fi
+          if [ -n "$residue" ]; then
+            echo "::error::Non-ignored repository residue detected after offline verification."
+            exit 1
+          fi
+`;
+```
+
+Rename `temporaryRepositories` to `temporaryPaths` so both repository and configuration fixture
+roots are cleaned by the existing `afterEach`.
+
+Add this negative inherited-configuration test:
+
+```ts
+it("does not let inherited global excludes hide repository residue", async () => {
+  const configurationRoot = await mkdtemp(join(tmpdir(), "lineageguard-git-config-"));
+  temporaryPaths.push(configurationRoot);
+  const excludesFile = join(configurationRoot, "global-excludes");
+  const globalConfig = join(configurationRoot, "global.gitconfig");
+  await writeFile(excludesFile, "unexpected.txt\n", "utf8");
+  await writeFile(
+    globalConfig,
+    `[core]\n\texcludesFile = "${excludesFile.replaceAll("\\", "/")}"\n`,
+    "utf8",
+  );
+
+  const previousGlobalConfig = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = globalConfig;
+  try {
+    const cwd = await createRepository();
+    await writeFile(join(cwd, "unexpected.txt"), "residue\n", "utf8");
+
+    expect(treeIsClean(cwd)).toBe(false);
+  } finally {
+    if (previousGlobalConfig === undefined) {
+      delete process.env.GIT_CONFIG_GLOBAL;
+    } else {
+      process.env.GIT_CONFIG_GLOBAL = previousGlobalConfig;
+    }
+  }
+});
+```
+
+Add this observation-failure test:
+
+```ts
+it("rejects an unexpected Git observation failure", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "lineageguard-not-a-repository-"));
+  temporaryPaths.push(cwd);
+
+  expect(() => treeIsClean(cwd)).toThrow("Git working-tree diff exited unexpectedly.");
+});
+```
+
+The workflow test must fail because CI still contains the verbose block. The inherited-config test
+must fail because the current helper inherits `GIT_CONFIG_GLOBAL`. The observation-failure test
+must fail because the current helper silently treats every nonzero diff status as ordinary residue.
+
+- [ ] **Step 2: Run focused RED**
+
+Run:
+
+```powershell
+& .\node_modules\.bin\vitest.CMD run tests\smoke\ci-tree-cleanliness.test.ts
+```
+
+Expected: exactly the three new Amendment A2 contracts fail for the reasons above; the existing
+positive and tracked/staged/untracked boundary cases continue to execute.
+
+- [ ] **Step 3: Isolate Git subprocesses and validate observation exit codes**
+
+Add this portable allowlist and environment builder before `git(...)`:
+
+```ts
+const PORTABLE_GIT_ENVIRONMENT_KEYS = [
+  "COMSPEC",
+  "HOME",
+  "PATH",
+  "PATHEXT",
+  "SYSTEMROOT",
+  "TEMP",
+  "TMP",
+  "USERPROFILE",
+  "WINDIR",
+] as const;
+
+function isolatedGitEnvironment(): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {
+    GIT_ATTR_NOSYSTEM: "1",
+    GIT_CONFIG_COUNT: "0",
+    GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+
+  for (const key of PORTABLE_GIT_ENVIRONMENT_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) {
+      environment[key] = value;
+    }
+  }
+
+  return environment;
+}
+```
+
+Pass `env: isolatedGitEnvironment()` to `spawnSync`.
+
+Add this exit validator:
+
+```ts
+function requireGitObservation(
+  result: SpawnSyncReturns<string>,
+  allowedStatuses: readonly number[],
+  operation: string,
+): void {
+  expect(result.error, `${operation} could not start.`).toBeUndefined();
+  expect(allowedStatuses, `${operation} exited unexpectedly.`).toContain(result.status);
+}
+```
+
+Change `treeIsClean` to use the same quiet observations as CI and reject unexpected statuses:
+
+```ts
+function treeIsClean(cwd: string): boolean {
+  const tracked = git(cwd, ["diff", "--quiet", "--no-ext-diff"]);
+  const staged = git(cwd, ["diff", "--cached", "--quiet", "--no-ext-diff"]);
+  const status = git(cwd, ["status", "--porcelain=v1", "--untracked-files=all"]);
+
+  requireGitObservation(tracked, [0, 1], "Git working-tree diff");
+  requireGitObservation(staged, [0, 1], "Git staged diff");
+  requireGitObservation(status, [0], "Git status");
+
+  return tracked.status === 0 && staged.status === 0 && status.stdout === "";
+}
+```
+
+Keep `requireGitSuccess` for setup commands. Do not pass inherited `GIT_*` override variables,
+global/system configuration, hooks, signing configuration, or global excludes into fixture Git
+processes.
+
+- [ ] **Step 4: Apply the exact quiet workflow block**
+
+Replace only the body of `Verify repository remains clean` in `.github/workflows/ci.yml` with:
+
+```yaml
+if ! git diff --quiet --no-ext-diff 2>/dev/null; then
+echo "::error::Tracked working-tree mutation or Git diff failure detected after offline verification."
+exit 1
+fi
+if ! git diff --cached --quiet --no-ext-diff 2>/dev/null; then
+echo "::error::Staged mutation or Git index check failure detected after offline verification."
+exit 1
+fi
+if ! residue="$(git status --porcelain=v1 --untracked-files=all 2>/dev/null)"; then
+echo "::error::Git status check failed after offline verification."
+exit 1
+fi
+if [ -n "$residue" ]; then
+echo "::error::Non-ignored repository residue detected after offline verification."
+exit 1
+fi
+```
+
+Do not print `$residue`, raw diff output, raw Git errors, or file names. Do not add cleanup,
+permissions, credentials, actions, or dependencies.
+
+- [ ] **Step 5: Run GREEN and affected smoke coverage**
+
+Run:
+
+```powershell
+& .\node_modules\.bin\vitest.CMD run tests\smoke\ci-tree-cleanliness.test.ts
+& .\node_modules\.bin\vitest.CMD run tests\smoke\toolchain.test.ts tests\smoke\ci-tree-cleanliness.test.ts
+```
+
+Expected: the CI cleanliness file passes 7/7 tests and affected smoke coverage passes 36/36.
+
+- [ ] **Step 6: Inspect and commit the consolidated final-review fix**
+
+Run:
+
+```powershell
+git diff --check
+git diff -- .github/workflows/ci.yml tests/smoke/ci-tree-cleanliness.test.ts
+git status --short
+git add -- .github/workflows/ci.yml tests/smoke/ci-tree-cleanliness.test.ts
+git diff --cached --check
+git commit -m "ci: make cleanliness gate fail closed"
+```
+
+Expected: one implementation commit contains only the quiet workflow and deterministic executable
+test changes. Authority-document changes remain in their preceding amendment commit.
+
+---
+
+### Task 7: Re-Review and Verify Amendment A2
+
+**Files:**
+
+- Inspect: `.github/workflows/ci.yml`
+- Inspect: `tests/smoke/ci-tree-cleanliness.test.ts`
+- Inspect: `docs/superpowers/specs/2026-07-27-build-tree-cleanliness-design.md`
+- Inspect: `docs/superpowers/plans/2026-07-27-build-tree-cleanliness.md`
+
+**Interfaces:**
+
+- Consumes: the single consolidated Task 6 fix commit and the final-review findings.
+- Produces: one scoped re-review and fresh whole-branch evidence for the final corrected HEAD.
+
+- [ ] **Step 1: Run the required scoped re-review**
+
+Generate the review package from the pre-A2 final-review head through the Task 6 head. The
+re-reviewer must verdict both original Important findings:
+
+1. CI failure output is quiet and fixed, and Git observation failure is fail-closed.
+2. Executable Git fixtures ignore system/global configuration and reject unexpected exit codes.
+
+Expected: both findings are `ADDRESSED` with no new Critical or Important breakage.
+
+- [ ] **Step 2: Run the complete offline gate**
+
+Run:
+
+```powershell
+pnpm verify:offline
+```
+
+Expected: all formatting, lint, strict typecheck, 1,699-or-more offline tests, build, runtime-mode,
+public replay, and Chromium acceptance stages exit `0`.
+
+- [ ] **Step 3: Apply the quiet post-gate observations**
+
+Run the amended PowerShell commands from Task 5 Step 3.
+
+Expected: every Git observation exits `0`, status is empty, and no raw repository content is
+printed.
+
+- [ ] **Step 4: Run security and final scope checks**
+
+Run:
+
+```powershell
+pnpm security:scan
+pnpm security:scan:history
+git diff origin/main...HEAD --check
+git diff --exit-code origin/main...HEAD -- pnpm-lock.yaml next.config.ts tsconfig.json
+git status --short --untracked-files=all
+```
+
+Expected: both secret scans pass; branch diff and immutable-file checks exit `0`; status is empty.
