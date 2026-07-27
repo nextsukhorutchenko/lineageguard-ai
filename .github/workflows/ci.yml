@@ -61,6 +61,13 @@ jobs:
           LINEAGEGUARD_RUNS_DIR: ${{ runner.temp }}/lineageguard-runs
         run: pnpm verify:offline
 
+      - name: Verify repository remains clean
+        shell: bash
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git status --porcelain --untracked-files=all)"
+
       - name: Upload advisory PR impact report
         if: always() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
