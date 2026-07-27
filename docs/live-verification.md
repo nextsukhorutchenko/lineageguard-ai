@@ -1,8 +1,8 @@
 # Live Verification
 
 - Overall status: `PASSED`
-- Verified at: `2026-07-26T05:06:21Z`
-- Commit: `b32894e30834e3fd3da4d73e39cd1ca32123ff84`
+- Verified at: `2026-07-27T14:39:40Z`
+- Commit: `47f9ce7acedaf0944f62b1aebfe826f4fcf2a6e0`
 - DataHub account: `LOCAL QUICKSTART USER: datahub`
 - Search visibility scope: `DEFAULT VIEW: enabled`
 
