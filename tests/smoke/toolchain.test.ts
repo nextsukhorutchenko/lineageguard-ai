@@ -14,6 +14,15 @@ const VALID_REMOTE_ACCEPTANCE_ENVIRONMENT = {
   LINEAGEGUARD_PUBLIC_URL: TEST_RENDER_ORIGIN,
 } as const;
 
+function git(args: readonly string[]) {
+  return spawnSync("git", [...args], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    shell: false,
+    windowsHide: true,
+  });
+}
+
 function listRemoteTests(environment: Readonly<Record<string, string | undefined>>) {
   const playwrightCli = createRequire(import.meta.url).resolve("@playwright/test/cli");
   return spawnSync(
@@ -45,6 +54,24 @@ function listRemoteTests(environment: Readonly<Record<string, string | undefined
 }
 
 describe("toolchain", () => {
+  it("keeps the generated Next.js declaration bootstrap outside version control", () => {
+    const ignored = git(["check-ignore", "--quiet", "--", "next-env.d.ts"]);
+    const tracked = git(["ls-files", "--error-unmatch", "--", "next-env.d.ts"]);
+
+    expect(ignored.status, `${ignored.stdout}${ignored.stderr}`).toBe(0);
+    expect(tracked.status, `${tracked.stdout}${tracked.stderr}`).toBe(1);
+  });
+
+  it("generates Next.js route types before strict TypeScript checking", async () => {
+    const packageJson = JSON.parse(
+      await readFile(resolve(process.cwd(), "package.json"), "utf8"),
+    ) as {
+      scripts: Record<string, string>;
+    };
+
+    expect(packageJson.scripts.typecheck).toBe("next typegen && tsc --noEmit");
+  });
+
   it("runs on the pinned Node major version", () => {
     expect(Number.parseInt(process.versions.node, 10)).toBe(22);
   });

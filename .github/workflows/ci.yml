@@ -61,6 +61,26 @@ jobs:
           LINEAGEGUARD_RUNS_DIR: ${{ runner.temp }}/lineageguard-runs
         run: pnpm verify:offline
 
+      - name: Verify repository remains clean
+        shell: bash
+        run: |
+          if ! git diff --quiet --no-ext-diff 2>/dev/null; then
+            echo "::error::Tracked working-tree mutation or Git diff failure detected after offline verification."
+            exit 1
+          fi
+          if ! git diff --cached --quiet --no-ext-diff 2>/dev/null; then
+            echo "::error::Staged mutation or Git index check failure detected after offline verification."
+            exit 1
+          fi
+          if ! residue="$(git status --porcelain=v1 --untracked-files=all 2>/dev/null)"; then
+            echo "::error::Git status check failed after offline verification."
+            exit 1
+          fi
+          if [ -n "$residue" ]; then
+            echo "::error::Non-ignored repository residue detected after offline verification."
+            exit 1
+          fi
+
       - name: Upload advisory PR impact report
         if: always() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0

@@ -1,0 +1,953 @@
+# Build Tree Cleanliness Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
+> (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
+> checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Treat the pinned Next.js declaration bootstrap as generated output and make CI reject all
+tracked, staged, or non-ignored untracked repository residue after the offline gate.
+
+**Architecture:** Let pinned Next.js `16.2.11` own its mode-specific `next-env.d.ts`, generate route
+types explicitly before strict TypeScript checking, and keep the file outside version control.
+Protect that ownership boundary with a focused smoke contract and retain the CI-only full-tree
+cleanliness step after `pnpm verify:offline`. Use real Git operations to prove both the generated
+file boundary and the accepting and rejecting behavior of the enforcement commands. Keep the CI
+failure path quiet and fail-closed, and isolate executable Git fixtures from host configuration.
+
+**Tech Stack:** TypeScript `6.0.3`, Next.js `16.2.11`, Vitest `4.1.10`, pnpm `10.10.0`, Node.js
+`22.23.1`, GitHub Actions on `ubuntu-latest`, Git.
+
+## Global Constraints
+
+- Product authority remains `docs/specs/002-nextjs-openai-agent-demo/spec.md`.
+- Corrective authority is
+  `docs/superpowers/specs/2026-07-27-build-tree-cleanliness-design.md`.
+- Preserve strict TypeScript, ESM, Webpack build flags, runtime modes, API routes, deployment
+  behavior, and all DataHub, OpenAI, artifact, and security boundaries.
+- Keep ordinary local `pnpm build` and `pnpm verify:offline` entry points unchanged.
+- Keep strict TypeScript checking mandatory; `pnpm typecheck` must run `next typegen` before
+  `tsc --noEmit`.
+- Do not add dependencies or modify `pnpm-lock.yaml`.
+- Keep GitHub Actions permissions read-only, checkout credentials disabled, third-party actions
+  pinned to existing full commit SHAs, and installs frozen.
+- The CI gate must report residue without resetting, restoring, deleting, or modifying it.
+- The CI gate must suppress raw Git output, fail closed when a Git observation fails, and emit only
+  fixed repository-owned error messages.
+- Executable Git fixtures must disable system/global configuration and reject unexpected command
+  exit statuses.
+- Ignored `.next/`, `dist/`, Playwright, run, temporary, and local environment output must not cause
+  false failures.
+- Keep code, tests, documentation, commits, and repository artifacts in English.
+- Follow strict RED-GREEN TDD for every behavior change.
+
+## File Map
+
+- Delete tracked `next-env.d.ts` — return ownership of the mode-specific bootstrap to Next.js.
+- Modify `.gitignore` — ignore only the root generated `next-env.d.ts`.
+- Modify `package.json` — generate Next.js types before strict TypeScript checking.
+- Modify `tests/smoke/toolchain.test.ts` — protect generated-file ownership and typecheck order.
+- Create `tests/smoke/ci-tree-cleanliness.test.ts` — prove workflow wiring and positive/negative Git
+  cleanliness behavior with real temporary repositories.
+- Modify `.github/workflows/ci.yml` — run the full-tree cleanliness check after the offline gate.
+- Do not modify `pnpm-lock.yaml`, Next.js configuration, application runtime code, or product
+  documentation.
+
+---
+
+### Task 1: Make `next-env.d.ts` Stable Under the Pinned Build
+
+> **Historical implementation note:** Commit `fcee47a` implemented this task as originally
+> approved. Complete-branch verification then proved that `next dev` and `next build` generate
+> different route-type imports. Approved Amendment A1 supersedes this task with Task 4; do not
+> re-run or extend the canonical tracked-file approach.
+
+**Files:**
+
+- Modify: `tests/smoke/toolchain.test.ts`
+- Modify: `next-env.d.ts`
+
+**Interfaces:**
+
+- Consumes: pinned Next.js `16.2.11`, the existing `readFile` and `resolve` test utilities, and LF
+  enforcement from `.gitattributes`.
+- Produces: the exact `EXPECTED_NEXT_ENV_DECLARATION` smoke contract and a tracked declaration file
+  that Next.js no longer rewrites.
+
+- [ ] **Step 1: Write the failing canonical-declaration test**
+
+Add this constant near the existing test constants in `tests/smoke/toolchain.test.ts`:
+
+```ts
+const EXPECTED_NEXT_ENV_DECLARATION = [
+  '/// <reference types="next" />',
+  '/// <reference types="next/image-types/global" />',
+  'import "./.next/types/routes.d.ts";',
+  "",
+  "// NOTE: This file should not be edited",
+  "// see https://nextjs.org/docs/app/api-reference/config/typescript for more information.",
+  "",
+].join("\n");
+```
+
+Add this focused test inside `describe("toolchain", ...)`:
+
+```ts
+it("keeps the pinned Next.js declaration file canonical", async () => {
+  const declaration = await readFile(resolve(process.cwd(), "next-env.d.ts"), "utf8");
+
+  expect(declaration).toBe(EXPECTED_NEXT_ENV_DECLARATION);
+});
+```
+
+The production change that makes this test pass is replacing the current custom comment with the
+exact declaration generated by Next.js `16.2.11`.
+
+- [ ] **Step 2: Run the focused test and verify RED**
+
+Run:
+
+```powershell
+& .\node_modules\.bin\vitest.CMD run tests\smoke\toolchain.test.ts
+```
+
+Expected: FAIL only in `keeps the pinned Next.js declaration file canonical`; the diff shows the
+missing `.next/types/routes.d.ts` import and standard Next.js notice.
+
+- [ ] **Step 3: Apply the exact canonical declaration**
+
+Replace `next-env.d.ts` with:
+
+```ts
+/// <reference types="next" />
+/// <reference types="next/image-types/global" />
+import "./.next/types/routes.d.ts";
+
+// NOTE: This file should not be edited
+// see https://nextjs.org/docs/app/api-reference/config/typescript for more information.
+```
+
+Do not add a custom comment, generated timestamp, platform-specific path, or any additional
+declaration.
+
+- [ ] **Step 4: Run the focused test and verify GREEN**
+
+Run:
+
+```powershell
+& .\node_modules\.bin\vitest.CMD run tests\smoke\toolchain.test.ts
+```
+
+Expected: every test in `tests/smoke/toolchain.test.ts` passes.
+
+- [ ] **Step 5: Prove that a real production build preserves the file**
+
+Run:
+
+```powershell
+$before = git hash-object -- next-env.d.ts
+pnpm build
+if ($LASTEXITCODE -ne 0) {
+  throw "The production build failed with exit code $LASTEXITCODE."
+}
+$after = git hash-object -- next-env.d.ts
+if ($before -ne $after) {
+  throw "The production build mutated next-env.d.ts."
+}
+git diff --check
+```
+
+Expected: the CLI and Next.js production builds exit `0`; `$before` equals `$after`; the build does
+not rewrite `next-env.d.ts`; `git diff --check` exits `0`.
+
+- [ ] **Step 6: Inspect and commit the stable declaration**
+
+Run:
+
+```powershell
+git diff -- next-env.d.ts tests/smoke/toolchain.test.ts
+git status --short
+git add -- next-env.d.ts tests/smoke/toolchain.test.ts
+git diff --cached --check
+git commit -m "fix: stabilize Next.js type declarations"
+```
+
+Expected: the commit contains only the exact declaration replacement and its focused smoke
+contract.
+
+---
+
+### Task 2: Enforce Full Repository Cleanliness in CI
+
+**Files:**
+
+- Create: `tests/smoke/ci-tree-cleanliness.test.ts`
+- Modify: `.github/workflows/ci.yml`
+
+**Interfaces:**
+
+- Consumes: the existing clean GitHub Actions checkout, `pnpm verify:offline`, `.gitignore`, Git
+  porcelain status, and Git diff exit codes.
+- Produces: a CI step named `Verify repository remains clean` and executable positive/negative
+  coverage of the exact Git cleanliness semantics.
+
+- [ ] **Step 1: Write the failing workflow contract and executable gate tests**
+
+Create `tests/smoke/ci-tree-cleanliness.test.ts`:
+
+```ts
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+
+const CLEANLINESS_STEP = `      - name: Verify repository remains clean
+        shell: bash
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git status --porcelain --untracked-files=all)"
+`;
+
+const temporaryRepositories: string[] = [];
+
+function git(cwd: string, args: readonly string[]): SpawnSyncReturns<string> {
+  return spawnSync("git", [...args], {
+    cwd,
+    encoding: "utf8",
+    shell: false,
+    windowsHide: true,
+  });
+}
+
+function requireGitSuccess(result: SpawnSyncReturns<string>): void {
+  expect(result.status, `${result.stdout}${result.stderr}`).toBe(0);
+}
+
+async function createRepository(): Promise<string> {
+  const cwd = await mkdtemp(join(tmpdir(), "lineageguard-clean-tree-"));
+  temporaryRepositories.push(cwd);
+
+  requireGitSuccess(git(cwd, ["init"]));
+  await writeFile(join(cwd, ".gitignore"), ".next/\n", "utf8");
+  await writeFile(join(cwd, "tracked.txt"), "baseline\n", "utf8");
+  requireGitSuccess(git(cwd, ["add", "--", ".gitignore", "tracked.txt"]));
+  requireGitSuccess(
+    git(cwd, [
+      "-c",
+      "user.name=LineageGuard CI",
+      "-c",
+      "user.email=ci@lineageguard.invalid",
+      "commit",
+      "-m",
+      "baseline",
+    ]),
+  );
+
+  return cwd;
+}
+
+function treeIsClean(cwd: string): boolean {
+  const tracked = git(cwd, ["diff", "--exit-code"]);
+  const staged = git(cwd, ["diff", "--cached", "--exit-code"]);
+  const status = git(cwd, ["status", "--porcelain", "--untracked-files=all"]);
+
+  return tracked.status === 0 && staged.status === 0 && status.stdout.trim() === "";
+}
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryRepositories.splice(0).map((cwd) => rm(cwd, { force: true, recursive: true })),
+  );
+});
+
+describe("CI repository cleanliness gate", () => {
+  it("runs the full-tree gate after the offline validation gate", async () => {
+    const workflow = await readFile(resolve(process.cwd(), ".github/workflows/ci.yml"), "utf8");
+    const offlineGate = workflow.indexOf("      - name: Run offline validation gate");
+    const cleanlinessGate = workflow.indexOf("      - name: Verify repository remains clean");
+
+    expect(offlineGate).toBeGreaterThanOrEqual(0);
+    expect(cleanlinessGate).toBeGreaterThan(offlineGate);
+    expect(workflow).toContain(CLEANLINESS_STEP);
+  });
+
+  it("accepts a clean repository containing only ignored build output", async () => {
+    const cwd = await createRepository();
+    await mkdir(join(cwd, ".next"), { recursive: true });
+    await writeFile(join(cwd, ".next", "build-output"), "ignored\n", "utf8");
+
+    expect(treeIsClean(cwd)).toBe(true);
+  });
+
+  it.each([
+    [
+      "tracked mutation",
+      async (cwd: string) => {
+        await writeFile(join(cwd, "tracked.txt"), "mutated\n", "utf8");
+      },
+    ],
+    [
+      "staged mutation",
+      async (cwd: string) => {
+        await writeFile(join(cwd, "tracked.txt"), "staged\n", "utf8");
+        requireGitSuccess(git(cwd, ["add", "--", "tracked.txt"]));
+      },
+    ],
+    [
+      "non-ignored untracked residue",
+      async (cwd: string) => {
+        await writeFile(join(cwd, "unexpected.txt"), "residue\n", "utf8");
+      },
+    ],
+  ])("rejects %s", async (_name, mutate) => {
+    const cwd = await createRepository();
+    await mutate(cwd);
+
+    expect(treeIsClean(cwd)).toBe(false);
+  });
+});
+```
+
+Add `readFile` to the `node:fs/promises` import so the complete import becomes:
+
+```ts
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+```
+
+The production change that makes the failing workflow assertion pass is the exact CI step in Step 3. The remaining tests execute the same three Git observations against real repositories and prove
+the positive, tracked, staged, and untracked boundaries required by `AGENTS.md`.
+
+- [ ] **Step 2: Run the focused test and verify RED**
+
+Run:
+
+```powershell
+& .\node_modules\.bin\vitest.CMD run tests\smoke\ci-tree-cleanliness.test.ts
+```
+
+Expected: 1 test fails because `Verify repository remains clean` is absent; 4 tests pass, proving
+the clean, ignored-output, tracked, staged, and untracked Git semantics execute correctly.
+
+- [ ] **Step 3: Add the minimal CI-only cleanliness step**
+
+In `.github/workflows/ci.yml`, insert this block immediately after `Run offline validation gate` and
+before artifact upload steps:
+
+```yaml
+- name: Verify repository remains clean
+  shell: bash
+  run: |
+    git diff --exit-code
+    git diff --cached --exit-code
+    test -z "$(git status --porcelain --untracked-files=all)"
+```
+
+Do not add write permissions, credentials, third-party actions, cleanup commands, or a duplicate
+build.
+
+- [ ] **Step 4: Run the focused test and verify GREEN**
+
+Run:
+
+```powershell
+& .\node_modules\.bin\vitest.CMD run tests\smoke\ci-tree-cleanliness.test.ts
+```
+
+Expected: 5 tests pass.
+
+- [ ] **Step 5: Run affected smoke coverage**
+
+Run:
+
+```powershell
+& .\node_modules\.bin\vitest.CMD run tests\smoke\toolchain.test.ts tests\smoke\ci-tree-cleanliness.test.ts
+```
+
+Expected: both files pass; existing tests continue to prove `contents: read`,
+`persist-credentials: false`, `fetch-depth: 0`, immutable action pins, and the unchanged offline
+gate entry point.
+
+- [ ] **Step 6: Inspect and commit the CI enforcement**
+
+Run:
+
+```powershell
+git diff -- .github/workflows/ci.yml tests/smoke/ci-tree-cleanliness.test.ts
+git diff --check
+git status --short
+git add -- .github/workflows/ci.yml tests/smoke/ci-tree-cleanliness.test.ts
+git diff --cached --check
+git commit -m "ci: reject repository residue after verification"
+```
+
+Expected: the commit contains only the focused executable tests and the new read-only CI step.
+
+---
+
+### Task 4: Implement Amendment A1 for Framework-Owned Next.js Types
+
+> **Execution note:** The original Task 3 verification exposed the mode-specific generation
+> conflict and stopped at its review gate. Task 3 is superseded by this approved corrective task
+> and the new Task 5 verification.
+
+**Files:**
+
+- Modify: `tests/smoke/toolchain.test.ts`
+- Modify: `.gitignore`
+- Modify: `package.json`
+- Delete: `next-env.d.ts`
+
+**Interfaces:**
+
+- Consumes: pinned Next.js `16.2.11`, the existing `typecheck` entry point, Git ignore and tracked
+  file semantics, and the existing `tsconfig.json` includes for `next-env.d.ts` and
+  `.next/types/**/*.ts`.
+- Produces: an ignored, untracked root `next-env.d.ts`; a `typecheck` script that bootstraps route
+  declarations before strict checking; and focused regression coverage for both contracts.
+
+- [ ] **Step 1: Replace the obsolete canonical-content assertion with failing ownership tests**
+
+Remove `EXPECTED_NEXT_ENV_DECLARATION` and
+`keeps the pinned Next.js declaration file canonical` from
+`tests/smoke/toolchain.test.ts`.
+
+Add this helper after the existing test constants:
+
+```ts
+function git(args: readonly string[]) {
+  return spawnSync("git", [...args], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    shell: false,
+    windowsHide: true,
+  });
+}
+```
+
+Add these focused tests inside `describe("toolchain", ...)`:
+
+```ts
+it("keeps the generated Next.js declaration bootstrap outside version control", () => {
+  const ignored = git(["check-ignore", "--quiet", "--", "next-env.d.ts"]);
+  const tracked = git(["ls-files", "--error-unmatch", "--", "next-env.d.ts"]);
+
+  expect(ignored.status, `${ignored.stdout}${ignored.stderr}`).toBe(0);
+  expect(tracked.status, `${tracked.stdout}${tracked.stderr}`).toBe(1);
+});
+
+it("generates Next.js route types before strict TypeScript checking", async () => {
+  const packageJson = JSON.parse(
+    await readFile(resolve(process.cwd(), "package.json"), "utf8"),
+  ) as {
+    scripts: Record<string, string>;
+  };
+
+  expect(packageJson.scripts.typecheck).toBe("next typegen && tsc --noEmit");
+});
+```
+
+The first test catches either re-tracking the framework-owned file or removing its ignore rule.
+The second catches a clean-checkout typecheck that no longer generates Next.js route declarations
+before strict checking.
+
+- [ ] **Step 2: Run the focused test and verify RED**
+
+Run:
+
+```powershell
+& .\node_modules\.bin\vitest.CMD run tests\smoke\toolchain.test.ts
+```
+
+Expected: the generated-file ownership test fails because `next-env.d.ts` is tracked and not
+ignored, and the typecheck-order test fails because the current script is `tsc --noEmit`.
+
+- [ ] **Step 3: Apply the minimal generated-file ownership change**
+
+Add this exact root-only entry under `# Build and test output` in `.gitignore`:
+
+```gitignore
+/next-env.d.ts
+```
+
+Change only the existing `typecheck` script in `package.json`:
+
+```json
+"typecheck": "next typegen && tsc --noEmit"
+```
+
+Delete the tracked `next-env.d.ts`. Do not change `tsconfig.json`; Next.js regenerates the included
+file. Do not modify dependencies or `pnpm-lock.yaml`.
+
+- [ ] **Step 4: Run the focused test and verify GREEN**
+
+Run:
+
+```powershell
+& .\node_modules\.bin\vitest.CMD run tests\smoke\toolchain.test.ts
+```
+
+Expected: every test in `tests/smoke/toolchain.test.ts` passes.
+
+- [ ] **Step 5: Prove clean-checkout type generation and strict checking**
+
+Ensure the ignored file is absent, then run:
+
+```powershell
+if (Test-Path -LiteralPath .\next-env.d.ts) {
+  Remove-Item -LiteralPath .\next-env.d.ts
+}
+pnpm typecheck
+if ($LASTEXITCODE -ne 0) {
+  throw "Type checking failed with exit code $LASTEXITCODE."
+}
+if (-not (Test-Path -LiteralPath .\next-env.d.ts)) {
+  throw "Next.js did not generate next-env.d.ts."
+}
+git check-ignore --quiet -- next-env.d.ts
+if ($LASTEXITCODE -ne 0) {
+  throw "Generated next-env.d.ts is not ignored."
+}
+git ls-files --error-unmatch -- next-env.d.ts
+if ($LASTEXITCODE -eq 0) {
+  throw "Generated next-env.d.ts remains tracked."
+}
+git status --short --untracked-files=all
+```
+
+Expected: `next typegen` and `tsc --noEmit` exit `0`; Next.js regenerates the ignored file; Git
+does not track it; status reports no generated-file residue.
+
+- [ ] **Step 6: Run affected smoke coverage and commit Amendment A1**
+
+Run:
+
+```powershell
+& .\node_modules\.bin\vitest.CMD run tests\smoke\toolchain.test.ts tests\smoke\ci-tree-cleanliness.test.ts
+git diff --check
+git diff -- .gitignore package.json next-env.d.ts tests/smoke/toolchain.test.ts
+git status --short
+git add -- .gitignore package.json next-env.d.ts tests/smoke/toolchain.test.ts
+git diff --cached --check
+git commit -m "fix: treat Next.js type bootstrap as generated"
+```
+
+Expected: affected smoke coverage passes; the commit contains only the root ignore rule, typecheck
+bootstrap, tracked-file deletion, and focused regression tests; `pnpm-lock.yaml` remains unchanged.
+
+---
+
+### Task 5: Prove the Amended Complete Branch Contract
+
+> **Historical verification note:** Task 5 completed successfully before the final review approved
+> Amendment A2. Its original verbose local Git observations are superseded by the quiet fail-closed
+> commands below and by Tasks 6–7.
+
+**Files:**
+
+- Inspect: `.gitignore`
+- Inspect: `tests/smoke/toolchain.test.ts`
+- Inspect: `tests/smoke/ci-tree-cleanliness.test.ts`
+- Inspect: `.github/workflows/ci.yml`
+- Inspect: `package.json`
+- Inspect: `pnpm-lock.yaml`
+
+**Interfaces:**
+
+- Consumes: the three reviewed implementation commits and all existing repository gates.
+- Produces: fresh whole-branch evidence that verification leaves no non-ignored repository residue,
+  the CI contract is least-privileged, and no unrelated behavior or dependency changed.
+
+- [ ] **Step 1: Confirm the branch is clean before verification**
+
+Run:
+
+```powershell
+git status --short --untracked-files=all
+git diff --check
+```
+
+Expected: no status entries; `git diff --check` exits `0`.
+
+- [ ] **Step 2: Run the complete offline gate**
+
+Run:
+
+```powershell
+pnpm verify:offline
+```
+
+Expected: formatting, linting, strict type checking, offline Vitest, Render validation, CLI and
+Next.js production builds, runtime-mode integration, public REPLAY coverage, and Chromium
+acceptance all exit `0` without DataHub, OpenAI, or credentials.
+
+- [ ] **Step 3: Apply the same full-tree gate locally after verification**
+
+Run:
+
+```powershell
+git diff --quiet --no-ext-diff 2>$null
+if ($LASTEXITCODE -ne 0) {
+  throw "Tracked working-tree mutation or Git diff failure detected after offline verification."
+}
+git diff --cached --quiet --no-ext-diff 2>$null
+if ($LASTEXITCODE -ne 0) {
+  throw "Staged mutation or Git index check failure detected after offline verification."
+}
+$residue = @(git status --porcelain=v1 --untracked-files=all 2>$null)
+if ($LASTEXITCODE -ne 0) {
+  throw "Git status check failed after offline verification."
+}
+if ($residue.Count -ne 0) {
+  throw "Non-ignored repository residue detected after offline verification."
+}
+```
+
+Expected: both quiet diff commands and guarded status exit `0`; status is empty; no raw diff,
+status, path, or Git-error content is printed; mode-specific ignored `next-env.d.ts` generation
+creates no repository residue.
+
+- [ ] **Step 4: Run repository secret scans**
+
+Run:
+
+```powershell
+pnpm security:scan
+pnpm security:scan:history
+```
+
+Expected: both scans pass without printing or persisting credentials.
+
+- [ ] **Step 5: Inspect whole-branch scope and immutable CI pins**
+
+Run:
+
+```powershell
+git diff origin/main...HEAD --check
+git diff origin/main...HEAD --stat
+git diff origin/main...HEAD -- .gitignore package.json next-env.d.ts tests/smoke/toolchain.test.ts tests/smoke/ci-tree-cleanliness.test.ts .github/workflows/ci.yml
+git diff origin/main...HEAD -- package.json pnpm-lock.yaml next.config.ts
+git diff origin/main...HEAD -- .github/workflows/ci.yml
+git status -sb
+```
+
+Expected:
+
+- branch diff contains the approved specification, this plan, the two focused tests,
+  `.gitignore`, the `package.json` typecheck update, the `next-env.d.ts` deletion, and the CI
+  workflow only;
+- `pnpm-lock.yaml` and `next.config.ts` have no diff;
+- every existing third-party action remains pinned to its current full commit SHA;
+- workflow permissions remain `contents: read`;
+- checkout keeps `persist-credentials: false` and `fetch-depth: 0`;
+- no cleanup, reset, restore, dependency, runtime, product, deployment, DataHub, OpenAI, or artifact
+  change exists; and
+- the working tree is clean.
+
+- [ ] **Step 6: Request whole-branch review**
+
+Use `superpowers:requesting-code-review` against `origin/main...HEAD`. The reviewer must verify:
+
+- every acceptance criterion in
+  `docs/superpowers/specs/2026-07-27-build-tree-cleanliness-design.md`;
+- generated Next.js declaration ownership and clean-checkout type generation;
+- executable positive and negative enforcement coverage;
+- gate placement after the offline validation step;
+- unchanged local build and offline-verification entry points with mandatory strict type checking;
+- no weakened CI permissions or mutable action pin;
+- no unrelated diff.
+
+Expected: no Critical or Important findings. Correct any confirmed finding through a new RED-GREEN
+cycle and repeat the affected verification before publishing the branch.
+
+---
+
+### Task 6: Make the CI Failure Path Quiet and Fail-Closed
+
+> **Approved correction A2.1:** Next.js augments `NodeJS.ProcessEnv` with a required `NODE_ENV`.
+> The isolated fixture environment must set the fixed test-only value `NODE_ENV: "test"`; it must
+> not inherit the caller's value.
+
+**Files:**
+
+- Modify: `tests/smoke/ci-tree-cleanliness.test.ts`
+- Modify: `.github/workflows/ci.yml`
+
+**Interfaces:**
+
+- Consumes: the reviewed full-tree gate, Git diff/status exit semantics, GitHub Actions Bash, and
+  real temporary Git repositories.
+- Produces: a quiet CI gate that fails on residue or observation failure with fixed messages, plus
+  host-independent executable tests that distinguish expected dirty states from Git errors.
+
+- [ ] **Step 1: Write the failing Amendment A2 tests**
+
+Replace `CLEANLINESS_STEP` with the exact approved quiet block:
+
+```ts
+const CLEANLINESS_STEP = `      - name: Verify repository remains clean
+        shell: bash
+        run: |
+          if ! git diff --quiet --no-ext-diff 2>/dev/null; then
+            echo "::error::Tracked working-tree mutation or Git diff failure detected after offline verification."
+            exit 1
+          fi
+          if ! git diff --cached --quiet --no-ext-diff 2>/dev/null; then
+            echo "::error::Staged mutation or Git index check failure detected after offline verification."
+            exit 1
+          fi
+          if ! residue="$(git status --porcelain=v1 --untracked-files=all 2>/dev/null)"; then
+            echo "::error::Git status check failed after offline verification."
+            exit 1
+          fi
+          if [ -n "$residue" ]; then
+            echo "::error::Non-ignored repository residue detected after offline verification."
+            exit 1
+          fi
+`;
+```
+
+Rename `temporaryRepositories` to `temporaryPaths` so both repository and configuration fixture
+roots are cleaned by the existing `afterEach`.
+
+Add this negative inherited-configuration test:
+
+```ts
+it("does not let inherited global excludes hide repository residue", async () => {
+  const configurationRoot = await mkdtemp(join(tmpdir(), "lineageguard-git-config-"));
+  temporaryPaths.push(configurationRoot);
+  const excludesFile = join(configurationRoot, "global-excludes");
+  const globalConfig = join(configurationRoot, "global.gitconfig");
+  await writeFile(excludesFile, "unexpected.txt\n", "utf8");
+  await writeFile(
+    globalConfig,
+    `[core]\n\texcludesFile = "${excludesFile.replaceAll("\\", "/")}"\n`,
+    "utf8",
+  );
+
+  const previousGlobalConfig = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = globalConfig;
+  try {
+    const cwd = await createRepository();
+    await writeFile(join(cwd, "unexpected.txt"), "residue\n", "utf8");
+
+    expect(treeIsClean(cwd)).toBe(false);
+  } finally {
+    if (previousGlobalConfig === undefined) {
+      delete process.env.GIT_CONFIG_GLOBAL;
+    } else {
+      process.env.GIT_CONFIG_GLOBAL = previousGlobalConfig;
+    }
+  }
+});
+```
+
+Add this observation-failure test:
+
+```ts
+it("rejects an unexpected Git observation failure", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "lineageguard-not-a-repository-"));
+  temporaryPaths.push(cwd);
+
+  expect(() => treeIsClean(cwd)).toThrow("Git working-tree diff exited unexpectedly.");
+});
+```
+
+The workflow test must fail because CI still contains the verbose block. The inherited-config test
+must fail because the current helper inherits `GIT_CONFIG_GLOBAL`. The observation-failure test
+must fail because the current helper silently treats every nonzero diff status as ordinary residue.
+
+- [ ] **Step 2: Run focused RED**
+
+Run:
+
+```powershell
+& .\node_modules\.bin\vitest.CMD run tests\smoke\ci-tree-cleanliness.test.ts
+```
+
+Expected: exactly the three new Amendment A2 contracts fail for the reasons above; the existing
+positive and tracked/staged/untracked boundary cases continue to execute.
+
+- [ ] **Step 3: Isolate Git subprocesses and validate observation exit codes**
+
+Add this portable allowlist and environment builder before `git(...)`:
+
+```ts
+const PORTABLE_GIT_ENVIRONMENT_KEYS = [
+  "COMSPEC",
+  "HOME",
+  "PATH",
+  "PATHEXT",
+  "SYSTEMROOT",
+  "TEMP",
+  "TMP",
+  "USERPROFILE",
+  "WINDIR",
+] as const;
+
+function isolatedGitEnvironment(): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {
+    GIT_ATTR_NOSYSTEM: "1",
+    GIT_CONFIG_COUNT: "0",
+    GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_TERMINAL_PROMPT: "0",
+    NODE_ENV: "test",
+  };
+
+  for (const key of PORTABLE_GIT_ENVIRONMENT_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) {
+      environment[key] = value;
+    }
+  }
+
+  return environment;
+}
+```
+
+Pass `env: isolatedGitEnvironment()` to `spawnSync`.
+
+Add this exit validator:
+
+```ts
+function requireGitObservation(
+  result: SpawnSyncReturns<string>,
+  allowedStatuses: readonly number[],
+  operation: string,
+): void {
+  expect(result.error, `${operation} could not start.`).toBeUndefined();
+  expect(allowedStatuses, `${operation} exited unexpectedly.`).toContain(result.status);
+}
+```
+
+Change `treeIsClean` to use the same quiet observations as CI and reject unexpected statuses:
+
+```ts
+function treeIsClean(cwd: string): boolean {
+  const tracked = git(cwd, ["diff", "--quiet", "--no-ext-diff"]);
+  const staged = git(cwd, ["diff", "--cached", "--quiet", "--no-ext-diff"]);
+  const status = git(cwd, ["status", "--porcelain=v1", "--untracked-files=all"]);
+
+  requireGitObservation(tracked, [0, 1], "Git working-tree diff");
+  requireGitObservation(staged, [0, 1], "Git staged diff");
+  requireGitObservation(status, [0], "Git status");
+
+  return tracked.status === 0 && staged.status === 0 && status.stdout === "";
+}
+```
+
+Keep `requireGitSuccess` for setup commands. Do not pass inherited `GIT_*` override variables,
+global/system configuration, hooks, signing configuration, or global excludes into fixture Git
+processes.
+
+- [ ] **Step 4: Apply the exact quiet workflow block**
+
+Replace only the body of `Verify repository remains clean` in `.github/workflows/ci.yml` with:
+
+```yaml
+if ! git diff --quiet --no-ext-diff 2>/dev/null; then
+echo "::error::Tracked working-tree mutation or Git diff failure detected after offline verification."
+exit 1
+fi
+if ! git diff --cached --quiet --no-ext-diff 2>/dev/null; then
+echo "::error::Staged mutation or Git index check failure detected after offline verification."
+exit 1
+fi
+if ! residue="$(git status --porcelain=v1 --untracked-files=all 2>/dev/null)"; then
+echo "::error::Git status check failed after offline verification."
+exit 1
+fi
+if [ -n "$residue" ]; then
+echo "::error::Non-ignored repository residue detected after offline verification."
+exit 1
+fi
+```
+
+Do not print `$residue`, raw diff output, raw Git errors, or file names. Do not add cleanup,
+permissions, credentials, actions, or dependencies.
+
+- [ ] **Step 5: Run GREEN and affected smoke coverage**
+
+Run:
+
+```powershell
+& .\node_modules\.bin\vitest.CMD run tests\smoke\ci-tree-cleanliness.test.ts
+& .\node_modules\.bin\vitest.CMD run tests\smoke\toolchain.test.ts tests\smoke\ci-tree-cleanliness.test.ts
+```
+
+Expected: the CI cleanliness file passes 7/7 tests and affected smoke coverage passes 36/36.
+
+- [ ] **Step 6: Inspect and commit the consolidated final-review fix**
+
+Run:
+
+```powershell
+git diff --check
+git diff -- .github/workflows/ci.yml tests/smoke/ci-tree-cleanliness.test.ts
+git status --short
+git add -- .github/workflows/ci.yml tests/smoke/ci-tree-cleanliness.test.ts
+git diff --cached --check
+git commit -m "ci: make cleanliness gate fail closed"
+```
+
+Expected: one implementation commit contains only the quiet workflow and deterministic executable
+test changes. Authority-document changes remain in their preceding amendment commit.
+
+---
+
+### Task 7: Re-Review and Verify Amendment A2
+
+**Files:**
+
+- Inspect: `.github/workflows/ci.yml`
+- Inspect: `tests/smoke/ci-tree-cleanliness.test.ts`
+- Inspect: `docs/superpowers/specs/2026-07-27-build-tree-cleanliness-design.md`
+- Inspect: `docs/superpowers/plans/2026-07-27-build-tree-cleanliness.md`
+
+**Interfaces:**
+
+- Consumes: the single consolidated Task 6 fix commit and the final-review findings.
+- Produces: one scoped re-review and fresh whole-branch evidence for the final corrected HEAD.
+
+- [ ] **Step 1: Run the required scoped re-review**
+
+Generate the review package from the pre-A2 final-review head through the Task 6 head. The
+re-reviewer must verdict both original Important findings:
+
+1. CI failure output is quiet and fixed, and Git observation failure is fail-closed.
+2. Executable Git fixtures ignore system/global configuration and reject unexpected exit codes.
+
+Expected: both findings are `ADDRESSED` with no new Critical or Important breakage.
+
+- [ ] **Step 2: Run the complete offline gate**
+
+Run:
+
+```powershell
+pnpm verify:offline
+```
+
+Expected: all formatting, lint, strict typecheck, 1,699-or-more offline tests, build, runtime-mode,
+public replay, and Chromium acceptance stages exit `0`.
+
+- [ ] **Step 3: Apply the quiet post-gate observations**
+
+Run the amended PowerShell commands from Task 5 Step 3.
+
+Expected: every Git observation exits `0`, status is empty, and no raw repository content is
+printed.
+
+- [ ] **Step 4: Run security and final scope checks**
+
+Run:
+
+```powershell
+pnpm security:scan
+pnpm security:scan:history
+git diff origin/main...HEAD --check
+git diff --exit-code origin/main...HEAD -- pnpm-lock.yaml next.config.ts tsconfig.json
+git status --short --untracked-files=all
+```
+
+Expected: both secret scans pass; branch diff and immutable-file checks exit `0`; status is empty.
