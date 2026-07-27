@@ -130,6 +130,34 @@ const unsafePublicDeploymentDisclosurePatterns = [
   /(?:^|[\s("'`])\/(?:[A-Za-z0-9._-]+\/)+[A-Za-z0-9._-]+/mu,
 ] as const;
 
+const canonicalPublicDeploymentVerification = [
+  "# Public Deployment Verification",
+  "",
+  "Status: PASSED",
+  "Mode: PUBLIC_REPLAY",
+  "Access: No login, DataHub, OpenAI, API key, or paid account required",
+  "Storage: Ephemeral runs; rerun the deterministic replay after restart",
+  `Project URL: ${publicProjectUrl}`,
+  `Reviewed runtime commit: ${reviewedRuntimeCommit}`,
+  "Verified date (UTC): 2026-07-27T05:42:44Z",
+  "Verified date (Europe/Kyiv): 2026-07-27T08:42:44+03:00",
+  "",
+  "## Sanitized Acceptance Evidence",
+  "",
+  "| Check | Evidence | Outcome |",
+  "| --- | --- | --- |",
+  "| Health | The public replay health endpoint was reachable. | PASSED |",
+  "| Private-browser access | The replay opened without a login, provider credential, or paid account. | PASSED |",
+  "| Golden result | 24 / 11 / 90; BLOCK_DIRECT_RENAME | PASSED |",
+  "| Four artifacts | All four allowlisted artifacts were available through the replay. | PASSED |",
+  "| Headers | Required cache and browser-security headers were present. | PASSED |",
+  "| Console | The browser console had no errors or warnings. | PASSED |",
+  `| Request host | ${publicProjectUrl} | PASSED |`,
+  "",
+  "The visible mode is Public fixture replay. No DataHub or OpenAI credentials are used. Ephemeral",
+  "runs are expected; rerun the deterministic replay if a restart removes a run.",
+].join("\n");
+
 const requiredReadmePublicReplayGuidance = [
   publicProjectUrl,
   "approximately one minute",
@@ -1008,6 +1036,26 @@ export function validateDemoScenario(markdown: string): string[] {
   return findings;
 }
 
+function normalizePublicDeploymentVerification(markdown: string): string {
+  return markdown
+    .replace(/\r\n?/gu, "\n")
+    .trimEnd()
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("|") || !trimmed.endsWith("|")) return line.trimEnd();
+      const cells = trimmed
+        .slice(1, -1)
+        .split("|")
+        .map((cell) => cell.trim());
+      if (cells.every((cell) => /^:?-{3,}:?$/u.test(cell))) {
+        return `| ${cells.map(() => "---").join(" | ")} |`;
+      }
+      return `| ${cells.join(" | ")} |`;
+    })
+    .join("\n");
+}
+
 function validatePublicDeploymentDocumentation(files: ReadonlyMap<string, string>): string[] {
   const verification = files.get("docs/public-deployment-verification.md") ?? "";
   const readme = files.get("README.md") ?? "";
@@ -1015,6 +1063,12 @@ function validatePublicDeploymentDocumentation(files: ReadonlyMap<string, string
   const judgingMap = files.get("docs/judging-map.md") ?? "";
   const evidenceRows = parseMarkdownTableRows(verification);
   const findings: string[] = [];
+
+  if (
+    normalizePublicDeploymentVerification(verification) !== canonicalPublicDeploymentVerification
+  ) {
+    findings.push("invalid public deployment verification structure");
+  }
 
   for (const marker of requiredPublicDeploymentEvidence) {
     if (!verification.includes(marker)) {

@@ -83,7 +83,8 @@ Verified date (Europe/Kyiv): 2026-07-27T08:42:44+03:00
 | Console | The browser console had no errors or warnings. | PASSED |
 | Request host | ${publicProjectUrl} | PASSED |
 
-Public fixture replay. No DataHub or OpenAI credentials. Ephemeral runs.
+The visible mode is Public fixture replay. No DataHub or OpenAI credentials are used. Ephemeral
+runs are expected; rerun the deterministic replay if a restart removes a run.
 `;
 
 async function validateWithPublicDeploymentMutation(
@@ -186,6 +187,17 @@ it("rejects the legacy two-cell public deployment evidence table", async () => {
   );
   expect(findings).toContain("missing public deployment evidence row: Golden result");
   expect(findings).toContain("missing public deployment evidence row: Request host");
+});
+
+it.each([
+  "2026-07-27T05:42:44Z GET /api/health 200",
+  "request=golden-replay status=200 duration=12ms",
+  "## Unexpected Evidence\nThis line is not part of the approved verification record.",
+] as const)("rejects an unexpected public-deployment line: %s", async (unexpectedLine) => {
+  const findings = await validateWithPublicDeploymentMutation(
+    (content) => `${content}\n${unexpectedLine}\n`,
+  );
+  expect(findings).toContain("invalid public deployment verification structure");
 });
 
 it.each([
