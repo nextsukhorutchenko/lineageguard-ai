@@ -21,24 +21,205 @@ const REQUIRED_HEADERS = {
   "x-frame-options": "DENY",
 } as const;
 const MAX_DOWNLOAD_BYTES = 524_288;
+const MAX_BROWSER_OBSERVATIONS = 256;
+type RequestAudit = {
+  readonly sameOrigin: boolean;
+  readonly hasUrlCredentials: boolean;
+  readonly hasSecretQueryParameterName: boolean;
+  readonly hasCredentialHeaderName: boolean;
+};
 
-function captureBrowserSafety(page: Page): {
-  readonly consoleErrors: string[];
-  readonly consoleWarnings: string[];
-  readonly pageErrors: string[];
-  readonly requests: string[];
-} {
-  const consoleErrors: string[] = [];
-  const consoleWarnings: string[] = [];
-  const pageErrors: string[] = [];
-  const requests: string[] = [];
-  page.on("console", (message) => {
-    if (message.type() === "error") consoleErrors.push("error");
-    if (message.type() === "warning") consoleWarnings.push("warning");
+type BrowserSafety = {
+  consoleErrorCount: number;
+  consoleWarningCount: number;
+  pageErrorCount: number;
+  requestCount: number;
+  observationLimitExceeded: boolean;
+  allRequestsSameOrigin: boolean;
+  hasUrlCredentials: boolean;
+  hasSecretQueryParameterName: boolean;
+  hasCredentialHeaderName: boolean;
+};
+
+function normalizeCredentialName(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/gu, "");
+}
+
+function isSecretQueryParameterName(value: string): boolean {
+  const normalized = normalizeCredentialName(value);
+  return (
+    new Set([
+      "auth",
+      "authorization",
+      "credential",
+      "credentials",
+      "key",
+      "password",
+      "passwd",
+      "pwd",
+      "secret",
+      "signature",
+      "token",
+    ]).has(normalized) ||
+    /(?:apikey|accesskey|privatekey|secret|token|password|passwd|credential|authorization|signature)/u.test(
+      normalized,
+    )
+  );
+}
+
+function isCredentialHeaderName(value: string): boolean {
+  const normalized = normalizeCredentialName(value);
+  return (
+    new Set(["authorization", "cookie", "proxyauthorization"]).has(normalized) ||
+    /api(?:key|token|secret)/u.test(normalized)
+  );
+}
+
+function classifyRequestMetadata(input: {
+  readonly requestUrl: string;
+  readonly headerNames: readonly string[];
+  readonly expectedOrigin: string;
+}): RequestAudit {
+  try {
+    const url = new URL(input.requestUrl);
+    return {
+      sameOrigin: url.origin === input.expectedOrigin,
+      hasUrlCredentials: url.username !== "" || url.password !== "",
+      hasSecretQueryParameterName: [...url.searchParams.keys()].some((name) =>
+        isSecretQueryParameterName(name),
+      ),
+      hasCredentialHeaderName: input.headerNames.some((name) => isCredentialHeaderName(name)),
+    };
+  } catch {
+    return {
+      sameOrigin: false,
+      hasUrlCredentials: false,
+      hasSecretQueryParameterName: false,
+      hasCredentialHeaderName: false,
+    };
+  }
+}
+
+function requireRequestAuditContract(condition: boolean): void {
+  if (!condition) throw new Error("Remote request audit classifier contract failed.");
+}
+
+function assertRequestAuditClassifierContract(): void {
+  const expectedOrigin = "https://public-replay.example.test";
+  const safe = classifyRequestMetadata({
+    requestUrl: `${expectedOrigin}/api/runs?_rsc=fixture`,
+    headerNames: ["accept", "content-type"],
+    expectedOrigin,
   });
-  page.on("pageerror", () => pageErrors.push("pageerror"));
-  page.on("request", (request) => requests.push(request.url()));
-  return { consoleErrors, consoleWarnings, pageErrors, requests };
+  requireRequestAuditContract(
+    safe.sameOrigin &&
+      !safe.hasUrlCredentials &&
+      !safe.hasSecretQueryParameterName &&
+      !safe.hasCredentialHeaderName,
+  );
+
+  const credentialUrl = new URL(expectedOrigin);
+  credentialUrl.username = "user";
+  credentialUrl.password = "value";
+  requireRequestAuditContract(
+    classifyRequestMetadata({
+      requestUrl: credentialUrl.href,
+      headerNames: [],
+      expectedOrigin,
+    }).hasUrlCredentials,
+  );
+
+  for (const queryName of ["api_key", "access-token", "client.secret"]) {
+    const url = new URL(expectedOrigin);
+    url.searchParams.set(queryName, "");
+    requireRequestAuditContract(
+      classifyRequestMetadata({
+        requestUrl: url.href,
+        headerNames: [],
+        expectedOrigin,
+      }).hasSecretQueryParameterName,
+    );
+  }
+
+  for (const headerName of [
+    "Authorization",
+    "Cookie",
+    "Proxy-Authorization",
+    "X-API-Key",
+    "X-Provider-Api-Key",
+  ]) {
+    requireRequestAuditContract(
+      classifyRequestMetadata({
+        requestUrl: expectedOrigin,
+        headerNames: [headerName],
+        expectedOrigin,
+      }).hasCredentialHeaderName,
+    );
+  }
+
+  requireRequestAuditContract(
+    !classifyRequestMetadata({
+      requestUrl: "https://foreign.example.test/",
+      headerNames: [],
+      expectedOrigin,
+    }).sameOrigin,
+  );
+  requireRequestAuditContract(
+    !classifyRequestMetadata({
+      requestUrl: "not a URL",
+      headerNames: [],
+      expectedOrigin,
+    }).sameOrigin,
+  );
+}
+
+assertRequestAuditClassifierContract();
+
+function captureBrowserSafety(page: Page, expectedOrigin: string): BrowserSafety {
+  const safety: BrowserSafety = {
+    consoleErrorCount: 0,
+    consoleWarningCount: 0,
+    pageErrorCount: 0,
+    requestCount: 0,
+    observationLimitExceeded: false,
+    allRequestsSameOrigin: true,
+    hasUrlCredentials: false,
+    hasSecretQueryParameterName: false,
+    hasCredentialHeaderName: false,
+  };
+  let observationCount = 0;
+  const admitObservation = (): boolean => {
+    if (observationCount >= MAX_BROWSER_OBSERVATIONS) {
+      safety.observationLimitExceeded = true;
+      return false;
+    }
+    observationCount += 1;
+    return true;
+  };
+  page.on("console", (message) => {
+    if (message.type() === "error" && admitObservation()) safety.consoleErrorCount += 1;
+    if (message.type() === "warning" && admitObservation()) safety.consoleWarningCount += 1;
+  });
+  page.on("pageerror", () => {
+    if (admitObservation()) safety.pageErrorCount += 1;
+  });
+  page.on("request", (request) => {
+    if (!admitObservation()) return;
+    safety.requestCount += 1;
+    const audit = classifyRequestMetadata({
+      requestUrl: request.url(),
+      headerNames: Object.keys(request.headers()),
+      expectedOrigin,
+    });
+    safety.allRequestsSameOrigin &&= audit.sameOrigin;
+    safety.hasUrlCredentials ||= audit.hasUrlCredentials;
+    safety.hasSecretQueryParameterName ||= audit.hasSecretQueryParameterName;
+    safety.hasCredentialHeaderName ||= audit.hasCredentialHeaderName;
+  });
+  return safety;
 }
 
 async function expectRequiredHeaders(response: Response): Promise<void> {
@@ -105,11 +286,13 @@ async function expectGoldenResult(page: Page): Promise<void> {
   await expect(page.getByRole("tabpanel")).toContainText("**Decision:** BLOCK_DIRECT_RENAME");
 }
 
-test("proves the opt-in public Render deployment", async ({ baseURL, page }) => {
+test("proves the opt-in public Render deployment", async ({ baseURL, context, page }) => {
   if (baseURL === undefined) throw new Error("The public deployment URL is unavailable.");
   const expectedOrigin = new URL(baseURL).origin;
-  const expectedHost = new URL(baseURL).host;
-  const safety = captureBrowserSafety(page);
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: expectedOrigin,
+  });
+  const safety = captureBrowserSafety(page, expectedOrigin);
   const artifactResponses: Response[] = [];
   page.on("response", (response) => {
     if (new URL(response.url()).pathname.includes("/artifacts/")) {
@@ -177,6 +360,22 @@ test("proves the opt-in public Render deployment", async ({ baseURL, page }) => 
     await expect(panel).not.toHaveText("Loading artifact…");
     const preview = await panel.textContent();
     expect(preview).not.toBeNull();
+    await page.getByRole("button", { name: "Copy" }).click();
+    await expect(page.getByRole("status")).toHaveText("Artifact copied.");
+    await expect
+      .poll(
+        () =>
+          page.evaluate(async () => {
+            const activePanel = document.querySelector<HTMLElement>(
+              '[role="tabpanel"]:not([hidden])',
+            );
+            const expectedPreview = activePanel?.textContent;
+            if (expectedPreview === undefined || expectedPreview === null) return false;
+            return (await navigator.clipboard.readText()) === expectedPreview;
+          }),
+        { message: "Clipboard content must equal the active validated preview." },
+      )
+      .toBe(true);
     const expectedPath = `/api/runs/${runId}/artifacts/${filename}`;
     const matchingResponse = await page.request.get(expectedPath);
     const matchingUrl = new URL(matchingResponse.url());
@@ -191,17 +390,17 @@ test("proves the opt-in public Render deployment", async ({ baseURL, page }) => 
     expect(downloadUrl.pathname).toBe(expectedPath);
     expect(download.suggestedFilename()).toBe(filename);
     const content = await readDownloadedUtf8(download);
-    expect(content).toBe(preview);
-    expect(content).not.toMatch(/[A-Za-z]:\\/u);
+    expect(content === preview).toBe(true);
+    expect(/[A-Za-z]:\\/u.test(content)).toBe(false);
   }
 
-  expect(safety.consoleErrors).toEqual([]);
-  expect(safety.consoleWarnings).toEqual([]);
-  expect(safety.pageErrors).toEqual([]);
-  expect(safety.requests.length).toBeGreaterThan(0);
-  for (const requestUrl of safety.requests) {
-    const request = new URL(requestUrl);
-    expect(request.host).toBe(expectedHost);
-    expect(request.origin).toBe(expectedOrigin);
-  }
+  expect(safety.consoleErrorCount).toBe(0);
+  expect(safety.consoleWarningCount).toBe(0);
+  expect(safety.pageErrorCount).toBe(0);
+  expect(safety.requestCount).toBeGreaterThan(0);
+  expect(safety.observationLimitExceeded).toBe(false);
+  expect(safety.allRequestsSameOrigin).toBe(true);
+  expect(safety.hasUrlCredentials).toBe(false);
+  expect(safety.hasSecretQueryParameterName).toBe(false);
+  expect(safety.hasCredentialHeaderName).toBe(false);
 });
