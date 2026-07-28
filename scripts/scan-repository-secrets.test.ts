@@ -16,6 +16,7 @@ const execFileAsync = promisify(execFile);
 const scannerPath = fileURLToPath(new URL("./scan-repository-secrets.ts", import.meta.url));
 const tsxCliPath = fileURLToPath(import.meta.resolve("tsx/cli"));
 const temporaryRoots: string[] = [];
+const GIT_HEAVY_TEST_TIMEOUT_MS = 30_000;
 
 async function git(root: string, ...args: readonly string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", ["-C", root, ...args], {
@@ -93,28 +94,32 @@ afterEach(async () => {
   );
 });
 
-it("detects every realistic credential class in tracked source without echoing values", async () => {
-  const root = await createRepository();
-  const values = [
-    openAiToken(),
-    githubToken(),
-    dataHubJwt(),
-    bearerCredential(),
-    privateKeyBlock(),
-  ];
-  await writeRepositoryFile(root, "src/leaks.txt", values.join("\n"));
-  await commitAll(root, "test: add detector fixture");
+it(
+  "detects every realistic credential class in tracked source without echoing values",
+  async () => {
+    const root = await createRepository();
+    const values = [
+      openAiToken(),
+      githubToken(),
+      dataHubJwt(),
+      bearerCredential(),
+      privateKeyBlock(),
+    ];
+    await writeRepositoryFile(root, "src/leaks.txt", values.join("\n"));
+    await commitAll(root, "test: add detector fixture");
 
-  const findings = await scanRepositorySecrets(root);
-  expect(findings).toEqual([
-    "working-tree:src/leaks.txt:1:openai-token",
-    "working-tree:src/leaks.txt:2:github-token",
-    "working-tree:src/leaks.txt:3:datahub-jwt",
-    "working-tree:src/leaks.txt:4:bearer-credential",
-    "working-tree:src/leaks.txt:5:private-key",
-  ]);
-  for (const value of values) expect(findings.join("\n")).not.toContain(value);
-});
+    const findings = await scanRepositorySecrets(root);
+    expect(findings).toEqual([
+      "working-tree:src/leaks.txt:1:openai-token",
+      "working-tree:src/leaks.txt:2:github-token",
+      "working-tree:src/leaks.txt:3:datahub-jwt",
+      "working-tree:src/leaks.txt:4:bearer-credential",
+      "working-tree:src/leaks.txt:5:private-key",
+    ]);
+    for (const value of values) expect(findings.join("\n")).not.toContain(value);
+  },
+  GIT_HEAVY_TEST_TIMEOUT_MS,
+);
 
 it.each([
   ["single-body-line", ["I".repeat(64)]],
@@ -128,104 +133,124 @@ it.each([
   );
 });
 
-it("detects a not-ignored untracked file without printing its value or native root", async () => {
-  const root = await createRepository();
-  const token = githubToken();
-  await writeRepositoryFile(root, "scratch/leak.txt", token);
+it(
+  "detects a not-ignored untracked file without printing its value or native root",
+  async () => {
+    const root = await createRepository();
+    const token = githubToken();
+    await writeRepositoryFile(root, "scratch/leak.txt", token);
 
-  await expect(scanRepositorySecrets(root)).resolves.toEqual([
-    "working-tree:scratch/leak.txt:1:github-token",
-  ]);
-  const result = spawnScanner(root, []);
-  expect(result.status).toBe(1);
-  expect(result.stdout).toBe("");
-  expect(result.stderr).toBe("working-tree:scratch/leak.txt:1:github-token\n");
-  expect(result.stderr).not.toContain(token);
-  expect(result.stderr).not.toContain(root);
-});
+    await expect(scanRepositorySecrets(root)).resolves.toEqual([
+      "working-tree:scratch/leak.txt:1:github-token",
+    ]);
+    const result = spawnScanner(root, []);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("working-tree:scratch/leak.txt:1:github-token\n");
+    expect(result.stderr).not.toContain(token);
+    expect(result.stderr).not.toContain(root);
+  },
+  GIT_HEAVY_TEST_TIMEOUT_MS,
+);
 
-it("finds a removed credential in synthetic history and still scans the clean tree", async () => {
-  const root = await createRepository();
-  const token = dataHubJwt();
-  await writeRepositoryFile(root, "src/history.txt", `${token}\n`);
-  const secretCommit = await commitAll(root, "test: add historical fixture");
-  await writeRepositoryFile(root, "src/history.txt", "removed\n");
-  await commitAll(root, "test: remove historical fixture");
+it(
+  "finds a removed credential in synthetic history and still scans the clean tree",
+  async () => {
+    const root = await createRepository();
+    const token = dataHubJwt();
+    await writeRepositoryFile(root, "src/history.txt", `${token}\n`);
+    const secretCommit = await commitAll(root, "test: add historical fixture");
+    await writeRepositoryFile(root, "src/history.txt", "removed\n");
+    await commitAll(root, "test: remove historical fixture");
 
-  await expect(scanRepositorySecrets(root)).resolves.toEqual([]);
-  const findings = await scanRepositorySecrets(root, { history: true });
-  expect(findings).toContain(`history:${secretCommit}:datahub-jwt`);
-  expect(findings.join("\n")).not.toContain(token);
+    await expect(scanRepositorySecrets(root)).resolves.toEqual([]);
+    const findings = await scanRepositorySecrets(root, { history: true });
+    expect(findings).toContain(`history:${secretCommit}:datahub-jwt`);
+    expect(findings.join("\n")).not.toContain(token);
 
-  const result = spawnScanner(root, ["--history"]);
-  expect(result.status).toBe(1);
-  expect(result.stderr).toContain(`history:${secretCommit}:datahub-jwt`);
-  expect(result.stderr).not.toContain(token);
-  expect(result.stderr).not.toContain(root);
-}, 10_000);
+    const result = spawnScanner(root, ["--history"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`history:${secretCommit}:datahub-jwt`);
+    expect(result.stderr).not.toContain(token);
+    expect(result.stderr).not.toContain(root);
+  },
+  GIT_HEAVY_TEST_TIMEOUT_MS,
+);
 
-it("scans root commits reachable only from alternate refs", async () => {
-  const root = await createRepository();
-  const alternateRoot = await mkdtemp(join(tmpdir(), "lineageguard-secret-root-"));
-  temporaryRoots.push(alternateRoot);
-  await git(alternateRoot, "init", "-b", "alternate");
-  await git(alternateRoot, "config", "user.name", "LineageGuard Test");
-  await git(alternateRoot, "config", "user.email", "lineageguard@example.invalid");
-  const token = dataHubJwt();
-  await writeRepositoryFile(alternateRoot, "root-secret.txt", `${token}\n`);
-  await git(alternateRoot, "add", "--all");
-  await git(alternateRoot, "commit", "-m", "test: add alternate root fixture");
-  const secretCommit = await git(alternateRoot, "rev-parse", "HEAD");
-  await git(root, "fetch", alternateRoot, "HEAD:refs/heads/alternate-secret");
+it(
+  "scans root commits reachable only from alternate refs",
+  async () => {
+    const root = await createRepository();
+    const alternateRoot = await mkdtemp(join(tmpdir(), "lineageguard-secret-root-"));
+    temporaryRoots.push(alternateRoot);
+    await git(alternateRoot, "init", "-b", "alternate");
+    await git(alternateRoot, "config", "user.name", "LineageGuard Test");
+    await git(alternateRoot, "config", "user.email", "lineageguard@example.invalid");
+    const token = dataHubJwt();
+    await writeRepositoryFile(alternateRoot, "root-secret.txt", `${token}\n`);
+    await git(alternateRoot, "add", "--all");
+    await git(alternateRoot, "commit", "-m", "test: add alternate root fixture");
+    const secretCommit = await git(alternateRoot, "rev-parse", "HEAD");
+    await git(root, "fetch", alternateRoot, "HEAD:refs/heads/alternate-secret");
 
-  await expect(scanRepositorySecrets(root)).resolves.toEqual([]);
-  const findings = await scanRepositorySecrets(root, { history: true });
-  expect(findings).toContain(`history:${secretCommit}:datahub-jwt`);
-  expect(findings.join("\n")).not.toContain(token);
-}, 10_000);
+    await expect(scanRepositorySecrets(root)).resolves.toEqual([]);
+    const findings = await scanRepositorySecrets(root, { history: true });
+    expect(findings).toContain(`history:${secretCommit}:datahub-jwt`);
+    expect(findings.join("\n")).not.toContain(token);
+  },
+  GIT_HEAVY_TEST_TIMEOUT_MS,
+);
 
-it("disables textconv filters while scanning history", async () => {
-  const root = await createRepository();
-  const textconvScript = join(root, ".git", "safe-textconv.mjs");
-  await writeFile(textconvScript, 'process.stdout.write("safe textconv output\\n");\n', "utf8");
-  const nodePath = process.execPath.replaceAll("\\", "/");
-  const scriptPath = textconvScript.replaceAll("\\", "/");
-  await git(root, "config", "diff.suppress.textconv", `"${nodePath}" "${scriptPath}"`);
-  await writeRepositoryFile(root, ".gitattributes", "*.secret diff=suppress\n");
-  await commitAll(root, "test: configure textconv fixture");
+it(
+  "disables textconv filters while scanning history",
+  async () => {
+    const root = await createRepository();
+    const textconvScript = join(root, ".git", "safe-textconv.mjs");
+    await writeFile(textconvScript, 'process.stdout.write("safe textconv output\\n");\n', "utf8");
+    const nodePath = process.execPath.replaceAll("\\", "/");
+    const scriptPath = textconvScript.replaceAll("\\", "/");
+    await git(root, "config", "diff.suppress.textconv", `"${nodePath}" "${scriptPath}"`);
+    await writeRepositoryFile(root, ".gitattributes", "*.secret diff=suppress\n");
+    await commitAll(root, "test: configure textconv fixture");
 
-  const token = dataHubJwt();
-  await writeRepositoryFile(root, "src/filtered.secret", `${token}\n`);
-  const secretCommit = await commitAll(root, "test: add filtered historical fixture");
-  await writeRepositoryFile(root, "src/filtered.secret", "removed\n");
-  await commitAll(root, "test: remove filtered historical fixture");
+    const token = dataHubJwt();
+    await writeRepositoryFile(root, "src/filtered.secret", `${token}\n`);
+    const secretCommit = await commitAll(root, "test: add filtered historical fixture");
+    await writeRepositoryFile(root, "src/filtered.secret", "removed\n");
+    await commitAll(root, "test: remove filtered historical fixture");
 
-  await expect(scanRepositorySecrets(root)).resolves.toEqual([]);
-  const findings = await scanRepositorySecrets(root, { history: true });
-  expect(findings).toContain(`history:${secretCommit}:datahub-jwt`);
-  expect(findings.join("\n")).not.toContain(token);
-}, 10_000);
+    await expect(scanRepositorySecrets(root)).resolves.toEqual([]);
+    const findings = await scanRepositorySecrets(root, { history: true });
+    expect(findings).toContain(`history:${secretCommit}:datahub-jwt`);
+    expect(findings.join("\n")).not.toContain(token);
+  },
+  GIT_HEAVY_TEST_TIMEOUT_MS,
+);
 
-it("finds a removed credential when Git color is forced on", async () => {
-  const root = await createRepository();
-  await git(root, "config", "color.ui", "always");
-  const token = dataHubJwt();
-  await writeRepositoryFile(root, "src/colored-history.txt", `${token}\n`);
-  const secretCommit = await commitAll(root, "test: add colored historical fixture");
-  await writeRepositoryFile(root, "src/colored-history.txt", "removed\n");
-  await commitAll(root, "test: remove colored historical fixture");
+it(
+  "finds a removed credential when Git color is forced on",
+  async () => {
+    const root = await createRepository();
+    await git(root, "config", "color.ui", "always");
+    const token = dataHubJwt();
+    await writeRepositoryFile(root, "src/colored-history.txt", `${token}\n`);
+    const secretCommit = await commitAll(root, "test: add colored historical fixture");
+    await writeRepositoryFile(root, "src/colored-history.txt", "removed\n");
+    await commitAll(root, "test: remove colored historical fixture");
 
-  await expect(scanRepositorySecrets(root)).resolves.toEqual([]);
-  const findings = await scanRepositorySecrets(root, { history: true });
-  expect(findings).toContain(`history:${secretCommit}:datahub-jwt`);
-  expect(findings.join("\n")).not.toContain(token);
+    await expect(scanRepositorySecrets(root)).resolves.toEqual([]);
+    const findings = await scanRepositorySecrets(root, { history: true });
+    expect(findings).toContain(`history:${secretCommit}:datahub-jwt`);
+    expect(findings.join("\n")).not.toContain(token);
 
-  const result = spawnScanner(root, ["--history"]);
-  expect(result.status).toBe(1);
-  expect(result.stderr).toContain(`history:${secretCommit}:datahub-jwt`);
-  expect(result.stderr).not.toContain(token);
-  expect(result.stderr).not.toContain(root);
-}, 10_000);
+    const result = spawnScanner(root, ["--history"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`history:${secretCommit}:datahub-jwt`);
+    expect(result.stderr).not.toContain(token);
+    expect(result.stderr).not.toContain(root);
+  },
+  GIT_HEAVY_TEST_TIMEOUT_MS,
+);
 
 it("allows only empty values, placeholders, commands, and documentation sentinels", async () => {
   const root = await createRepository();
