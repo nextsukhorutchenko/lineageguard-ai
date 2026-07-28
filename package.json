@@ -17,7 +17,7 @@
     "example:agent": "tsx scripts/generate-agent-example.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings 0",
     "prepare:pr-impact": "tsx scripts/prepare-pr-impact.ts",
     "render:check": "tsx scripts/validate-render-blueprint.ts",
     "security:scan": "tsx scripts/scan-repository-secrets.ts",
