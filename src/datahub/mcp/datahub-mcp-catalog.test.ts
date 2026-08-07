@@ -2437,7 +2437,7 @@ describe("dataHubMcpServerParameters", () => {
     expect(recordDeadlineEvent).not.toHaveBeenCalled();
   });
 
-  it("pins DataHub MCP 0.6.0 to stdio with only the required read-only environment", () => {
+  it("pins DataHub MCP 0.6.0 to stdio with offline, read-only startup", () => {
     const config = loadRuntimeConfig({
       DATAHUB_GMS_URL: "http://localhost:8080",
       DATAHUB_GMS_TOKEN: "local-test-token",
@@ -2449,6 +2449,7 @@ describe("dataHubMcpServerParameters", () => {
       command: resolve("custom-uvx"),
       args: ["mcp-server-datahub@0.6.0", "--transport", "stdio"],
       env: {
+        UV_OFFLINE: "1",
         DATAHUB_GMS_URL: "http://localhost:8080",
         DATAHUB_GMS_TOKEN: "local-test-token",
         TOOLS_IS_MUTATION_ENABLED: "false",

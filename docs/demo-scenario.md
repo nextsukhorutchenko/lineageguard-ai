@@ -28,8 +28,29 @@ uv venv --seed --python 3.11 .venv
 .\.venv\Scripts\datahub.exe version
 $env:PYTHONUTF8 = "1"
 .\.venv\Scripts\datahub.exe docker quickstart --version v1.6.0 --pull-images
+```
+
+Quickstart downloads a compose file with Metadata Service Authentication disabled. Preserve a
+local authenticated copy because a later plain `docker quickstart` run replaces the downloaded
+file:
+
+```powershell
+$quickstartDir = Join-Path $env:USERPROFILE ".datahub\quickstart"
+$defaultCompose = Join-Path $quickstartDir "docker-compose.yml"
+$authCompose = Join-Path $quickstartDir "docker-compose-auth.yml"
+if (-not (Test-Path -LiteralPath $authCompose)) {
+  Copy-Item -LiteralPath $defaultCompose -Destination $authCompose
+}
+```
+
+In `docker-compose-auth.yml`, set `METADATA_SERVICE_AUTH_ENABLED: 'true'` under
+`datahub-gms-quickstart` and add the same environment entry under `frontend-quickstart`. Then always
+launch this local profile through the saved file:
+
+```powershell
+.\.venv\Scripts\datahub.exe docker quickstart --version v1.6.0 -f $authCompose --no-pull-images
 Invoke-RestMethod http://localhost:8080/health
-.\.venv\Scripts\datahub.exe init --username datahub --password datahub
+.\.venv\Scripts\datahub.exe init --username datahub --password datahub --force
 ```
 
 ## Load the Official Datapack on Windows
@@ -71,6 +92,10 @@ if ($LASTEXITCODE -ne 0) { throw "Pinned MCP prewarm failed." }
 pnpm test:integration
 pnpm tsx scripts/capture-datahub-fixtures.ts
 ```
+
+The prewarm is mandatory. LineageGuard launches that cached pinned package with `UV_OFFLINE=1`, so
+the MCP handshake does not depend on registry latency and remains inside the 15-second connection
+deadline.
 
 The capture command prints a repository-relative path beneath `tmp/datahub-fixture-captures/capture-*`. It never overwrites the committed replay fixtures. A complete candidate contains these five canonical strict `{ items, completeness }` fixtures plus an empty `.complete` marker created last:
 

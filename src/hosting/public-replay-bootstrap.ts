@@ -164,7 +164,11 @@ function buildChildEnvironment(
   port: number,
   runsRoot: string,
 ): NodeJS.ProcessEnv {
-  const childEnvironment: NodeJS.ProcessEnv = { NODE_ENV: "production" };
+  const childEnvironment: NodeJS.ProcessEnv = {
+    NODE_ENV: "production",
+    OPENAI_API_KEY: "",
+    DATAHUB_GMS_TOKEN: "",
+  };
   for (const key of CHILD_ENVIRONMENT_ALLOWLIST) {
     const value = environment[key];
     if (value !== undefined) childEnvironment[key] = value;
