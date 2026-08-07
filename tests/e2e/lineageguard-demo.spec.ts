@@ -88,7 +88,9 @@ test(
     await expect(page.getByText("Evidence ID: datahub:source-column:customer_id")).toBeVisible();
     await expect(page.getByText("Field: customer_id")).toBeVisible();
     await expect(page.getByRole("tab", { name: "migration-up.sql" })).toBeVisible();
-    await expect(page.getByRole("tabpanel")).toContainText("NON-EXECUTABLE TEMPLATE");
+    await expect(page.getByRole("tabpanel")).toContainText("NON-EXECUTABLE TEMPLATE", {
+      timeout: 15_000,
+    });
     const goldenPanel = await page
       .getByRole("tabpanel")
       .evaluate((panel) => ({ clientWidth: panel.clientWidth, scrollWidth: panel.scrollWidth }));

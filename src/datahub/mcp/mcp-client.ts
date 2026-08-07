@@ -24,6 +24,7 @@ export function dataHubMcpServerParameters(config: RuntimeConfig): StdioServerPa
     command: config.uvxPath,
     args: ["mcp-server-datahub@0.6.0", "--transport", "stdio"],
     env: {
+      UV_OFFLINE: "1",
       DATAHUB_GMS_URL: config.datahubGmsUrl,
       DATAHUB_GMS_TOKEN: config.datahubGmsToken,
       TOOLS_IS_MUTATION_ENABLED: "false",

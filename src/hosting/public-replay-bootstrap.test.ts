@@ -255,6 +255,8 @@ describe("preparePublicReplayEnvironment", () => {
     expect(prepared.childEnvironment).toEqual({
       PATH: "approved-path",
       NODE_ENV: "production",
+      OPENAI_API_KEY: "",
+      DATAHUB_GMS_TOKEN: "",
       PORT: "3000",
       LINEAGEGUARD_DEMO_MODE: "REPLAY",
       LINEAGEGUARD_DEPLOYMENT_PROFILE: "PUBLIC_REPLAY",

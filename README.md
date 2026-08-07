@@ -79,8 +79,28 @@ uv venv --seed --python 3.11 .venv
 .\.venv\Scripts\datahub.exe version
 $env:PYTHONUTF8 = "1"
 .\.venv\Scripts\datahub.exe docker quickstart --version v1.6.0 --pull-images
+```
+
+Quickstart downloads a compose file with Metadata Service Authentication disabled. Keep a durable
+local copy because a later plain `docker quickstart` run replaces the downloaded file:
+
+```powershell
+$quickstartDir = Join-Path $env:USERPROFILE ".datahub\quickstart"
+$defaultCompose = Join-Path $quickstartDir "docker-compose.yml"
+$authCompose = Join-Path $quickstartDir "docker-compose-auth.yml"
+if (-not (Test-Path -LiteralPath $authCompose)) {
+  Copy-Item -LiteralPath $defaultCompose -Destination $authCompose
+}
+```
+
+In `docker-compose-auth.yml`, set `METADATA_SERVICE_AUTH_ENABLED: 'true'` under
+`datahub-gms-quickstart` and add the same environment entry under `frontend-quickstart`. Then always
+launch this local profile through the saved file:
+
+```powershell
+.\.venv\Scripts\datahub.exe docker quickstart --version v1.6.0 -f $authCompose --no-pull-images
 Invoke-RestMethod http://localhost:8080/health
-.\.venv\Scripts\datahub.exe init --username datahub --password datahub
+.\.venv\Scripts\datahub.exe init --username datahub --password datahub --force
 ```
 
 The pinned Windows CLI cannot ingest this datapack through its local-file loader. Load it through an ephemeral Python 3.11 container instead. This command mounts the user-level DataHub authentication file read-only; it does not mount the repository, backup, Docker socket, or package cache.
@@ -112,6 +132,10 @@ $env:DATAHUB_GMS_URL = "http://localhost:8080"
 $env:DATAHUB_GMS_TOKEN = & .\.venv\Scripts\python.exe -c "from pathlib import Path; import yaml; config=yaml.safe_load(Path(r'$env:USERPROFILE\.datahubenv').read_text(encoding='utf-8')); find=lambda value: next((found for key,item in value.items() for found in ([item] if key.lower()=='token' and isinstance(item,str) else [find(item)] if isinstance(item,dict) else [] ) if found), None); token=find(config); assert token and isinstance(token,str); print(token)"
 $env:DATAHUB_MCP_UVX_PATH = (Get-Command uvx -ErrorAction Stop).Source
 ```
+
+Prewarm `mcp-server-datahub@0.6.0` before starting live mode. LineageGuard then launches the same
+pinned package with `UV_OFFLINE=1`, so runtime startup does not depend on registry latency and still
+remains inside the 15-second MCP connection deadline.
 
 Never commit `.env`, `.datahubenv`, or `DATAHUB_GMS_TOKEN`. Remove the shell-local values when finished:
 

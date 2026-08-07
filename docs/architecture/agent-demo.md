@@ -42,6 +42,10 @@ The current DataHub MCP guide is deployment, authentication, and troubleshooting
 
 The guide's `spawn uvx ENOENT` remedy is an absolute `uvx` path. On Windows, LineageGuard AI locates that path with `Get-Command uvx` and supplies it through its own `DATAHUB_MCP_UVX_PATH` configuration.
 
+The operator prewarms the pinned package before live mode. The application then supplies
+`UV_OFFLINE=1` to the allowlisted MCP subprocess environment so registry latency cannot consume the
+15-second connection deadline; a missing cache entry fails closed as `MCP_UNAVAILABLE`.
+
 A service account's Default View scopes MCP searches. The live record must identify the intended account and search-visibility scope when available; a changed view invalidates comparison with certified search evidence. Effects on schema, lineage, or entity reads remain unclaimed until the pinned live contract test establishes them. Never disable the view or bypass DataHub authorization to recover an expected result.
 
 ## Trust Boundaries
